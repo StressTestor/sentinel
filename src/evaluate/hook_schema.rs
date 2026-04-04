@@ -13,7 +13,7 @@ pub struct HookInput {
 
     // capture everything else for forward compatibility
     #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub _extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl HookInput {

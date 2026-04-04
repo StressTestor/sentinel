@@ -1,5 +1,9 @@
 # sentinel
 
+[![CI](https://github.com/StressTestor/sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/StressTestor/sentinel/actions/workflows/ci.yml)
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](https://github.com/StressTestor/sentinel)
+
 runtime defense for CLI AI agents. intercepts tool calls before execution and enforces security policy.
 
 ![sentinel blocking credential exfiltration, rm -rf, curl|sh, and AWS keys](demo.gif)

@@ -6,8 +6,6 @@ use thiserror::Error;
 pub enum SandboxError {
     #[error("docker is not available: {0}")]
     DockerUnavailable(String),
-    #[error("no sandbox backend available. install docker or use --sandbox degraded")]
-    NoBackendAvailable,
     #[error("sandbox execution failed: {0}")]
     ExecutionError(String),
 }

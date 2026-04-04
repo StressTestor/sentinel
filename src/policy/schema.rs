@@ -37,7 +37,7 @@ struct AllowWrapper {
 }
 
 impl PolicyConfig {
-    /// construct programmatically (for tests and from_config)
+    #[cfg(test)]
     pub fn new(
         policy: PolicySettings,
         deny_paths: Vec<DenyPathRule>,
@@ -115,6 +115,7 @@ pub struct AllowPathRule {
 }
 
 /// parse a policy TOML string into a finalized PolicyConfig
+#[cfg(test)]
 pub fn parse_policy(toml_content: &str) -> Result<PolicyConfig, String> {
     let config: PolicyConfig = toml::from_str(toml_content)
         .map_err(|e| format!("policy parse error: {e}"))?;

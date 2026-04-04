@@ -1,7 +1,6 @@
-/// Tier 3: LLM classifier for ambiguous inputs.
-/// opt-in only. uses local Ollama or cloud API.
-/// this is a stub for Phase 2 — the interface is defined
-/// but the implementation is deferred until Tiers 1+2 are validated.
+// Tier 3: LLM classifier for ambiguous inputs.
+// opt-in only. uses local Ollama or cloud API.
+// stub — interface defined, implementation deferred until Tiers 1+2 are validated.
 
 pub struct LlmClassifier {
     _provider: ClassifierProvider,
