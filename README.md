@@ -2,6 +2,8 @@
 
 runtime defense for CLI AI agents. intercepts tool calls before execution and enforces security policy.
 
+![sentinel blocking credential exfiltration, rm -rf, curl|sh, and AWS keys](demo.gif)
+
 ## the problem
 
 CLI agents like Claude Code and Codex have file system access, shell execution, and code modification capabilities. prompt injection can make them exfiltrate credentials, delete files, or modify production configs. the model-level safety layer is provably insufficient: DeepSeek R1 scored 0/10 on harmful refusals in adversarial evaluation.
