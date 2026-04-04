@@ -8,8 +8,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum PolicyError {
-    #[error("policy file not found: {0}")]
-    FileNotFound(String),
     #[error("failed to read policy: {0}")]
     ReadError(String),
     #[error("invalid policy: {0}")]
@@ -64,6 +62,7 @@ impl PolicyEngine {
         Ok(Self { config: config.finalize() })
     }
 
+    #[cfg(test)]
     pub fn from_config(config: PolicyConfig) -> Self {
         Self { config }
     }
