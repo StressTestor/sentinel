@@ -61,7 +61,7 @@ impl PolicyEngine {
             .map_err(|e| PolicyError::ReadError(e.to_string()))?;
         let config: PolicyConfig = toml::from_str(&content)
             .map_err(|e| PolicyError::ParseError(format!("{e}")))?;
-        Ok(Self { config })
+        Ok(Self { config: config.finalize() })
     }
 
     pub fn from_config(config: PolicyConfig) -> Self {
