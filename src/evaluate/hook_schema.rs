@@ -72,11 +72,20 @@ impl HookInput {
 /// looks for arguments that look like file paths.
 fn extract_paths_from_command(cmd: &str) -> Vec<String> {
     let mut paths = Vec::new();
-    for token in cmd.split_whitespace() {
+    for raw in cmd.split_whitespace() {
         // skip flags
-        if token.starts_with('-') {
+        if raw.starts_with('-') {
             continue;
         }
+        // strip common prefixes: curl's -d @file, shell redirection quotes, trailing punctuation
+        let token = raw
+            .trim_start_matches('@')
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .trim_start_matches('\'')
+            .trim_end_matches('\'')
+            .trim_end_matches(',')
+            .trim_end_matches(';');
         // looks like a path if it contains / or ~ or .
         if token.contains('/') || token.starts_with('~') || token.starts_with('.') {
             paths.push(token.to_string());

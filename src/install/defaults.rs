@@ -52,6 +52,21 @@ action = "block"
 reason = "GitHub CLI credential access"
 
 [[deny.paths]]
+pattern = "~/.netrc"
+action = "block"
+reason = "netrc credential file"
+
+[[deny.paths]]
+pattern = "/etc/passwd"
+action = "block"
+reason = "system password file"
+
+[[deny.paths]]
+pattern = "/etc/shadow"
+action = "block"
+reason = "system shadow password file"
+
+[[deny.paths]]
 pattern = "*/.env"
 action = "warn"
 reason = "environment file may contain secrets"
@@ -62,9 +77,14 @@ action = "warn"
 reason = "environment file may contain secrets"
 
 [[deny.commands]]
-pattern = 'rm\s+-rf\s+/.*'
+pattern = 'rm\s+-rf\s+/(\s|$|[^~])'
 action = "block"
 reason = "recursive root deletion"
+
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+~/\.(ssh|aws|gnupg|config|netrc)'
+action = "block"
+reason = "recursive deletion of credential directory"
 
 [[deny.commands]]
 pattern = 'curl\s+.*\|\s*.*sh'
@@ -75,6 +95,26 @@ reason = "pipe to shell execution"
 pattern = 'wget\s+.*\|\s*.*sh'
 action = "block"
 reason = "pipe to shell execution"
+
+[[deny.commands]]
+pattern = 'curl\s+.*@~?/?\.?(ssh|aws|gnupg|netrc|config)'
+action = "block"
+reason = "curl exfiltration of credential file"
+
+[[deny.commands]]
+pattern = 'curl\s+.*@/etc/(passwd|shadow)'
+action = "block"
+reason = "curl exfiltration of system file"
+
+[[deny.commands]]
+pattern = 'env\s*\|\s*grep\s+-i?\s*(key|secret|token|pass|auth)'
+action = "block"
+reason = "environment variable exfiltration"
+
+[[deny.commands]]
+pattern = 'find\s+/\s.*-name.*(credentials|id_rsa|\.pem|\.key).*'
+action = "block"
+reason = "filesystem scan for credential files"
 
 [[deny.commands]]
 pattern = 'chmod\s+777\s+.*'
