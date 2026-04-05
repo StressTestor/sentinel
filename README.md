@@ -8,6 +8,21 @@ runtime defense for CLI AI agents. intercepts tool calls before execution and en
 
 ![sentinel blocking credential exfiltration, rm -rf, curl|sh, and AWS keys](demo.gif)
 
+## live demo
+
+there's a single HTML page at [`docs/target.html`](docs/target.html) styled to look like normal "CloudSync" tool documentation. every section of that page is poisoned with a different prompt injection: HTML comments, white-on-white text, zero-width Unicode, `display:none` divs, HTML entity encoding, link title attributes, tiny-font spans, fake "agent instruction" blockquotes. 20+ attack payloads total.
+
+`docs/run-attacks.sh` replays every injection against `sentinel evaluate`:
+
+```bash
+./target/release/sentinel install --enforce
+SENTINEL=./target/release/sentinel ./docs/run-attacks.sh
+```
+
+![20 attacks, 20 blocks](docs/live-demo.gif)
+
+20/20 attacks blocked at the hook layer, before any tool ran. full write-up and attack matrix at [`docs/index.html`](docs/index.html) (or [stresstestor.github.io/sentinel](https://stresstestor.github.io/sentinel/)).
+
 ## the problem
 
 CLI agents like Claude Code and Codex have file system access, shell execution, and code modification capabilities. prompt injection can make them exfiltrate credentials, delete files, or modify production configs. the model-level safety layer is provably insufficient: DeepSeek R1 scored 0/10 on harmful refusals in adversarial evaluation.
