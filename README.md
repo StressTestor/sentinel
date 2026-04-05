@@ -48,10 +48,12 @@ you type a prompt
 ## install
 
 ```bash
-cargo install sentinel
+cargo install sentinel-guard
 sentinel install          # audit mode (logs only, doesn't block)
 sentinel install --enforce  # enforcement mode (blocks violations)
 ```
+
+(the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
 
 that's it. sentinel writes a PreToolUse hook into `~/.claude/settings.json` and a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, secret patterns).
 

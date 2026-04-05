@@ -1,10 +1,27 @@
 [package]
-name = "sentinel"
+name = "sentinel-guard"
 version = "0.1.0"
 edition = "2021"
-description = "runtime defense for CLI AI agents"
+description = "runtime defense for CLI AI agents — intercepts tool calls before execution and enforces security policy"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/StressTestor/sentinel"
+homepage = "https://stresstestor.github.io/sentinel/"
+documentation = "https://github.com/StressTestor/sentinel#readme"
+readme = "README.md"
+keywords = ["security", "llm", "agent", "prompt-injection", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+  "docs/live-demo.cast",
+  "docs/live-demo.gif",
+  "docs/*.sh",
+  "demo.gif",
+  ".github/",
+  "tests/fixtures/",
+]
+
+[[bin]]
+name = "sentinel"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
