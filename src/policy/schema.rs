@@ -107,6 +107,24 @@ impl Default for HeuristicSettings {
     }
 }
 
+impl HeuristicSettings {
+    /// Return a sanitized copy where any invalid fields are replaced with defaults.
+    /// Currently: window_size=0 is clamped to the default (50) since a zero-size
+    /// ring buffer makes no sense and would panic in the push path.
+    #[allow(dead_code)] // called by Task 6 (evaluate integration)
+    pub fn sanitized(&self) -> Self {
+        let window_size = if self.window_size == 0 {
+            default_window_size()
+        } else {
+            self.window_size
+        };
+        Self {
+            sensitivity: self.sensitivity.clone(),
+            window_size,
+        }
+    }
+}
+
 fn default_sensitivity() -> String { "medium".into() }
 fn default_window_size() -> usize { 50 }
 
@@ -220,6 +238,25 @@ window_size = 100
         let config = parse_policy(toml).unwrap();
         assert_eq!(config.heuristic.sensitivity, "high");
         assert_eq!(config.heuristic.window_size, 100);
+    }
+
+    #[test]
+    fn sanitized_clamps_zero_window_size() {
+        let s = HeuristicSettings {
+            sensitivity: "medium".into(),
+            window_size: 0,
+        };
+        assert_eq!(s.sanitized().window_size, 50);
+    }
+
+    #[test]
+    fn sanitized_preserves_valid_window_size() {
+        let s = HeuristicSettings {
+            sensitivity: "high".into(),
+            window_size: 100,
+        };
+        assert_eq!(s.sanitized().window_size, 100);
+        assert_eq!(s.sanitized().sensitivity, "high");
     }
 
     #[test]

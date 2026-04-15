@@ -1,4 +1,7 @@
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_CAPACITY: usize = 50;
@@ -67,21 +70,69 @@ impl ContextWindow {
         &self.turns
     }
 
-    /// persist to disk
+    /// persist to disk. uses an exclusive advisory lock on a sidecar
+    /// lockfile, then writes to a temp file and atomically renames into
+    /// place. safe under concurrent `sentinel evaluate` processes.
     pub fn save(&self) {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match bincode::serialize(self) {
-            Ok(data) => {
-                if let Err(e) = std::fs::write(&self.path, data) {
-                    tracing::warn!("failed to save context: {e}");
-                }
-            }
+
+        let lock_path = self.lock_path();
+        let lock_file = match OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+        {
+            Ok(f) => f,
             Err(e) => {
-                tracing::warn!("failed to serialize context: {e}");
+                tracing::warn!("failed to open lock file {}: {e}", lock_path.display());
+                return;
             }
+        };
+
+        if let Err(e) = lock_file.lock_exclusive() {
+            tracing::warn!("failed to acquire lock on {}: {e}", lock_path.display());
+            return;
         }
+
+        let result = self.write_atomic();
+
+        // unlock happens implicitly when lock_file is dropped, but be explicit
+        let _ = FileExt::unlock(&lock_file);
+
+        if let Err(e) = result {
+            tracing::warn!("failed to save context: {e}");
+        }
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        let mut p = self.path.clone();
+        let name = p
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("context"));
+        let mut lock_name = name;
+        lock_name.push(".lock");
+        p.set_file_name(lock_name);
+        p
+    }
+
+    fn write_atomic(&self) -> std::io::Result<()> {
+        let data = bincode::serialize(self).map_err(|e| {
+            std::io::Error::other(format!("serialize: {e}"))
+        })?;
+
+        // write to <path>.tmp then rename. rename is atomic on POSIX.
+        let tmp = self.path.with_extension("tmp");
+        {
+            let mut f = File::create(&tmp)?;
+            f.write_all(&data)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, &self.path)?;
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -186,6 +237,43 @@ mod tests {
         }
         assert_eq!(ctx.len(), 3);
         assert_eq!(ctx.recent_turns(), &["turn-2", "turn-3", "turn-4"]);
+    }
+
+    #[test]
+    fn concurrent_writers_do_not_corrupt_file() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = Arc::new(TempDir::new().unwrap());
+        let path = Arc::new(dir.path().join("context.bin"));
+
+        let handles: Vec<_> = (0..4)
+            .map(|worker_id| {
+                let path = Arc::clone(&path);
+                thread::spawn(move || {
+                    for turn in 0..20 {
+                        let mut ctx = ContextWindow::load_or_create(&path);
+                        ctx.push(&format!("w{worker_id}-t{turn}"));
+                        ctx.save();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // the file must be readable (not truncated / not half-written bincode).
+        let ctx = ContextWindow::load_or_create(&path);
+        assert!(!ctx.is_empty(), "ring buffer lost all data under concurrent writes");
+        // and every turn we read back should be a well-formed "wN-tN" string.
+        for t in ctx.recent_turns() {
+            assert!(
+                t.starts_with('w') && t.contains("-t"),
+                "corrupted turn content: {t:?}"
+            );
+        }
     }
 
     #[test]
