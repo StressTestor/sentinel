@@ -1,5 +1,6 @@
 pub mod automata;
 pub mod context;
+pub mod sensitivity;
 
 
 use automata::PatternMatcher;
