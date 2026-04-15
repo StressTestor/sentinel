@@ -39,7 +39,7 @@ struct AllowWrapper {
 }
 
 impl PolicyConfig {
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn new(
         policy: PolicySettings,
         deny_paths: Vec<DenyPathRule>,

@@ -1,16 +1,4 @@
-mod audit;
-mod audit_trail;
-#[allow(dead_code)]
-mod classifier;
-mod cli;
-mod common;
-mod corpus;
-mod evaluate;
-#[allow(dead_code)]
-mod heuristic;
-mod install;
-mod policy;
-mod wrap;
+use sentinel_guard::{audit, cli, evaluate, install, wrap};
 
 use clap::Parser;
 use cli::{Cli, Command};

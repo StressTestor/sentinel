@@ -23,6 +23,10 @@ exclude = [
 name = "sentinel"
 path = "src/main.rs"
 
+[lib]
+name = "sentinel_guard"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

@@ -62,7 +62,7 @@ impl PolicyEngine {
         Ok(Self { config: config.finalize() })
     }
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn from_config(config: PolicyConfig) -> Self {
         Self { config }
     }

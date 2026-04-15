@@ -174,8 +174,8 @@ fn resolve_context_path() -> PathBuf {
 /// path DOES save after merge; persistence is covered by ring-buffer
 /// round-trip tests in `src/heuristic/context.rs` and by the benchmark
 /// harness landing in Task 7/8.
-#[cfg(test)]
-pub(crate) fn evaluate_for_test(
+#[doc(hidden)]
+pub fn evaluate_for_test(
     hook_input: &hook_schema::HookInput,
     engine: &crate::policy::PolicyEngine,
     analyzer: &mut crate::heuristic::HeuristicAnalyzer,
