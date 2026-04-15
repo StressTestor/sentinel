@@ -13,7 +13,7 @@ pub enum Sensitivity {
 impl Sensitivity {
     /// confidence threshold (0.0-1.0). a HeuristicResult with confidence
     /// strictly greater than this triggers escalation.
-    pub fn threshold(&self) -> f64 {
+    pub const fn threshold(&self) -> f64 {
         match self {
             Sensitivity::Low => 0.7,
             Sensitivity::Medium => 0.3,
@@ -71,5 +71,6 @@ mod tests {
     fn from_str_rejects_unknown() {
         let err = "paranoid".parse::<Sensitivity>().unwrap_err();
         assert!(err.contains("paranoid"));
+        assert!(err.contains("low/medium/high"));
     }
 }
