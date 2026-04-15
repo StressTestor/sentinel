@@ -75,6 +75,10 @@ impl PolicyEngine {
         self.config.policy.mode == "audit"
     }
 
+    pub fn heuristic_settings(&self) -> &crate::policy::schema::HeuristicSettings {
+        &self.config.heuristic
+    }
+
     /// evaluate a tool call against the policy.
     /// deny rules are checked first. if any match, that action wins.
     /// if no deny matches and an allow list exists, paths outside
