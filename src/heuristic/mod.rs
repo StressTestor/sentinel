@@ -241,4 +241,58 @@ mod tests {
         assert!(rule.contains("tier2"));
         assert!(rule.contains("system prompt"));
     }
+
+    #[test]
+    fn context_drift_fires_on_sensitive_after_benign_turns() {
+        let dir = TempDir::new().unwrap();
+        let mut analyzer =
+            HeuristicAnalyzer::new(&tmp_path(&dir, "ctx.bin"), 50, Sensitivity::Medium);
+
+        // two benign turns to establish "prior benign" state
+        analyzer.analyze("cargo test --lib");
+        analyzer.analyze("git commit -m 'fix'");
+
+        // third turn references credentials -> drift flag fires
+        let result = analyzer.analyze("cat ~/.aws/credentials");
+
+        assert!(
+            result
+                .context_flags
+                .iter()
+                .any(|f| f.contains("behavioral_drift")),
+            "expected behavioral_drift flag; got context_flags={:?}",
+            result.context_flags
+        );
+    }
+
+    #[test]
+    fn context_drift_does_not_fire_without_prior_benign() {
+        // single-turn analysis - drift checker requires at least 2 turns
+        let dir = TempDir::new().unwrap();
+        let mut analyzer =
+            HeuristicAnalyzer::new(&tmp_path(&dir, "ctx.bin"), 50, Sensitivity::Medium);
+
+        let result = analyzer.analyze("cat ~/.aws/credentials");
+
+        assert!(
+            result.context_flags.is_empty(),
+            "expected no drift flag on single turn; got {:?}",
+            result.context_flags
+        );
+    }
+
+    #[test]
+    fn merge_includes_both_patterns_and_context_flags() {
+        let dir = TempDir::new().unwrap();
+        let analyzer = HeuristicAnalyzer::new(&tmp_path(&dir, "ctx.bin"), 50, Sensitivity::Medium);
+        let t2 = HeuristicResult {
+            confidence: 0.6,
+            matched_patterns: vec!["system prompt".into()],
+            context_flags: vec!["behavioral_drift: test".into()],
+        };
+        let merged = analyzer.merge_with_policy(t1_allow(), &t2);
+        let rule = merged.matched_rule.unwrap();
+        assert!(rule.contains("system prompt"), "rule missing pattern: {rule}");
+        assert!(rule.contains("behavioral_drift"), "rule missing flag: {rule}");
+    }
 }

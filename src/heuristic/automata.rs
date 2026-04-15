@@ -16,10 +16,18 @@ impl PatternMatcher {
             };
         }
 
-        let ac = AhoCorasick::builder()
+        let ac = match AhoCorasick::builder()
             .ascii_case_insensitive(true)
             .build(patterns)
-            .ok();
+        {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::warn!(
+                    "aho-corasick build failed, pattern matching disabled: {e}"
+                );
+                None
+            }
+        };
 
         Self {
             automaton: ac,

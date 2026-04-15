@@ -73,6 +73,11 @@ impl ContextWindow {
     /// persist to disk. uses an exclusive advisory lock on a sidecar
     /// lockfile, then writes to a temp file and atomically renames into
     /// place. safe under concurrent `sentinel evaluate` processes.
+    ///
+    /// NOTE: turn loss is possible under concurrent writers because load
+    /// happens outside the lock (process A loads, process B loads, A writes,
+    /// B writes overwrites A's turn). this is acceptable for a best-effort
+    /// heuristic input -- the ring buffer is not a source of truth.
     pub fn save(&self) {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);

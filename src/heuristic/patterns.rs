@@ -5,6 +5,11 @@
 //!
 //! extending this list is a data-curation task, not a code change. before
 //! adding patterns, measure false-positive impact against the benign corpus.
+//!
+//! known limitation: matching is ASCII-case-insensitive only. cyrillic
+//! homoglyphs (e.g., "а" U+0430 substituted for latin "a" U+0061) bypass
+//! every pattern. this is inherent to string-match heuristics. unicode
+//! normalization and homoglyph-aware matching are tier 3's job.
 
 pub const DEFAULT_PATTERNS: &[&str] = &[
     // instruction override - direct

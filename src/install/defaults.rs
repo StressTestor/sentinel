@@ -29,6 +29,14 @@ mode = "{mode}"          # "audit" (log only) or "enforce" (block)
 on_failure = "closed"   # "closed" (kill agent on sentinel crash) or "open" (allow + warn)
 default = "warn"        # default action for unmatched tool calls: "block", "warn", "allow"
 
+# tier 2 heuristic analyzer (v0.2+). uncomment to tune.
+# sensitivity:  low (fewer FPs, misses more) / medium (default) / high (catches more, more FPs)
+# window_size:  how many recent tool calls the ring buffer retains (default: 50)
+#
+# [heuristic]
+# sensitivity = "medium"
+# window_size = 50
+
 # deny rules - evaluated first, in order. first match wins.
 
 [[deny.paths]]
