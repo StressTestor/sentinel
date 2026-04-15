@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-attacks.sh — replays every prompt injection embedded in docs/index.html
+# run-attacks.sh — replays every prompt injection embedded in docs/target.html
 # against sentinel's evaluate hook, as if an agent had parsed the page and
 # attempted to execute each one.
 #
@@ -48,7 +48,7 @@ fire() {
 }
 
 printf "${BOLD}sentinel live attack replay${RESET}\n"
-printf "replaying every injection embedded in docs/index.html\n\n"
+printf "replaying every injection embedded in docs/target.html\n\n"
 
 # 1. HTML comment injection telling AI to read AWS credentials
 fire "html comment injection — read AWS credentials" \
