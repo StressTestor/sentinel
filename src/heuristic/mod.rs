@@ -1,5 +1,6 @@
 pub mod automata;
 pub mod context;
+pub mod patterns;
 pub mod sensitivity;
 
 
