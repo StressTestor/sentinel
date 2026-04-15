@@ -19,7 +19,7 @@ pub trait Sandbox: Send + Sync {
 }
 
 /// degraded mode: runs commands directly with a warning.
-/// no actual isolation — only for testing when no sandbox is available.
+/// no actual isolation - only for testing when no sandbox is available.
 pub struct DegradedSandbox;
 
 impl Sandbox for DegradedSandbox {
@@ -28,7 +28,7 @@ impl Sandbox for DegradedSandbox {
     }
 
     fn exec(&self, command: &str, _env: &HashMap<String, String>) -> Result<String, SandboxError> {
-        tracing::warn!("running in degraded mode — no sandbox isolation");
+        tracing::warn!("running in degraded mode - no sandbox isolation");
         let output = std::process::Command::new("sh")
             .args(["-c", command])
             .output()

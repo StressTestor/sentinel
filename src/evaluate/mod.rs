@@ -168,6 +168,12 @@ fn resolve_context_path() -> PathBuf {
 /// a constructed PolicyEngine + HeuristicAnalyzer, returns the final
 /// merged decision. lets integration tests exercise the tier 1 + tier 2
 /// pipeline without stdin/stdout or file-based policy loading.
+///
+/// NOTE: intentionally does not call `analyzer.save()`, so tests stay
+/// isolated from filesystem state between cases. the production `run()`
+/// path DOES save after merge; persistence is covered by ring-buffer
+/// round-trip tests in `src/heuristic/context.rs` and by the benchmark
+/// harness landing in Task 7/8.
 #[cfg(test)]
 pub(crate) fn evaluate_for_test(
     hook_input: &hook_schema::HookInput,
@@ -224,6 +230,29 @@ mod wiring_tests {
         HeuristicAnalyzer::new(&dir.path().join("ctx.bin"), 50, Sensitivity::Medium)
     }
 
+    fn build_engine_with_bad_heuristic() -> PolicyEngine {
+        // exercises the sanitize + parse fallback chain that run() uses.
+        // window_size=0 would panic in the push path without sanitize();
+        // sensitivity="bananas" would fail to parse without the Medium fallback.
+        use crate::policy::schema::HeuristicSettings;
+        let mut config = PolicyConfig::new(
+            PolicySettings {
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "warn".into(),
+            },
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        config.heuristic = HeuristicSettings {
+            sensitivity: "bananas".into(),
+            window_size: 0,
+        };
+        PolicyEngine::from_config(config)
+    }
+
     #[test]
     fn tier1_block_short_circuits_tier2() {
         let dir = TempDir::new().unwrap();
@@ -241,6 +270,10 @@ mod wiring_tests {
 
     #[test]
     fn benign_bash_command_allows_through() {
+        // NOTE: build_engine() sets default = "warn" BUT passes an empty allow_paths.
+        // The engine's default action only fires when allow_paths is non-empty AND
+        // a path misses it. With no allow list, tier 1 falls through to Allow.
+        // This test covers: tier 1 Allow + tier 2 no-match = final Allow.
         let dir = TempDir::new().unwrap();
         let engine = build_engine();
         let mut analyzer = build_analyzer(&dir);
@@ -279,5 +312,27 @@ mod wiring_tests {
 
         // tier 1 Allow (path not in deny list), tier 2 pattern hit -> Warn
         assert_eq!(decision.action, Action::Warn);
+    }
+
+    #[test]
+    fn malformed_config_falls_back_cleanly() {
+        let dir = TempDir::new().unwrap();
+        let engine = build_engine_with_bad_heuristic();
+        // simulate what run() does: sanitize, parse with fallback, construct
+        let h = engine.heuristic_settings().sanitized();
+        assert!(h.window_size > 0, "sanitize should clamp 0 to default");
+        let sens: Sensitivity = h
+            .sensitivity
+            .parse::<Sensitivity>()
+            .unwrap_or(Sensitivity::Medium);
+        assert_eq!(sens, Sensitivity::Medium, "bananas should fall back to Medium");
+
+        let mut analyzer = HeuristicAnalyzer::new(&dir.path().join("ctx.bin"), h.window_size, sens);
+
+        // and verify the full pipeline still produces a sane decision
+        let json = r#"{"tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;
+        let hi: hook_schema::HookInput = serde_json::from_str(json).unwrap();
+        let decision = evaluate_for_test(&hi, &engine, &mut analyzer);
+        assert_eq!(decision.action, Action::Allow);
     }
 }

@@ -139,7 +139,7 @@ severity = "low"
 [expected_vulnerable_behavior]
 action = "none"
 "#;
-        // no [[steps]] section — serde will fail or we reject empty
+        // no [[steps]] section - serde will fail or we reject empty
         assert!(parse_sequence(toml).is_err());
     }
 

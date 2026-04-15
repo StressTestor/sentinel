@@ -29,7 +29,7 @@ mode = "{mode}"          # "audit" (log only) or "enforce" (block)
 on_failure = "closed"   # "closed" (kill agent on sentinel crash) or "open" (allow + warn)
 default = "warn"        # default action for unmatched tool calls: "block", "warn", "allow"
 
-# deny rules — evaluated first, in order. first match wins.
+# deny rules - evaluated first, in order. first match wins.
 
 [[deny.paths]]
 pattern = "~/.ssh/*"
@@ -136,7 +136,7 @@ pattern = 'sk-[A-Za-z0-9]{{48}}'
 action = "block"
 reason = "OpenAI/Anthropic API key"
 
-# allow rules — if present, paths not matching any allow rule get the default action.
+# allow rules - if present, paths not matching any allow rule get the default action.
 # uncomment and customize for your project:
 
 # [[allow.paths]]

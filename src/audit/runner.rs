@@ -35,7 +35,7 @@ fn run_single(seq: &AttackSequence, sandbox: &dyn Sandbox) -> AttackResult {
     // execute attack steps and check for vulnerable behavior.
     // in degraded mode this runs locally; in docker it runs in a container.
     // NOTE: the sandbox.exec() call passes untrusted attack content to the sandbox
-    // intentionally — the whole point is to test whether the agent is vulnerable.
+    // intentionally - the whole point is to test whether the agent is vulnerable.
     // the sandbox provides the isolation boundary.
     let mut evidence = None;
     let mut outcome = AttackOutcome::Defended;

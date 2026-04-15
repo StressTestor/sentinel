@@ -73,11 +73,11 @@ impl HeuristicAnalyzer {
         if !t2.suspicious(self.sensitivity) {
             return t1;
         }
-        let matched_summary = if t2.matched_patterns.is_empty() {
-            t2.context_flags.join(",")
-        } else {
-            t2.matched_patterns.join(",")
-        };
+        // join both signals so SIEM consumers see the full picture.
+        // (prior version dropped context_flags when matched_patterns was non-empty.)
+        let mut parts: Vec<&str> = t2.matched_patterns.iter().map(|s| s.as_str()).collect();
+        parts.extend(t2.context_flags.iter().map(|s| s.as_str()));
+        let matched_summary = parts.join(",");
         let t1_reason = t1.reason.clone().unwrap_or_else(|| "tier1: allow".into());
         let t1_rule = t1
             .matched_rule

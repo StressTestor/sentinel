@@ -121,7 +121,7 @@ impl PolicyEngine {
             }
         }
 
-        // check allow.paths — if allow list exists and path isn't in it, apply default
+        // check allow.paths - if allow list exists and path isn't in it, apply default
         if !self.config.allow_paths.is_empty() {
             for path in &tool_call.paths {
                 let allowed = self
@@ -139,7 +139,7 @@ impl PolicyEngine {
             }
         }
 
-        // no rules matched — allow
+        // no rules matched - allow
         PolicyDecision {
             action: Action::Allow,
             reason: None,

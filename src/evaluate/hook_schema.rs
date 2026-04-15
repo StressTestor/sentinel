@@ -54,7 +54,7 @@ impl HookInput {
                 }
             }
             _ => {
-                // unknown tool — scan all string values for paths
+                // unknown tool - scan all string values for paths
                 extract_all_paths(&self.tool_input, &mut paths);
             }
         }

@@ -37,7 +37,7 @@ async fn main() {
         Command::Evaluate => evaluate::run(),
         Command::Wrap(args) => wrap::run_wrap(&args.agent_command),
         Command::CorpusUpdate => {
-            println!("sentinel corpus update — not yet implemented");
+            println!("sentinel corpus update - not yet implemented");
             println!("for now, manually update ~/.sentinel/corpus/core/");
             Ok(())
         }

@@ -1,5 +1,5 @@
 // generic pty proxy adapter for agents without native hook systems.
-// fallback adapter — Claude Code uses PreToolUse hooks instead.
+// fallback adapter - Claude Code uses PreToolUse hooks instead.
 // implementation deferred until a second agent runtime is prioritized.
 
 pub fn run_wrap(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

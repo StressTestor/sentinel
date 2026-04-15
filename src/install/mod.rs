@@ -33,7 +33,7 @@ pub fn run_install(enforce: bool) -> Result<(), InstallError> {
 
     if !enforce {
         println!();
-        println!("sentinel is in AUDIT mode — logging what would be blocked but not blocking.");
+        println!("sentinel is in AUDIT mode - logging what would be blocked but not blocking.");
         println!("to enable enforcement: sentinel install --enforce");
         println!("or edit ~/.sentinel/policy.toml and set mode = \"enforce\"");
     }
