@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const DEFAULT_CAPACITY: usize = 20;
+const DEFAULT_CAPACITY: usize = 50;
 
 /// file-backed ring buffer for multi-turn context tracking.
 /// persists to disk as bincode so state survives across sentinel evaluate invocations.
@@ -15,22 +15,31 @@ pub struct ContextWindow {
 
 impl ContextWindow {
     pub fn load_or_create(path: &Path) -> Self {
+        Self::load_or_create_with_capacity(path, DEFAULT_CAPACITY)
+    }
+
+    pub fn load_or_create_with_capacity(path: &Path, capacity: usize) -> Self {
         if path.exists() {
             match Self::load_from_file(path) {
                 Ok(mut ctx) => {
                     ctx.path = path.to_path_buf();
+                    // honor caller's capacity even if stored file had a different one
+                    ctx.capacity = capacity;
+                    // trim if the new capacity is smaller than current length
+                    while ctx.turns.len() > capacity {
+                        ctx.turns.remove(0);
+                    }
                     return ctx;
                 }
                 Err(e) => {
                     tracing::warn!("corrupt context file, resetting: {e}");
-                    // fall through to create new
                 }
             }
         }
 
         Self {
-            turns: Vec::with_capacity(DEFAULT_CAPACITY),
-            capacity: DEFAULT_CAPACITY,
+            turns: Vec::with_capacity(capacity),
+            capacity,
             path: path.to_path_buf(),
         }
     }
@@ -76,6 +85,10 @@ impl ContextWindow {
 
     pub fn is_empty(&self) -> bool {
         self.turns.is_empty()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 
@@ -140,5 +153,33 @@ mod tests {
 
         let ctx = ContextWindow::load_or_create(&path);
         assert!(ctx.is_empty()); // should reset gracefully
+    }
+
+    #[test]
+    fn default_capacity_is_50() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("context.bin");
+        let ctx = ContextWindow::load_or_create(&path);
+        assert_eq!(ctx.capacity(), 50);
+    }
+
+    #[test]
+    fn custom_capacity_via_constructor() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("context.bin");
+        let ctx = ContextWindow::load_or_create_with_capacity(&path, 10);
+        assert_eq!(ctx.capacity(), 10);
+    }
+
+    #[test]
+    fn custom_capacity_evicts_at_configured_limit() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("context.bin");
+        let mut ctx = ContextWindow::load_or_create_with_capacity(&path, 3);
+        for i in 0..5 {
+            ctx.push(&format!("turn-{i}"));
+        }
+        assert_eq!(ctx.len(), 3);
+        assert_eq!(ctx.recent_turns(), &["turn-2", "turn-3", "turn-4"]);
     }
 }
