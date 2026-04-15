@@ -22,6 +22,14 @@ FORBIDDEN_PATTERN='reqwest|hyper::|TcpStream|TcpListener|UdpSocket|ureq::|isahc:
 # v0.2: empty. update as later versions add opt-in network features.
 declare -a ALLOWLIST=()
 
+# build grep exclusion flags from the allowlist. --exclude-dir matches
+# basename only, which is fine since our allowlist paths point at unique
+# leaf directories under src/.
+exclude_args=()
+for path in "${ALLOWLIST[@]:-}"; do
+    exclude_args+=(--exclude-dir="$(basename "$path")")
+done
+
 echo "AD-5 lint: scanning $SRC for ambient network calls..."
 
 # use `grep -rE` (POSIX) rather than ripgrep so the lint runs on minimal CI.
@@ -29,6 +37,7 @@ echo "AD-5 lint: scanning $SRC for ambient network calls..."
 matches="$(grep -rEn "$FORBIDDEN_PATTERN" \
     --include='*.rs' \
     --exclude-dir=target \
+    "${exclude_args[@]}" \
     "$SRC" || true)"
 
 if [[ -n "$matches" ]]; then
