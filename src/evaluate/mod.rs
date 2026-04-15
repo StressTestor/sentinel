@@ -24,11 +24,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     io::stdin().read_to_string(&mut input)?;
 
     if input.trim().is_empty() {
-        // empty stdin — pass through (graceful degradation)
+        // empty stdin - pass through (graceful degradation)
         tracing::warn!("empty stdin, allowing tool call");
         print_output(&HookOutput {
             permission_decision: Some("allow".into()),
-            reason: Some("empty input — pass-through".into()),
+            reason: Some("empty input - pass-through".into()),
         });
         return Ok(());
     }
@@ -40,7 +40,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("unknown hook schema: {e}. passing through.");
             print_output(&HookOutput {
                 permission_decision: Some("allow".into()),
-                reason: Some(format!("unknown schema — pass-through: {e}")),
+                reason: Some(format!("unknown schema - pass-through: {e}")),
             });
             return Ok(());
         }

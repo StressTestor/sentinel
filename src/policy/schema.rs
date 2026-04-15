@@ -111,7 +111,6 @@ impl HeuristicSettings {
     /// Return a sanitized copy where any invalid fields are replaced with defaults.
     /// Currently: window_size=0 is clamped to the default (50) since a zero-size
     /// ring buffer makes no sense and would panic in the push path.
-    #[allow(dead_code)] // called by Task 6 (evaluate integration)
     pub fn sanitized(&self) -> Self {
         let window_size = if self.window_size == 0 {
             default_window_size()
