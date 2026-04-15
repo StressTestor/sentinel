@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
     pub policy: PolicySettings,
+    #[serde(default)]
+    pub heuristic: HeuristicSettings,
     #[serde(default, rename = "deny")]
     deny_paths_wrapper: Option<DenyWrapper>,
     #[serde(skip)]
@@ -47,6 +49,7 @@ impl PolicyConfig {
     ) -> Self {
         Self {
             policy,
+            heuristic: HeuristicSettings::default(),
             deny_paths_wrapper: None,
             deny_paths,
             deny_commands,
@@ -86,6 +89,26 @@ pub struct PolicySettings {
 fn default_mode() -> String { "audit".into() }
 fn default_on_failure() -> String { "closed".into() }
 fn default_default() -> String { "warn".into() }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeuristicSettings {
+    #[serde(default = "default_sensitivity")]
+    pub sensitivity: String,
+    #[serde(default = "default_window_size")]
+    pub window_size: usize,
+}
+
+impl Default for HeuristicSettings {
+    fn default() -> Self {
+        Self {
+            sensitivity: default_sensitivity(),
+            window_size: default_window_size(),
+        }
+    }
+}
+
+fn default_sensitivity() -> String { "medium".into() }
+fn default_window_size() -> usize { 50 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyPathRule {
@@ -182,5 +205,31 @@ mode = "audit"
     fn reject_invalid_toml() {
         let result = parse_policy("this is not toml {{{}}}");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_policy_with_heuristic_section() {
+        let toml = r#"
+[policy]
+mode = "enforce"
+
+[heuristic]
+sensitivity = "high"
+window_size = 100
+"#;
+        let config = parse_policy(toml).unwrap();
+        assert_eq!(config.heuristic.sensitivity, "high");
+        assert_eq!(config.heuristic.window_size, 100);
+    }
+
+    #[test]
+    fn heuristic_section_defaults_when_absent() {
+        let toml = r#"
+[policy]
+mode = "audit"
+"#;
+        let config = parse_policy(toml).unwrap();
+        assert_eq!(config.heuristic.sensitivity, "medium");
+        assert_eq!(config.heuristic.window_size, 50);
     }
 }
