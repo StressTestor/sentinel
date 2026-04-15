@@ -18,17 +18,22 @@ impl ContextWindow {
         Self::load_or_create_with_capacity(path, DEFAULT_CAPACITY)
     }
 
+    /// Load the ring buffer from `path`, or create a fresh one.
+    /// `capacity` overrides any capacity stored in the file -- the caller's
+    /// config value always wins. If the loaded buffer has more turns than
+    /// `capacity`, oldest turns are trimmed until it fits.
     pub fn load_or_create_with_capacity(path: &Path, capacity: usize) -> Self {
+        debug_assert!(capacity > 0, "ring buffer capacity must be at least 1");
         if path.exists() {
             match Self::load_from_file(path) {
                 Ok(mut ctx) => {
                     ctx.path = path.to_path_buf();
                     // honor caller's capacity even if stored file had a different one
                     ctx.capacity = capacity;
-                    // trim if the new capacity is smaller than current length
-                    while ctx.turns.len() > capacity {
-                        ctx.turns.remove(0);
-                    }
+                    // trim if the new capacity is smaller than current length;
+                    // drains from the front (oldest-first) in a single memmove.
+                    let excess = ctx.turns.len().saturating_sub(capacity);
+                    ctx.turns.drain(..excess);
                     return ctx;
                 }
                 Err(e) => {
@@ -181,5 +186,27 @@ mod tests {
         }
         assert_eq!(ctx.len(), 3);
         assert_eq!(ctx.recent_turns(), &["turn-2", "turn-3", "turn-4"]);
+    }
+
+    #[test]
+    fn load_with_smaller_capacity_trims_oldest_turns() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("context.bin");
+
+        // write 8 turns at capacity 10
+        {
+            let mut ctx = ContextWindow::load_or_create_with_capacity(&path, 10);
+            for i in 0..8 {
+                ctx.push(&format!("turn-{i}"));
+            }
+            ctx.save();
+        }
+
+        // reload with capacity 5 - should trim oldest 3
+        let ctx = ContextWindow::load_or_create_with_capacity(&path, 5);
+        assert_eq!(ctx.len(), 5);
+        assert_eq!(ctx.capacity(), 5);
+        assert_eq!(ctx.recent_turns()[0], "turn-3"); // oldest survivor
+        assert_eq!(ctx.recent_turns()[4], "turn-7"); // newest
     }
 }
