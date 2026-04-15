@@ -1,1 +1,9 @@
 /target
+
+# macos
+.DS_Store
+
+# promo / launch video assets — local only, not for the repo
+docs/sentinel-demo.gif
+docs/sentinel-demo.mp4
+docs/video-assets/
