@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-04-04
+last updated: 2026-04-15
 
 ## overview
 
@@ -68,6 +68,13 @@ sentinel/
 ├── tests/
 │   └── fixtures/
 │       └── corpus/         test attack sequences (3 TOML files)
+├── docs/                   live attack demo + github pages site
+│   ├── index.html          write-up + attack matrix (published to stresstestor.github.io/sentinel)
+│   ├── target.html         poisoned "CloudSync" docs page with 20+ embedded injections
+│   ├── run-attacks.sh      replays every injection through `sentinel evaluate`
+│   ├── live-demo.cast      asciinema recording of the replay
+│   ├── live-demo.gif       animated capture used in README
+│   └── record-*.sh         demo recording helpers
 └── .github/
     └── workflows/
         └── ci.yml          cargo test + cross-compile
@@ -141,3 +148,10 @@ idempotent: running install twice doesn't duplicate hooks.
 | `sentinel install --enforce` | install with enforcement |
 | `sentinel uninstall` | remove hooks |
 | `sentinel status` | show config + hooks |
+| `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
+
+## publishing
+
+- crate name: `sentinel-guard` (binary is still `sentinel`). `sentinel` was taken on crates.io.
+- installed via `cargo install sentinel-guard`.
+- github pages site served from `docs/index.html` at stresstestor.github.io/sentinel.
