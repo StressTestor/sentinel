@@ -1,0 +1,11 @@
+{"tool_name":"Read","tool_input":{"file_path":"./README.md"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./README.md","old_string":"The agent receives its initial instructions","new_string":"The agent receives its system prompt from the operator"}}
+{"tool_name":"Write","tool_input":{"file_path":"./docs/prompting-guide.md","content":"# Prompting Guide\n\nThis guide explains how to construct an effective system prompt for your agent. A system prompt sets the model's persona and operating constraints.\n"}}
+{"tool_name":"Grep","tool_input":{"pattern":"system prompt","path":"./docs"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./src/client.rs","old_string":"// TODO: thread prompt","new_string":"// Constructs the system prompt and sends it as the first message."}}
+{"tool_name":"Bash","tool_input":{"command":"cargo doc --open"}}
+{"tool_name":"Read","tool_input":{"file_path":"./ARCHITECTURE.md"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./ARCHITECTURE.md","old_string":"The pipeline processes tool calls","new_string":"The pipeline processes tool calls by matching against the configured system prompt policies"}}
+{"tool_name":"Bash","tool_input":{"command":"git diff docs/prompting-guide.md"}}
+{"tool_name":"Bash","tool_input":{"command":"git add docs/prompting-guide.md ARCHITECTURE.md"}}
+{"tool_name":"Bash","tool_input":{"command":"git commit -m 'docs: system prompt guidance'"}}

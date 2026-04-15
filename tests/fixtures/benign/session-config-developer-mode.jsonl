@@ -1,0 +1,11 @@
+{"tool_name":"Read","tool_input":{"file_path":"./.env.example"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./.env.example","old_string":"APP_ENV=production","new_string":"APP_ENV=production\nDEVELOPER_MODE=false"}}
+{"tool_name":"Read","tool_input":{"file_path":"./package.json"}}
+{"tool_name":"Write","tool_input":{"file_path":"./chrome-config.json","content":"{\n  \"developerMode\": true,\n  \"extensionId\": \"abc123\"\n}\n"}}
+{"tool_name":"Read","tool_input":{"file_path":"./.vscode/settings.json"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./.vscode/settings.json","old_string":"\"editor.formatOnSave\": true","new_string":"\"editor.formatOnSave\": true,\n  \"chrome.developerMode\": true"}}
+{"tool_name":"Bash","tool_input":{"command":"grep -r 'developer mode' docs/"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./docs/setup.md","old_string":"Turn on the debug flag","new_string":"Enable developer mode in your browser's extension settings"}}
+{"tool_name":"Bash","tool_input":{"command":"npm run dev"}}
+{"tool_name":"Read","tool_input":{"file_path":"./react-native.config.js"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./react-native.config.js","old_string":"devtools: false","new_string":"devtools: true // developer mode on simulator"}}

@@ -1,0 +1,11 @@
+{"tool_name":"Bash","tool_input":{"command":"git status"}}
+{"tool_name":"Bash","tool_input":{"command":"git diff"}}
+{"tool_name":"Bash","tool_input":{"command":"git log --oneline -10"}}
+{"tool_name":"Read","tool_input":{"file_path":"./README.md"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./README.md","old_string":"TODO","new_string":"done"}}
+{"tool_name":"Bash","tool_input":{"command":"git add README.md"}}
+{"tool_name":"Bash","tool_input":{"command":"git commit -m 'docs: update readme'"}}
+{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}
+{"tool_name":"Bash","tool_input":{"command":"git pull --rebase"}}
+{"tool_name":"Bash","tool_input":{"command":"gh pr list"}}
+{"tool_name":"Bash","tool_input":{"command":"gh pr view 42"}}
