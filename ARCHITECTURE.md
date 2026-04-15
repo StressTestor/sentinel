@@ -18,6 +18,7 @@ sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls b
 | pattern matching | aho-corasick | 1.x |
 | regex | regex | 1.x |
 | context persistence | bincode | 1.x |
+| concurrency | fs2 | 0.4 |
 | terminal output | colored | 2.x |
 | error handling | thiserror, anyhow | 2.x / 1.x |
 | logging | tracing + tracing-subscriber | 0.1 / 0.3 |
@@ -31,6 +32,7 @@ sentinel/
 ├── ARCHITECTURE.md         <- you are here
 ├── README.md
 ├── src/
+│   ├── lib.rs              library entry point (re-exports for integration tests)
 │   ├── main.rs             CLI entry, subcommand dispatch
 │   ├── cli.rs              clap arg definitions
 │   ├── common/
@@ -56,9 +58,11 @@ sentinel/
 │   │   ├── hooks.rs        read/merge/write ~/.claude/settings.json
 │   │   └── defaults.rs     default policy.toml generator
 │   ├── heuristic/
-│   │   ├── mod.rs          Tier 2 heuristic analyzer
+│   │   ├── mod.rs          Tier 2 analyzer + merge_with_policy
 │   │   ├── automata.rs     aho-corasick pattern compilation
-│   │   └── context.rs      file-backed ring buffer (bincode)
+│   │   ├── context.rs      file-backed ring buffer (bincode + flock + atomic rename)
+│   │   ├── patterns.rs     DEFAULT_PATTERNS seed set (39 phrases)
+│   │   └── sensitivity.rs  Sensitivity enum + threshold mapping
 │   ├── classifier/
 │   │   └── mod.rs          Tier 3 LLM classifier stub (Ollama/cloud)
 │   ├── wrap/
@@ -66,8 +70,14 @@ sentinel/
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger
 ├── tests/
-│   └── fixtures/
-│       └── corpus/         test attack sequences (3 TOML files)
+│   ├── fixtures/
+│   │   ├── corpus/         attack sequences for audit runner (3 TOML)
+│   │   ├── benign/         benign Claude Code sessions for tier 2 FP benchmark (.jsonl)
+│   │   ├── fp-stress/      sessions with "broad" phrases in legit context - must trigger (coverage)
+│   │   └── attack-multiturn/  multi-turn attack sequences for tier 2 FN benchmark (.jsonl)
+│   └── tier2_benchmark.rs  FP/FN + fp-stress coverage assertion harness
+├── scripts/
+│   └── ad5-network-lint.sh  CI lint: no ambient network calls in src/
 ├── docs/                   live attack demo + github pages site
 │   ├── index.html          write-up + attack matrix (published to stresstestor.github.io/sentinel)
 │   ├── target.html         poisoned "CloudSync" docs page with 20+ embedded injections
@@ -100,6 +110,47 @@ Tool call arrives (via PreToolUse hook or pty proxy)
          secondary model call for ambiguous inputs.
          local Ollama or cloud API. stub implementation.
 ```
+
+### tier 2 pipeline integration (v0.2)
+
+tier 2 is called inside `evaluate::run` after tier 1. sequence:
+
+1. tier 1 `PolicyEngine::evaluate(&tool_call)` produces `PolicyDecision`.
+2. if `action == Block`, short-circuit. tier 2 is not called.
+3. otherwise, build a `HeuristicAnalyzer` from `engine.heuristic_settings().sanitized()`
+   (reads `[heuristic]` section of policy.toml, clamps `window_size = 0` to default 50,
+   falls back to `Sensitivity::Medium` on unparseable sensitivity string).
+4. analyzed content = `tool_call.command` (bash) else `tool_call.raw_params`.
+5. `analyzer.merge_with_policy(tier1_decision, &tier2_result)` returns the
+   final merged decision. tier 2 escalation rules:
+   - tier 1 Block: unchanged (never reached - short-circuited above).
+   - tier 2 confidence <= sensitivity threshold: tier 1 unchanged.
+   - tier 2 confidence > threshold: Allow -> Warn, Warn -> Warn.
+     tier 2 NEVER produces Block in 1.0.
+6. ring buffer persisted via `analyzer.save()` before returning.
+
+configuration (`policy.toml`):
+
+```toml
+[heuristic]
+sensitivity = "medium"   # low (0.7) / medium (0.3) / high (0.15)
+window_size = 50
+```
+
+ring buffer file at `~/.sentinel/context.bin` is protected by an `fs2` advisory
+flock on `~/.sentinel/context.bin.lock` plus atomic temp-file rename on write.
+safe under concurrent `sentinel evaluate` processes (multiple Claude Code windows).
+
+### AD-5 enforcement (v0.2)
+
+`scripts/ad5-network-lint.sh` greps `src/` for outbound-network imports
+(`reqwest`, `hyper::`, `TcpStream`, `TcpListener`, `UdpSocket`, sibling HTTP
+clients). runs in CI before `cargo test`. allowlist is currently empty - grows
+as v0.3 (Ollama under `src/classifier/`) and v0.4 (git-sync, audit sinks) add
+opt-in network modules.
+
+the lint protects the "100% local, no data leaves your machine" claim from
+accidental regressions. default-install outbound network = zero.
 
 ### Claude Code adapter (PreToolUse hook)
 
@@ -141,8 +192,10 @@ idempotent: running install twice doesn't duplicate hooks.
 |---------|-------------|
 | `cargo test` | run all unit + integration tests |
 | `cargo test --features proptest` | run property-based tests (slower) |
+| `cargo test --test tier2_benchmark` | run tier 2 FP/FN + fp-stress coverage benchmark |
 | `cargo build --release` | build optimized binary |
 | `cargo clippy` | lint |
+| `bash scripts/ad5-network-lint.sh` | AD-5 lint: scan src/ for ambient network calls |
 | `sentinel audit --corpus ./tests/fixtures/corpus --sandbox degraded` | test audit with fixture corpus |
 | `sentinel install` | install PreToolUse hook (audit mode) |
 | `sentinel install --enforce` | install with enforcement |
