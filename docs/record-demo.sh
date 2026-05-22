@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # record-demo.sh — records the live attack demo as an asciicast + gif.
 #
-# left pane:  run-attacks.sh replaying every injection from docs/index.html
+# left pane:  run-attacks.sh replaying every injection from docs/target.html
 # right pane: tail -f on ~/.sentinel/audit.jsonl showing sentinel's live verdicts
 #
 # requires: asciinema, agg, tmux
@@ -34,7 +34,7 @@ SESSION="sentinel-demo-$$"
 
 # the command that runs inside asciinema — starts a tmux split and drives both panes
 tmux new-session -d -s "$SESSION" -x 180 -y 40
-tmux send-keys -t "$SESSION" "clear && echo '── sentinel: runtime defense for CLI agents ──' && echo && echo 'replaying every prompt injection embedded in docs/index.html' && echo && sleep 2 && SENTINEL=./target/release/sentinel ./docs/run-attacks.sh" C-m
+tmux send-keys -t "$SESSION" "clear && echo '── sentinel: runtime defense for CLI agents ──' && echo && echo 'replaying poisoned docs payloads from docs/target.html' && echo 'classic prompt injection + Mini Shai-Hulud persistence/install cases' && echo && sleep 2 && SENTINEL=./target/release/sentinel ./docs/run-attacks.sh" C-m
 tmux split-window -h -t "$SESSION"
 tmux send-keys -t "$SESSION".1 "clear && echo '── audit log (tail -f) ──' && echo && tail -f ~/.sentinel/audit.jsonl | jq -r '\"[\" + .timestamp + \"] \" + .action + \" \" + .tool_name + \" — \" + (.reason // \"\")'" C-m
 tmux select-pane -t "$SESSION".0

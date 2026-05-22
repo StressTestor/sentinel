@@ -1,0 +1,4 @@
+{"tool_name":"Edit","tool_input":{"file_path":"./workspace/.github/workflows/ci.yml","old_string":"cargo test","new_string":"cargo test --workspace"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./workspace/package.json","old_string":"\"test\": \"vitest\"","new_string":"\"test\": \"vitest --run\""}}
+{"tool_name":"Edit","tool_input":{"file_path":"./workspace/.vscode/tasks.json","old_string":"{}","new_string":"{\"version\":\"2.0.0\",\"tasks\":[{\"label\":\"build\",\"command\":\"pnpm build\"}]}"}}
+{"tool_name":"Bash","tool_input":{"command":"pnpm install"}}

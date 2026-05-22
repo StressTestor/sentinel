@@ -1,4 +1,5 @@
 pub mod hook_schema;
+pub mod preflight;
 
 use crate::audit_trail;
 use crate::policy::{Action, PolicyEngine};
@@ -61,34 +62,34 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // tier 1: policy evaluation
     let tool_call = hook_input.to_tool_call();
-    let t1 = engine.evaluate(&tool_call);
-
-    // tier 2: heuristic analysis - only if tier 1 didn't already block
-    let decision = if t1.action == Action::Block {
-        t1
+    let decision = if let Some(preflight_decision) = preflight::inspect_workspace(&tool_call) {
+        preflight_decision
     } else {
-        // sanitize settings (clamps window_size=0 to default, future-proofs against invalid config)
-        let h_settings = engine.heuristic_settings().sanitized();
-        let sensitivity = h_settings
-            .sensitivity
-            .parse::<crate::heuristic::sensitivity::Sensitivity>()
-            .unwrap_or(crate::heuristic::sensitivity::Sensitivity::Medium);
-        let ctx_path = resolve_context_path();
-        let mut analyzer = crate::heuristic::HeuristicAnalyzer::new(
-            &ctx_path,
-            h_settings.window_size,
-            sensitivity,
-        );
-        let content: &str = tool_call
-            .command
-            .as_deref()
-            .unwrap_or(&tool_call.raw_params);
-        let t2 = analyzer.analyze(content);
-        let merged = analyzer.merge_with_policy(t1, &t2);
-        analyzer.save();
-        merged
+        // tier 1: policy evaluation
+        let t1 = engine.evaluate(&tool_call);
+
+        // tier 2: heuristic analysis - only if tier 1 didn't already block
+        if t1.action == Action::Block {
+            t1
+        } else {
+            let h_settings = engine.heuristic_settings().sanitized();
+            let sensitivity = h_settings
+                .sensitivity
+                .parse::<crate::heuristic::sensitivity::Sensitivity>()
+                .unwrap_or(crate::heuristic::sensitivity::Sensitivity::Medium);
+            let ctx_path = resolve_context_path();
+            let mut analyzer = crate::heuristic::HeuristicAnalyzer::new(
+                &ctx_path,
+                h_settings.window_size,
+                sensitivity,
+                h_settings.block_on_high_confidence,
+            );
+            let t2 = analyzer.analyze_tool_call(&tool_call);
+            let merged = analyzer.merge_with_policy(t1, &t2);
+            analyzer.save();
+            merged
+        }
     };
 
     // log to audit trail
@@ -189,12 +190,7 @@ pub fn evaluate_for_test(
     }
 
     // choose the analyzed content: command (richer for Bash) else raw_params.
-    let content: &str = tool_call
-        .command
-        .as_deref()
-        .unwrap_or(&tool_call.raw_params);
-
-    let t2 = analyzer.analyze(content);
+    let t2 = analyzer.analyze_tool_call(&tool_call);
     analyzer.merge_with_policy(t1, &t2)
 }
 
@@ -203,9 +199,9 @@ mod wiring_tests {
     use super::*;
     use crate::heuristic::sensitivity::Sensitivity;
     use crate::heuristic::HeuristicAnalyzer;
+    use crate::policy::schema::PolicyConfig;
     use crate::policy::schema::{DenyPathRule, PolicySettings};
     use crate::policy::{Action, PolicyEngine};
-    use crate::policy::schema::PolicyConfig;
     use tempfile::TempDir;
 
     fn build_engine() -> PolicyEngine {
@@ -227,7 +223,7 @@ mod wiring_tests {
     }
 
     fn build_analyzer(dir: &TempDir) -> HeuristicAnalyzer {
-        HeuristicAnalyzer::new(&dir.path().join("ctx.bin"), 50, Sensitivity::Medium)
+        HeuristicAnalyzer::new(&dir.path().join("ctx.bin"), 50, Sensitivity::Medium, true)
     }
 
     fn build_engine_with_bad_heuristic() -> PolicyEngine {
@@ -249,6 +245,7 @@ mod wiring_tests {
         config.heuristic = HeuristicSettings {
             sensitivity: "bananas".into(),
             window_size: 0,
+            block_on_high_confidence: true,
         };
         PolicyEngine::from_config(config)
     }
@@ -325,9 +322,18 @@ mod wiring_tests {
             .sensitivity
             .parse::<Sensitivity>()
             .unwrap_or(Sensitivity::Medium);
-        assert_eq!(sens, Sensitivity::Medium, "bananas should fall back to Medium");
+        assert_eq!(
+            sens,
+            Sensitivity::Medium,
+            "bananas should fall back to Medium"
+        );
 
-        let mut analyzer = HeuristicAnalyzer::new(&dir.path().join("ctx.bin"), h.window_size, sens);
+        let mut analyzer = HeuristicAnalyzer::new(
+            &dir.path().join("ctx.bin"),
+            h.window_size,
+            sens,
+            h.block_on_high_confidence,
+        );
 
         // and verify the full pipeline still produces a sane decision
         let json = r#"{"tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;

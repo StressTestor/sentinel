@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sentinel — runtime defense for CLI AI agents</title>
-<meta name="description" content="Sentinel intercepts every tool call a CLI agent makes and enforces security policy. Live demo against a poisoned docs page.">
+<meta name="description" content="Sentinel intercepts every tool call a CLI agent makes, blocks high-confidence supply-chain worm behavior, and enforces security policy before execution.">
 <meta property="og:title" content="sentinel — runtime defense for CLI AI agents">
-<meta property="og:description" content="Live demo: Claude parses a poisoned docs page. Sentinel blocks 20+ prompt injections in real time.">
+<meta property="og:description" content="Live demo: poisoned docs page plus Mini Shai-Hulud-style persistence and install-hook payloads. Sentinel blocks them before execution.">
 <meta property="og:type" content="website">
 <style>
   :root {
@@ -117,19 +117,23 @@
 <p>The page at <a href="target.html"><code>target.html</code></a> is a fake "CloudSync docs" site.
 It looks like a normal tool's documentation but every section is poisoned with a prompt
 injection: hidden HTML comments, white-on-white text, zero-width Unicode, CSS <code>display:none</code>,
-HTML entity encoding, link title attributes, tiny-font spans, and fake "agent instruction"
-blockquotes. 20+ attack payloads, every one a real pattern seen in the wild.</p>
+HTML entity encoding, link title attributes, tiny-font spans, fake "agent instruction"
+blockquotes, agent-hook persistence, VS Code task persistence, GitHub dead-drop exfiltration,
+and malicious install-hook loaders. 25 replayed attack payloads total.</p>
 
 <p>Feed the page to any CLI agent. With sentinel's hook installed, every dangerous tool
-call the agent tries to make gets blocked at the hook layer before it runs.</p>
+call the agent tries to make gets blocked at the hook layer before it runs. For install-like
+package manager commands, sentinel also inspects the local manifest first, so a poisoned
+<code>package.json</code> can be denied before <code>npm install</code> or <code>pnpm install</code> executes.</p>
 
-<img src="live-demo.gif" alt="sentinel blocking 20 prompt injections live" class="demo-gif">
+<img src="live-demo.gif" alt="sentinel blocking prompt-injection and Mini Shai-Hulud replay cases live" class="demo-gif">
 
 <div class="card">
   <h3>what you just saw</h3>
   <p>Each line is a tool call the agent would have made after parsing the poisoned page.
-  sentinel's policy engine evaluated the call in under a millisecond and returned <code>deny</code>
-  before the tool ever ran. Every attack blocked, zero false negatives.</p>
+  sentinel's policy engine and high-confidence heuristic layer evaluated the call before the tool
+  ever ran. The replay now covers classic prompt injection, agent persistence, VS Code workspace
+  persistence, CI token theft, GitHub dead-drops, and manifest-triggered install hooks.</p>
 </div>
 
 <h2>run it yourself</h2>
@@ -138,7 +142,8 @@ call the agent tries to make gets blocked at the hook layer before it runs.</p>
 cd sentinel
 cargo build --release
 ./target/release/sentinel install --enforce
-SENTINEL=./target/release/sentinel ./docs/run-attacks.sh</code></pre>
+SENTINEL=./target/release/sentinel ./docs/run-attacks.sh
+SENTINEL=./target/release/sentinel ./docs/run-benign.sh</code></pre>
 
 <h2>attacks this page contains</h2>
 
@@ -160,8 +165,19 @@ SENTINEL=./target/release/sentinel ./docs/run-attacks.sh</code></pre>
 <tr><td>HTML-entity encoded comment</td><td>changelog</td><td><code>curl | sh</code></td></tr>
 <tr><td>Zero-width Unicode block</td><td>footer</td><td><code>/etc/passwd</code>, <code>~/.ssh/*</code></td></tr>
 <tr><td>find / for credential files</td><td>security</td><td><code>filesystem scan</code></td></tr>
+<tr><td>Claude hook persistence</td><td>hidden operator note</td><td><code>.claude/settings.json</code> + <code>SessionStart</code></td></tr>
+<tr><td>VS Code folder-open persistence</td><td>hidden operator note</td><td><code>.vscode/tasks.json</code> + <code>runOn=folderOpen</code></td></tr>
+<tr><td>GitHub dead-drop exfil</td><td>maintainer sync</td><td><code>gh auth token</code> + repo description IOC</td></tr>
+<tr><td>Install-hook loader</td><td>workspace bootstrap</td><td>workspace preflight on <code>package.json</code></td></tr>
+<tr><td>Workflow OIDC/token abuse</td><td>maintainer workflow</td><td><code>.github/workflows/**</code> + token theft signals</td></tr>
 </tbody>
 </table>
+
+<h2>benign replay</h2>
+
+<p>The attack replay should not be the only demo. <a href="run-benign.sh"><code>run-benign.sh</code></a>
+exercises normal repo work: <code>cargo test</code>, clean <code>pnpm install</code>, a workflow maintenance edit,
+and a non-persistent VS Code task update. It should finish with every case allowed.</p>
 
 <h2>how it works</h2>
 
@@ -186,13 +202,14 @@ file in &lt;1ms, and returns <code>allow</code> or <code>deny</code> on stdout.<
 <thead><tr><th>Tier</th><th>What</th><th>Latency</th></tr></thead>
 <tbody>
 <tr><td>1. Policy</td><td>deterministic deny/allow rules (glob + regex)</td><td>&lt;1ms</td></tr>
-<tr><td>2. Heuristic</td><td>aho-corasick automata from attack corpus</td><td>&lt;10ms</td></tr>
+<tr><td>2. Heuristic</td><td>normalized matching + structured worm signals + high-confidence block</td><td>&lt;10ms</td></tr>
 <tr><td>3. LLM classifier</td><td>secondary model for ambiguous inputs</td><td>100-500ms</td></tr>
 </tbody>
 </table>
 
-<p>Tier 1 runs on every tool call. Tiers 2 and 3 add defense-in-depth. Tier 1 alone caught
-every attack on this page.</p>
+<p>Tier 1 runs on every tool call. Tier 2 now also normalizes hidden text and can block
+high-confidence worm behavior. Tier 3 remains optional. The replay page intentionally hits
+both deterministic policy rules and the new high-confidence heuristic path.</p>
 
 <footer>
 <p>sentinel is open source. MIT/Apache-2.0 dual licensed. Built by <a href="https://github.com/StressTestor">@StressTestor</a>.</p>

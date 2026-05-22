@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"./workspace/.github/workflows/release.yml","content":"name: release\non: push\npermissions:\n  id-token: write\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh auth token\n      - run: npm publish\n"}}

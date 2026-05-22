@@ -45,6 +45,8 @@ regex = "1"
 bincode = "1"
 anyhow = "1"
 fs2 = "0.4"
+html-escape = "0.2"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

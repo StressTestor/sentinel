@@ -58,6 +58,46 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
     "your developer says",
     "maintainer instruction",
     "per the security team",
+    // stable supply-chain and persistence markers from Mini Shai-Hulud reporting
+    "a mini shai-hulud has appeared",
+    "a gift from teampcp",
+    "firedalazer",
+    "gh-token-monitor",
+    "kitty-monitor",
+];
+
+pub const STRONG_INSTALL_SIGNALS: &[&str] = &[
+    "preinstall",
+    "postinstall",
+    "prepare",
+    "optionaldependencies",
+    "node setup.mjs",
+    ".claude/setup.mjs",
+    ".vscode/setup.mjs",
+    "bun install",
+    "bun add",
+    "bunx",
+];
+
+pub const STRONG_PERSISTENCE_SIGNALS: &[&str] = &[
+    "sessionstart",
+    ".claude/settings.json",
+    ".vscode/tasks.json",
+    "folderopen",
+    "\"runon\":\"folderopen\"",
+    ".claude/execution.js",
+];
+
+pub const STRONG_EXFIL_SIGNALS: &[&str] = &[
+    "gh auth token",
+    "metadata.google.internal",
+    "169.254.169.254",
+    "git-service.com",
+    "getsession.org",
+    "m-kosche.com",
+    "create github repo",
+    "description\":\"a mini shai-hulud has appeared",
+    "vault token",
 ];
 
 #[cfg(test)]

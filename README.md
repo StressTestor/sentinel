@@ -11,18 +11,19 @@ runtime defense for CLI AI agents. intercepts tool calls before execution and en
 
 ## live demo
 
-there's a single HTML page at [`docs/target.html`](docs/target.html) styled to look like normal "CloudSync" tool documentation. every section of that page is poisoned with a different prompt injection: HTML comments, white-on-white text, zero-width Unicode, `display:none` divs, HTML entity encoding, link title attributes, tiny-font spans, fake "agent instruction" blockquotes. 20+ attack payloads total.
+there's a single HTML page at [`docs/target.html`](docs/target.html) styled to look like normal "CloudSync" tool documentation. every section of that page is poisoned with a different prompt injection: HTML comments, white-on-white text, zero-width Unicode, `display:none` divs, HTML entity encoding, link title attributes, tiny-font spans, fake "agent instruction" blockquotes, and Mini Shai-Hulud-style persistence/install-hook payloads.
 
 `docs/run-attacks.sh` replays every injection against `sentinel evaluate`:
 
 ```bash
 ./target/release/sentinel install --enforce
 SENTINEL=./target/release/sentinel ./docs/run-attacks.sh
+SENTINEL=./target/release/sentinel ./docs/run-benign.sh
 ```
 
-![20 attacks, 20 blocks](docs/live-demo.gif)
+![25 attack cases blocked in the live replay](docs/live-demo.gif)
 
-20/20 attacks blocked at the hook layer, before any tool ran. full write-up and attack matrix at [`docs/index.html`](docs/index.html) (or [stresstestor.github.io/sentinel](https://stresstestor.github.io/sentinel/)).
+the current replay covers classic exfiltration prompts plus Mini Shai-Hulud-style agent hooks, VS Code persistence, workflow abuse, GitHub dead-drops, and malicious `preinstall` chains. `docs/run-benign.sh` is the companion check for ordinary maintenance flows that should stay allowed. full write-up and attack matrix at [`docs/index.html`](docs/index.html) (or [stresstestor.github.io/sentinel](https://stresstestor.github.io/sentinel/)).
 
 ## the problem
 
@@ -32,7 +33,7 @@ nobody is defending at the runtime layer. sentinel fixes that.
 
 ## how it works
 
-sentinel hooks into Claude Code's PreToolUse system. every tool call (Bash, Edit, Write, Read) passes through sentinel before execution. sentinel evaluates the call against your security policy and either allows, warns, or blocks it.
+sentinel hooks into Claude Code's PreToolUse system. every tool call (Bash, Edit, Write, Read) passes through sentinel before execution. sentinel evaluates the call against your security policy and either allows, warns, or blocks it. install-like package manager commands also get a workspace preflight check so poisoned manifests can be denied before `npm install`, `pnpm install`, `bun add`, `pip install`, or `uv sync` run.
 
 ```
 you type a prompt
@@ -56,7 +57,7 @@ sentinel install --enforce  # enforcement mode (blocks violations)
 
 (the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
 
-that's it. sentinel writes a PreToolUse hook into `~/.claude/settings.json` and a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, secret patterns).
+that's it. sentinel writes a PreToolUse hook into `~/.claude/settings.json` and a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, Bun/bootstrap loaders, cloud metadata access, secret patterns, and high-confidence supply-chain blocking).
 
 ## audit mode (default)
 
@@ -82,6 +83,9 @@ mode = "audit"
 on_failure = "closed"
 default = "warn"
 
+[heuristic]
+block_on_high_confidence = true
+
 [[deny.paths]]
 pattern = "~/.ssh/*"
 action = "block"
@@ -99,13 +103,14 @@ reason = "AWS access key in command args"
 ```
 
 deny rules evaluate first. glob patterns for paths, regex for commands and secrets.
+high-confidence heuristic hits can also block, which is how Sentinel stops encoded prompt injections, `.claude/settings.json` persistence hooks, and Mini Shai-Hulud-style install loaders without requiring a hand-written rule for every exact string.
 
 ## three-tier defense
 
 | tier | what | latency | false positives |
 |------|------|---------|-----------------|
 | 1. policy | deterministic deny/allow rules | <1ms | zero (by design) |
-| 2. heuristic | aho-corasick patterns from attack corpus | <10ms | yes (configurable) |
+| 2. heuristic | normalized pattern matching + high-confidence blocking | <10ms | yes (configurable) |
 | 3. LLM classifier | secondary model for ambiguous inputs | 100-500ms | yes (opt-in only) |
 
 Tier 1 runs on every tool call. Tiers 2 and 3 add defense-in-depth for sophisticated attacks.

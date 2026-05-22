@@ -40,33 +40,37 @@ fn build_engine() -> PolicyEngine {
     ))
 }
 
-/// run one session end-to-end. returns true if any tool call produced
-/// a Warn or Block decision.
-fn run_session(fixture: &Path) -> bool {
-    let content = fs::read_to_string(fixture)
-        .unwrap_or_else(|e| panic!("read {}: {e}", fixture.display()));
+#[derive(Debug, Default)]
+struct SessionOutcome {
+    triggered: bool,
+    blocked: bool,
+}
+
+/// run one session end-to-end and return whether it triggered or blocked.
+fn run_session(fixture: &Path) -> SessionOutcome {
+    let content =
+        fs::read_to_string(fixture).unwrap_or_else(|e| panic!("read {}: {e}", fixture.display()));
     let dir = TempDir::new().unwrap();
     let engine = build_engine();
-    let mut analyzer = HeuristicAnalyzer::new(
-        &dir.path().join("ctx.bin"),
-        50,
-        Sensitivity::Medium,
-    );
+    let mut analyzer =
+        HeuristicAnalyzer::new(&dir.path().join("ctx.bin"), 50, Sensitivity::Medium, true);
 
-    let mut triggered = false;
+    let mut outcome = SessionOutcome::default();
     for (i, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let hi: HookInput = serde_json::from_str(line).unwrap_or_else(|e| {
-            panic!("parse {}:{}: {e}\nline: {line}", fixture.display(), i + 1)
-        });
+        let hi: HookInput = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("parse {}:{}: {e}\nline: {line}", fixture.display(), i + 1));
         let decision: PolicyDecision = evaluate_for_test(&hi, &engine, &mut analyzer);
         if decision.action != Action::Allow {
-            triggered = true;
+            outcome.triggered = true;
+        }
+        if decision.action == Action::Block {
+            outcome.blocked = true;
         }
     }
-    triggered
+    outcome
 }
 
 fn fixtures_in(dir: &str) -> Vec<PathBuf> {
@@ -75,7 +79,8 @@ fn fixtures_in(dir: &str) -> Vec<PathBuf> {
         .join("fixtures")
         .join(dir);
     let mut out = Vec::new();
-    for entry in fs::read_dir(&base).unwrap_or_else(|e| panic!("read_dir {}: {e}", base.display())) {
+    for entry in fs::read_dir(&base).unwrap_or_else(|e| panic!("read_dir {}: {e}", base.display()))
+    {
         let entry = entry.unwrap();
         let p = entry.path();
         if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
@@ -91,7 +96,7 @@ fn fixtures_in(dir: &str) -> Vec<PathBuf> {
 fn benign_corpus_fp_rate_under_5_percent_at_medium() {
     let fixtures = fixtures_in("benign");
     let total = fixtures.len();
-    let false_positives: usize = fixtures.iter().filter(|f| run_session(f)).count();
+    let false_positives: usize = fixtures.iter().filter(|f| run_session(f).triggered).count();
 
     let fp_rate = false_positives as f64 / total as f64;
     assert!(
@@ -108,7 +113,10 @@ fn benign_corpus_fp_rate_under_5_percent_at_medium() {
 fn attack_multiturn_fn_rate_under_10_percent_at_medium() {
     let fixtures = fixtures_in("attack-multiturn");
     let total = fixtures.len();
-    let false_negatives: usize = fixtures.iter().filter(|f| !run_session(f)).count();
+    let false_negatives: usize = fixtures
+        .iter()
+        .filter(|f| !run_session(f).triggered)
+        .count();
 
     let fn_rate = false_negatives as f64 / total as f64;
     assert!(
@@ -129,7 +137,10 @@ fn fp_stress_corpus_all_trigger_at_medium() {
     // has regressed or been softened.
     let fixtures = fixtures_in("fp-stress");
     let total = fixtures.len();
-    let not_triggered: Vec<&PathBuf> = fixtures.iter().filter(|f| !run_session(f)).collect();
+    let not_triggered: Vec<&PathBuf> = fixtures
+        .iter()
+        .filter(|f| !run_session(f).triggered)
+        .collect();
 
     assert!(
         not_triggered.is_empty(),
@@ -137,5 +148,20 @@ fn fp_stress_corpus_all_trigger_at_medium() {
         not_triggered.len(),
         total,
         not_triggered
+    );
+}
+
+#[test]
+fn mini_shai_hulud_corpus_all_block_at_medium() {
+    let fixtures = fixtures_in("mini-shai-hulud");
+    let not_blocked: Vec<&PathBuf> = fixtures
+        .iter()
+        .filter(|f| !run_session(f).blocked)
+        .collect();
+
+    assert!(
+        not_blocked.is_empty(),
+        "mini-shai-hulud coverage gap: fixtures did not reach Block at sensitivity=medium: {:?}",
+        not_blocked
     );
 }

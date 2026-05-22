@@ -22,21 +22,37 @@ fn build_dimension_summaries(results: &[AttackResult]) -> Vec<DimensionSummary> 
     let mut by_dimension: HashMap<String, Vec<&AttackResult>> = HashMap::new();
 
     for r in results {
-        by_dimension
-            .entry(r.dimension.clone())
-            .or_default()
-            .push(r);
+        by_dimension.entry(r.dimension.clone()).or_default().push(r);
     }
 
     let mut summaries: Vec<DimensionSummary> = by_dimension
         .into_iter()
         .map(|(name, items)| {
             let total = items.len();
-            let vulnerable = items.iter().filter(|r| r.outcome == AttackOutcome::Vulnerable).count();
-            let defended = items.iter().filter(|r| r.outcome == AttackOutcome::Defended).count();
-            let timeout = items.iter().filter(|r| r.outcome == AttackOutcome::Timeout).count();
-            let error = items.iter().filter(|r| r.outcome == AttackOutcome::Error).count();
-            DimensionSummary { name, total, vulnerable, defended, timeout, error }
+            let vulnerable = items
+                .iter()
+                .filter(|r| r.outcome == AttackOutcome::Vulnerable)
+                .count();
+            let defended = items
+                .iter()
+                .filter(|r| r.outcome == AttackOutcome::Defended)
+                .count();
+            let timeout = items
+                .iter()
+                .filter(|r| r.outcome == AttackOutcome::Timeout)
+                .count();
+            let error = items
+                .iter()
+                .filter(|r| r.outcome == AttackOutcome::Error)
+                .count();
+            DimensionSummary {
+                name,
+                total,
+                vulnerable,
+                defended,
+                timeout,
+                error,
+            }
         })
         .collect();
 
@@ -67,9 +83,15 @@ fn calculate_risk_score(results: &[AttackResult]) -> f64 {
 
 pub fn print_terminal(report: &AuditReport) {
     println!();
-    println!("{}", "═══════════════════════════════════════════════════".bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bold()
+    );
     println!("{}", "  SENTINEL AUDIT REPORT".bold());
-    println!("{}", "═══════════════════════════════════════════════════".bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bold()
+    );
     println!();
     println!("  agent:    {}", report.agent);
     println!("  corpus:   {} sequences", report.corpus_size);
@@ -149,7 +171,10 @@ pub fn print_terminal(report: &AuditReport) {
     }
 
     println!();
-    println!("{}", "═══════════════════════════════════════════════════".bold());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bold()
+    );
 }
 
 pub fn print_json(report: &AuditReport) -> Result<(), Box<dyn std::error::Error>> {

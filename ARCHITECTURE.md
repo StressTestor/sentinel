@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-04-15
+last updated: 2026-05-22
 
 ## overview
 
@@ -17,6 +17,7 @@ sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls b
 | async runtime | tokio | 1.x |
 | pattern matching | aho-corasick | 1.x |
 | regex | regex | 1.x |
+| normalization | html-escape, unicode-normalization | 0.2 / 0.1 |
 | context persistence | bincode | 1.x |
 | concurrency | fs2 | 0.4 |
 | terminal output | colored | 2.x |
@@ -37,6 +38,7 @@ sentinel/
 │   ├── cli.rs              clap arg definitions
 │   ├── common/
 │   │   ├── mod.rs
+│   │   ├── normalize.rs    shared text normalization (NFKC, entity decode, zero-width stripping)
 │   │   └── types.rs        shared types (AttackSequence, AuditReport, etc.)
 │   ├── corpus/
 │   │   ├── mod.rs          corpus loader (embedded + filesystem override)
@@ -52,16 +54,17 @@ sentinel/
 │   │   └── matcher.rs      glob path matching, regex command/secret matching
 │   ├── evaluate/
 │   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> stdout JSON)
-│   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema
+│   │   ├── hook_schema.rs  Claude Code PreToolUse hook JSON schema + richer ToolCall extraction
+│   │   └── preflight.rs    workspace manifest inspection for install-like package manager commands
 │   ├── install/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
 │   │   ├── hooks.rs        read/merge/write ~/.claude/settings.json
 │   │   └── defaults.rs     default policy.toml generator
 │   ├── heuristic/
-│   │   ├── mod.rs          Tier 2 analyzer + merge_with_policy
+│   │   ├── mod.rs          Tier 2 analyzer + normalized high-confidence merge logic
 │   │   ├── automata.rs     aho-corasick pattern compilation
 │   │   ├── context.rs      file-backed ring buffer (bincode + flock + atomic rename)
-│   │   ├── patterns.rs     DEFAULT_PATTERNS seed set (39 phrases)
+│   │   ├── patterns.rs     DEFAULT_PATTERNS + Mini Shai-Hulud strong-signal sets
 │   │   └── sensitivity.rs  Sensitivity enum + threshold mapping
 │   ├── classifier/
 │   │   └── mod.rs          Tier 3 LLM classifier stub (Ollama/cloud)
@@ -74,14 +77,17 @@ sentinel/
 │   │   ├── corpus/         attack sequences for audit runner (3 TOML)
 │   │   ├── benign/         benign Claude Code sessions for tier 2 FP benchmark (.jsonl)
 │   │   ├── fp-stress/      sessions with "broad" phrases in legit context - must trigger (coverage)
-│   │   └── attack-multiturn/  multi-turn attack sequences for tier 2 FN benchmark (.jsonl)
-│   └── tier2_benchmark.rs  FP/FN + fp-stress coverage assertion harness
+│   │   ├── attack-multiturn/  multi-turn attack sequences for tier 2 FN benchmark (.jsonl)
+│   │   └── mini-shai-hulud/   worm-shaped persistence/exfil/workflow fixtures (.jsonl)
+│   ├── evaluate_process.rs process-level evaluate tests (preflight + enforce behavior)
+│   └── tier2_benchmark.rs  FP/FN + fp-stress + Mini Shai-Hulud coverage harness
 ├── scripts/
 │   └── ad5-network-lint.sh  CI lint: no ambient network calls in src/
 ├── docs/                   live attack demo + github pages site
 │   ├── index.html          write-up + attack matrix (published to stresstestor.github.io/sentinel)
-│   ├── target.html         poisoned "CloudSync" docs page with 20+ embedded injections
-│   ├── run-attacks.sh      replays every injection through `sentinel evaluate`
+│   ├── target.html         poisoned "CloudSync" docs page with classic prompt injections + worm payloads
+│   ├── run-attacks.sh      replays classic prompt injections plus Mini Shai-Hulud persistence/install cases
+│   ├── run-benign.sh       replays normal maintenance flows that should stay allowed
 │   ├── live-demo.cast      asciinema recording of the replay
 │   ├── live-demo.gif       animated capture used in README
 │   └── record-*.sh         demo recording helpers
@@ -102,32 +108,39 @@ Tool call arrives (via PreToolUse hook or pty proxy)
      │   deny secrets (regex). deny-first evaluation. zero false positives.
      │
      ├── Tier 2: Heuristic Analyzer (<10ms)
-     │   aho-corasick automata from PromptPressure corpus.
-     │   multi-turn context ring buffer. entropy scoring.
-     │   produces false positives by design (configurable sensitivity).
+     │   normalized matching (NFKC, entity decode, zero-width stripping)
+     │   + aho-corasick automata + structured persistence/install/exfil signals.
+     │   multi-turn context ring buffer. medium confidence -> Warn.
+     │   high-confidence worm signals -> Block when enabled.
      │
      └── Tier 3: LLM Classifier (100-500ms, opt-in)
          secondary model call for ambiguous inputs.
          local Ollama or cloud API. stub implementation.
 ```
 
-### tier 2 pipeline integration (v0.2)
+### tier 2 pipeline integration (v0.3 hardening)
 
-tier 2 is called inside `evaluate::run` after tier 1. sequence:
+tier 2 now sits behind an install-command preflight and receives richer tool context. sequence:
 
-1. tier 1 `PolicyEngine::evaluate(&tool_call)` produces `PolicyDecision`.
-2. if `action == Block`, short-circuit. tier 2 is not called.
-3. otherwise, build a `HeuristicAnalyzer` from `engine.heuristic_settings().sanitized()`
-   (reads `[heuristic]` section of policy.toml, clamps `window_size = 0` to default 50,
-   falls back to `Sensitivity::Medium` on unparseable sensitivity string).
-4. analyzed content = `tool_call.command` (bash) else `tool_call.raw_params`.
-5. `analyzer.merge_with_policy(tier1_decision, &tier2_result)` returns the
-   final merged decision. tier 2 escalation rules:
-   - tier 1 Block: unchanged (never reached - short-circuited above).
-   - tier 2 confidence <= sensitivity threshold: tier 1 unchanged.
-   - tier 2 confidence > threshold: Allow -> Warn, Warn -> Warn.
-     tier 2 NEVER produces Block in 1.0.
-6. ring buffer persisted via `analyzer.save()` before returning.
+1. `HookInput::to_tool_call()` extracts command, paths, write payload, access type, package-manager family, and install-like command classification.
+2. `evaluate::preflight::inspect_workspace(&tool_call)` runs first for install-like package-manager commands. it inspects only likely local manifests (`package.json`, `pyproject.toml`, `setup.py`) in the current workspace or explicit `--prefix` / `-C` roots. high-confidence install hooks block immediately.
+3. if preflight passes, tier 1 `PolicyEngine::evaluate(&tool_call)` runs as before.
+4. if tier 1 did not already block, build a `HeuristicAnalyzer` from `engine.heuristic_settings().sanitized()`.
+5. analyzer input is `tool_call.combined_content()`:
+   - bash command
+   - write/edit payload when present
+   - raw tool params JSON
+6. the analyzer runs:
+   - normalized matching (HTML entity decode, zero-width stripping, NFKC, lowercase)
+   - PromptPressure phrase matching
+   - structured Mini Shai-Hulud signal detection for install hooks, `.claude/settings.json`, `.vscode/tasks.json`, workflow abuse, and exfiltration
+   - multi-turn context drift scoring
+7. merge rules:
+   - tier 1 Block: unchanged
+   - no heuristic hit: unchanged
+   - medium-confidence heuristic hit: Allow -> Warn, Warn -> Warn
+   - high-confidence heuristic hit: Allow/Warn -> Block when `block_on_high_confidence = true`
+8. ring buffer persisted via `analyzer.save()` before returning.
 
 configuration (`policy.toml`):
 
@@ -135,6 +148,7 @@ configuration (`policy.toml`):
 [heuristic]
 sensitivity = "medium"   # low (0.7) / medium (0.3) / high (0.15)
 window_size = 50
+block_on_high_confidence = true
 ```
 
 ring buffer file at `~/.sentinel/context.bin` is protected by an `fs2` advisory
@@ -192,7 +206,7 @@ idempotent: running install twice doesn't duplicate hooks.
 |---------|-------------|
 | `cargo test` | run all unit + integration tests |
 | `cargo test --features proptest` | run property-based tests (slower) |
-| `cargo test --test tier2_benchmark` | run tier 2 FP/FN + fp-stress coverage benchmark |
+| `cargo test --test tier2_benchmark` | run tier 2 FP/FN + fp-stress + Mini Shai-Hulud coverage benchmark |
 | `cargo build --release` | build optimized binary |
 | `cargo clippy` | lint |
 | `bash scripts/ad5-network-lint.sh` | AD-5 lint: scan src/ for ambient network calls |
@@ -201,7 +215,8 @@ idempotent: running install twice doesn't duplicate hooks.
 | `sentinel install --enforce` | install with enforcement |
 | `sentinel uninstall` | remove hooks |
 | `sentinel status` | show config + hooks |
-| `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
+| `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay classic prompt injections plus Mini Shai-Hulud cases from docs/target.html through the hook layer |
+| `SENTINEL=./target/release/sentinel ./docs/run-benign.sh` | replay normal maintenance tasks that should stay allowed |
 
 ## publishing
 

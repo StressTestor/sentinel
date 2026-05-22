@@ -30,7 +30,9 @@ impl FromStr for Sensitivity {
             "low" => Ok(Sensitivity::Low),
             "medium" => Ok(Sensitivity::Medium),
             "high" => Ok(Sensitivity::High),
-            other => Err(format!("unknown sensitivity '{other}' (expected low/medium/high)")),
+            other => Err(format!(
+                "unknown sensitivity '{other}' (expected low/medium/high)"
+            )),
         }
     }
 }
@@ -57,13 +59,19 @@ mod tests {
     #[test]
     fn from_str_accepts_canonical() {
         assert_eq!("low".parse::<Sensitivity>().unwrap(), Sensitivity::Low);
-        assert_eq!("medium".parse::<Sensitivity>().unwrap(), Sensitivity::Medium);
+        assert_eq!(
+            "medium".parse::<Sensitivity>().unwrap(),
+            Sensitivity::Medium
+        );
         assert_eq!("high".parse::<Sensitivity>().unwrap(), Sensitivity::High);
     }
 
     #[test]
     fn from_str_is_case_insensitive() {
-        assert_eq!("MEDIUM".parse::<Sensitivity>().unwrap(), Sensitivity::Medium);
+        assert_eq!(
+            "MEDIUM".parse::<Sensitivity>().unwrap(),
+            Sensitivity::Medium
+        );
         assert_eq!("High".parse::<Sensitivity>().unwrap(), Sensitivity::High);
     }
 

@@ -86,9 +86,15 @@ pub struct PolicySettings {
     pub default: String,
 }
 
-fn default_mode() -> String { "audit".into() }
-fn default_on_failure() -> String { "closed".into() }
-fn default_default() -> String { "warn".into() }
+fn default_mode() -> String {
+    "audit".into()
+}
+fn default_on_failure() -> String {
+    "closed".into()
+}
+fn default_default() -> String {
+    "warn".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeuristicSettings {
@@ -96,6 +102,8 @@ pub struct HeuristicSettings {
     pub sensitivity: String,
     #[serde(default = "default_window_size")]
     pub window_size: usize,
+    #[serde(default = "default_block_on_high_confidence")]
+    pub block_on_high_confidence: bool,
 }
 
 impl Default for HeuristicSettings {
@@ -103,6 +111,7 @@ impl Default for HeuristicSettings {
         Self {
             sensitivity: default_sensitivity(),
             window_size: default_window_size(),
+            block_on_high_confidence: default_block_on_high_confidence(),
         }
     }
 }
@@ -120,12 +129,20 @@ impl HeuristicSettings {
         Self {
             sensitivity: self.sensitivity.clone(),
             window_size,
+            block_on_high_confidence: self.block_on_high_confidence,
         }
     }
 }
 
-fn default_sensitivity() -> String { "medium".into() }
-fn default_window_size() -> usize { 50 }
+fn default_sensitivity() -> String {
+    "medium".into()
+}
+fn default_window_size() -> usize {
+    50
+}
+fn default_block_on_high_confidence() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyPathRule {
@@ -157,8 +174,8 @@ pub struct AllowPathRule {
 /// parse a policy TOML string into a finalized PolicyConfig
 #[cfg(test)]
 pub fn parse_policy(toml_content: &str) -> Result<PolicyConfig, String> {
-    let config: PolicyConfig = toml::from_str(toml_content)
-        .map_err(|e| format!("policy parse error: {e}"))?;
+    let config: PolicyConfig =
+        toml::from_str(toml_content).map_err(|e| format!("policy parse error: {e}"))?;
     Ok(config.finalize())
 }
 
@@ -237,6 +254,7 @@ window_size = 100
         let config = parse_policy(toml).unwrap();
         assert_eq!(config.heuristic.sensitivity, "high");
         assert_eq!(config.heuristic.window_size, 100);
+        assert!(config.heuristic.block_on_high_confidence);
     }
 
     #[test]
@@ -244,6 +262,7 @@ window_size = 100
         let s = HeuristicSettings {
             sensitivity: "medium".into(),
             window_size: 0,
+            block_on_high_confidence: true,
         };
         assert_eq!(s.sanitized().window_size, 50);
     }
@@ -253,9 +272,11 @@ window_size = 100
         let s = HeuristicSettings {
             sensitivity: "high".into(),
             window_size: 100,
+            block_on_high_confidence: false,
         };
         assert_eq!(s.sanitized().window_size, 100);
         assert_eq!(s.sanitized().sensitivity, "high");
+        assert!(!s.sanitized().block_on_high_confidence);
     }
 
     #[test]
@@ -267,5 +288,6 @@ mode = "audit"
         let config = parse_policy(toml).unwrap();
         assert_eq!(config.heuristic.sensitivity, "medium");
         assert_eq!(config.heuristic.window_size, 50);
+        assert!(config.heuristic.block_on_high_confidence);
     }
 }

@@ -33,7 +33,11 @@ pub fn load_corpus(dir: &Path) -> Result<Vec<AttackSequence>, CorpusError> {
         return Err(CorpusError::EmptyCorpus(dir.to_path_buf()));
     }
 
-    tracing::info!("loaded {} attack sequences from {}", sequences.len(), dir.display());
+    tracing::info!(
+        "loaded {} attack sequences from {}",
+        sequences.len(),
+        dir.display()
+    );
     Ok(sequences)
 }
 
@@ -80,7 +84,10 @@ pub fn resolve_corpus_path(explicit: Option<&Path>) -> PathBuf {
     }
 
     // fall back to embedded test corpus (for development)
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/corpus"))
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/corpus"
+    ))
 }
 
 fn dirs_next() -> PathBuf {

@@ -1,0 +1,2 @@
+{"tool_name":"Read","tool_input":{"file_path":"./README.md"}}
+{"tool_name":"Edit","tool_input":{"file_path":"./workspace/.claude/settings.json","old_string":"{}","new_string":"{\"hooks\":{\"SessionStart\":[{\"command\":\"node .claude/setup.mjs\"}]}}"}}

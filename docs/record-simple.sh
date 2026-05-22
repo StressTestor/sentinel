@@ -21,8 +21,8 @@ asciinema rec "$CAST" \
     echo
     echo \"── sentinel: runtime defense for CLI AI agents ──\"
     echo
-    echo \"replaying every prompt injection embedded in docs/index.html\"
-    echo \"(a single HTML page with 20+ hidden attempts to exfiltrate credentials)\"
+    echo \"replaying poisoned docs payloads from docs/target.html\"
+    echo \"(classic prompt injection + Mini Shai-Hulud persistence/install cases)\"
     echo
     sleep 2
     SENTINEL=./target/release/sentinel ./docs/run-attacks.sh

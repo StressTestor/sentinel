@@ -14,13 +14,10 @@ async fn main() {
 
     let result = match cli.command {
         Command::Audit(args) => audit::run(args).await,
-        Command::Install(args) => {
-            install::run_install(args.enforce)
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-        }
+        Command::Install(args) => install::run_install(args.enforce)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>),
         Command::Uninstall => {
-            install::run_uninstall()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            install::run_uninstall().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
         Command::Evaluate => evaluate::run(),
         Command::Wrap(args) => wrap::run_wrap(&args.agent_command),
@@ -71,9 +68,7 @@ fn run_status() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if std::path::Path::new(&audit_path).exists() {
-        let line_count = std::fs::read_to_string(&audit_path)?
-            .lines()
-            .count();
+        let line_count = std::fs::read_to_string(&audit_path)?.lines().count();
         println!("audit:   {} events logged", line_count);
     } else {
         println!("audit:   no events yet");

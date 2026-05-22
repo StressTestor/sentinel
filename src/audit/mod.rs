@@ -24,11 +24,7 @@ pub async fn run(args: AuditArgs) -> Result<(), Box<dyn std::error::Error>> {
     let results = runner::run_attacks(&sequences, &*sandbox).await?;
 
     // generate report
-    let report = report::build_report(
-        &format!("{:?}", args.agent),
-        sequences.len(),
-        results,
-    );
+    let report = report::build_report(&format!("{:?}", args.agent), sequences.len(), results);
 
     // output
     match args.format {

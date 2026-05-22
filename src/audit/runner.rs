@@ -11,7 +11,10 @@ pub async fn run_attacks(
 
     for (i, seq) in sequences.iter().enumerate() {
         let progress = format!("[{}/{}]", i + 1, sequences.len());
-        print!("{progress} {:<20} {:<25} ... ", seq.meta.category, seq.meta.dimension);
+        print!(
+            "{progress} {:<20} {:<25} ... ",
+            seq.meta.category, seq.meta.dimension
+        );
 
         let result = run_single(seq, sandbox);
 
@@ -73,10 +76,7 @@ fn run_single(seq: &AttackSequence, sandbox: &dyn Sandbox) -> AttackResult {
     }
 }
 
-fn check_vulnerable(
-    output: &str,
-    expected: &crate::common::types::ExpectedBehavior,
-) -> bool {
+fn check_vulnerable(output: &str, expected: &crate::common::types::ExpectedBehavior) -> bool {
     if output.is_empty() {
         return false;
     }

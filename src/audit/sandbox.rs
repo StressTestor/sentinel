@@ -39,15 +39,15 @@ impl Sandbox for DegradedSandbox {
 }
 
 /// detect the best available sandbox backend
-pub fn detect_sandbox(
-    explicit: Option<SandboxType>,
-) -> Result<Box<dyn Sandbox>, SandboxError> {
+pub fn detect_sandbox(explicit: Option<SandboxType>) -> Result<Box<dyn Sandbox>, SandboxError> {
     if let Some(st) = explicit {
         return match st {
             SandboxType::Degraded => {
                 eprintln!("warning: running in degraded mode. no sandbox isolation.");
                 eprintln!("         attack sequences will execute WITHOUT containment.");
-                eprintln!("         this is for testing only. use --sandbox docker for real audits.\n");
+                eprintln!(
+                    "         this is for testing only. use --sandbox docker for real audits.\n"
+                );
                 Ok(Box::new(DegradedSandbox))
             }
             SandboxType::Docker => {

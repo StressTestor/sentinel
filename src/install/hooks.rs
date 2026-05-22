@@ -29,9 +29,7 @@ pub fn install_hook(settings_path: &Path, sentinel_binary: &Path) -> Result<(), 
     });
 
     // get or create PreToolUse array
-    let pre_tool_use = hooks
-        .entry("PreToolUse")
-        .or_insert_with(|| json!([]));
+    let pre_tool_use = hooks.entry("PreToolUse").or_insert_with(|| json!([]));
 
     let arr = pre_tool_use
         .as_array_mut()
@@ -86,14 +84,13 @@ fn read_settings(path: &Path) -> Result<Value, InstallError> {
     if !path.exists() {
         // create parent dirs if needed
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| InstallError::WriteError(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| InstallError::WriteError(e.to_string()))?;
         }
         return Ok(json!({}));
     }
 
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| InstallError::ReadError(e.to_string()))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| InstallError::ReadError(e.to_string()))?;
 
     serde_json::from_str(&content)
         .map_err(|e| InstallError::ReadError(format!("invalid JSON: {e}")))
@@ -101,15 +98,13 @@ fn read_settings(path: &Path) -> Result<Value, InstallError> {
 
 fn write_settings(path: &Path, settings: &Value) -> Result<(), InstallError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| InstallError::WriteError(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| InstallError::WriteError(e.to_string()))?;
     }
 
     let content = serde_json::to_string_pretty(settings)
         .map_err(|e| InstallError::WriteError(e.to_string()))?;
 
-    std::fs::write(path, content)
-        .map_err(|e| InstallError::WriteError(e.to_string()))
+    std::fs::write(path, content).map_err(|e| InstallError::WriteError(e.to_string()))
 }
 
 #[cfg(test)]

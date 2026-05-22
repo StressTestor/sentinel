@@ -125,9 +125,8 @@ impl ContextWindow {
     }
 
     fn write_atomic(&self) -> std::io::Result<()> {
-        let data = bincode::serialize(self).map_err(|e| {
-            std::io::Error::other(format!("serialize: {e}"))
-        })?;
+        let data = bincode::serialize(self)
+            .map_err(|e| std::io::Error::other(format!("serialize: {e}")))?;
 
         // write to <path>.tmp then rename. rename is atomic on POSIX.
         let tmp = self.path.with_extension("tmp");
@@ -271,7 +270,10 @@ mod tests {
 
         // the file must be readable (not truncated / not half-written bincode).
         let ctx = ContextWindow::load_or_create(&path);
-        assert!(!ctx.is_empty(), "ring buffer lost all data under concurrent writes");
+        assert!(
+            !ctx.is_empty(),
+            "ring buffer lost all data under concurrent writes"
+        );
         // and every turn we read back should be a well-formed "wN-tN" string.
         for t in ctx.recent_turns() {
             assert!(

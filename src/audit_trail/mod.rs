@@ -20,8 +20,7 @@ pub fn log_event(event: &AuditEvent) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let line = serde_json::to_string(event)
-        .map_err(std::io::Error::other)?;
+    let line = serde_json::to_string(event).map_err(std::io::Error::other)?;
 
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
