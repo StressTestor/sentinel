@@ -148,7 +148,9 @@ fn degraded(engine: &PolicyEngine, reason: &str) -> HookOutput {
     }
 }
 
-fn resolve_policy_path() -> PathBuf {
+/// The policy path the hook reads on every call. Shared with `sentinel check`
+/// so the dry-run can never drift from what the live hook actually evaluates.
+pub(crate) fn resolve_policy_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".sentinel").join("policy.toml")
 }

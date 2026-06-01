@@ -1,5 +1,6 @@
 mod audit;
 mod audit_trail;
+mod check;
 #[allow(dead_code)]
 mod classifier;
 mod cli;
@@ -42,6 +43,7 @@ async fn main() {
             Ok(())
         }
         Command::Status => run_status(),
+        Command::Check(args) => check::run(args),
     };
 
     if let Err(e) = result {
