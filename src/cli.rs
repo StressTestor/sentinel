@@ -45,6 +45,17 @@ pub enum Command {
     /// show which bundled-default rules are missing from your policy (read-only)
     #[command(name = "policy-diff")]
     PolicyDiff(PolicyDiffArgs),
+
+    /// static-check a policy for dead rules, invalid regexes, and over-broad allows
+    #[command(name = "policy-lint")]
+    PolicyLint(LintArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LintArgs {
+    /// lint a specific policy file instead of the installed ~/.sentinel/policy.toml
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

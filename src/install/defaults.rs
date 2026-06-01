@@ -9,14 +9,8 @@ pub fn write_default_policy(path: &Path, mode: &str) -> Result<(), InstallError>
         return Ok(());
     }
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| InstallError::WriteError(e.to_string()))?;
-    }
-
     let content = default_policy_content(mode);
-    std::fs::write(path, content)
-        .map_err(|e| InstallError::WriteError(e.to_string()))
+    super::hooks::atomic_write(path, &content)
 }
 
 pub(crate) fn default_policy_content(mode: &str) -> String {

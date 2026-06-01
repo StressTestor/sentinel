@@ -1,6 +1,26 @@
 use super::InstallError;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Write `content` to `path` atomically: write a sibling temp file, then rename
+/// over the target (atomic on the same filesystem). A crash or full disk leaves
+/// the original settings file intact rather than half-written.
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), InstallError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| InstallError::WriteError(e.to_string()))?;
+    }
+    let mut tmp_os = path.as_os_str().to_owned();
+    tmp_os.push(".tmp");
+    let tmp = PathBuf::from(tmp_os);
+    std::fs::write(&tmp, content).map_err(|e| InstallError::WriteError(e.to_string()))?;
+    // on a failed rename, remove the temp so a repeatedly-failing write doesn't
+    // leave orphaned .tmp files beside the real one.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(InstallError::WriteError(e.to_string()));
+    }
+    Ok(())
+}
 
 const SENTINEL_HOOK_MARKER: &str = "sentinel evaluate";
 
@@ -100,16 +120,11 @@ fn read_settings(path: &Path) -> Result<Value, InstallError> {
 }
 
 fn write_settings(path: &Path, settings: &Value) -> Result<(), InstallError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| InstallError::WriteError(e.to_string()))?;
-    }
-
+    // serialize FIRST so a bad value errors out before we touch disk, then write
+    // atomically - a failed write never truncates the user's real settings.json.
     let content = serde_json::to_string_pretty(settings)
         .map_err(|e| InstallError::WriteError(e.to_string()))?;
-
-    std::fs::write(path, content)
-        .map_err(|e| InstallError::WriteError(e.to_string()))
+    atomic_write(path, &content)
 }
 
 #[cfg(test)]
@@ -198,5 +213,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent.json");
         uninstall_hook(&path).unwrap(); // should not error
+    }
+
+    #[test]
+    fn atomic_write_writes_content_and_leaves_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        atomic_write(&path, "{\"x\":1}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"x\":1}");
+        // the temp sibling must be renamed away, not left behind
+        assert!(!dir.path().join("settings.json.tmp").exists());
     }
 }

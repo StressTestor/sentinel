@@ -139,6 +139,7 @@ sentinel check '<json>'   dry-run a tool call against the policy and explain the
 sentinel verify           replay pinned attacks through the policy, assert each is caught
 sentinel doctor [--strict] validate the install chain + probe liveness (detects a disarmed guard)
 sentinel policy-diff      show which bundled-default rules your policy is missing (read-only)
+sentinel policy-lint      static-check a policy for dead rules, bad regexes, broad allows
 sentinel status           show config, hooks, policy summary
 sentinel corpus-update    fetch latest attack corpus
 ```
