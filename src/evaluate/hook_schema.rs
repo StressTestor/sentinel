@@ -29,7 +29,9 @@ impl HookInput {
         //    Bash tool, a lowercase `bash`, or an MCP shell tool carries its
         //    command in a command-ish field; pull it so deny.commands always sees
         //    it, and mine the command for paths too.
-        let command = extract_command(&self.tool_input);
+        // command-ish field, or a bare-string tool_input used as the command.
+        let command =
+            extract_command(&self.tool_input).or_else(|| self.tool_input.as_str().map(str::to_string));
         if let Some(cmd) = &command {
             paths.extend(extract_paths_from_command(cmd));
         }

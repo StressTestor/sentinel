@@ -19,44 +19,41 @@ pub struct HookOutput {
 /// run the evaluate pipeline: read stdin JSON, evaluate policy, write stdout JSON.
 /// this is the hot path called by Claude Code's PreToolUse hook on every tool call.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // read JSON from stdin
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-
-    if input.trim().is_empty() {
-        // empty stdin — pass through (graceful degradation)
-        tracing::warn!("empty stdin, allowing tool call");
-        print_output(&HookOutput {
-            permission_decision: Some("allow".into()),
-            reason: Some("empty input — pass-through".into()),
-        });
-        return Ok(());
-    }
-
-    // parse hook input with graceful degradation on unknown schema
-    let hook_input = match serde_json::from_str::<HookInput>(&input) {
-        Ok(hi) => hi,
-        Err(e) => {
-            tracing::warn!("unknown hook schema: {e}. passing through.");
-            print_output(&HookOutput {
-                permission_decision: Some("allow".into()),
-                reason: Some(format!("unknown schema — pass-through: {e}")),
-            });
-            return Ok(());
-        }
-    };
-
-    // load policy
+    // Load the policy FIRST, so a degraded input (empty / unparseable stdin) can
+    // honor the policy's on_failure posture instead of a hard-coded allow.
     let policy_path = resolve_policy_path();
     let engine = match PolicyEngine::load(&policy_path) {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("failed to load policy: {e}");
-            // fail-closed: if we can't load policy, deny
+            // can't load policy → can't make a safe decision → deny
             print_output(&HookOutput {
                 permission_decision: Some("deny".into()),
                 reason: Some(format!("policy load failed: {e}")),
             });
+            return Ok(());
+        }
+    };
+
+    // read JSON from stdin
+    let mut input = String::new();
+    if io::stdin().read_to_string(&mut input).is_err() {
+        // a read error is also an un-inspectable input, not a free pass
+        print_output(&degraded(&engine, "failed to read stdin"));
+        return Ok(());
+    }
+
+    if input.trim().is_empty() {
+        print_output(&degraded(&engine, "empty input"));
+        return Ok(());
+    }
+
+    // Parse the hook input. A payload sentinel can't understand is NOT a free
+    // pass — it's a degraded input, handled per the policy's on_failure posture.
+    let hook_input = match serde_json::from_str::<HookInput>(&input) {
+        Ok(hi) => hi,
+        Err(e) => {
+            print_output(&degraded(&engine, &format!("unparseable hook input: {e}")));
             return Ok(());
         }
     };
@@ -128,6 +125,26 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn print_output(output: &HookOutput) {
     if let Ok(json) = serde_json::to_string(output) {
         println!("{json}");
+    }
+}
+
+/// Decide what to do with an input sentinel cannot evaluate (empty stdin,
+/// unparseable JSON). Audit mode never blocks; otherwise the policy's
+/// `on_failure` posture governs — "closed" (the default) denies rather than
+/// waving an un-inspectable call through, "open" allows with a warning.
+fn degraded(engine: &PolicyEngine, reason: &str) -> HookOutput {
+    if engine.is_audit_mode() || !engine.fail_closed() {
+        tracing::warn!("{reason} — allowing (audit/fail-open)");
+        HookOutput {
+            permission_decision: None,
+            reason: None,
+        }
+    } else {
+        tracing::warn!("{reason} — denying (fail-closed)");
+        HookOutput {
+            permission_decision: Some("deny".into()),
+            reason: Some(format!("{reason} — failing closed")),
+        }
     }
 }
 
