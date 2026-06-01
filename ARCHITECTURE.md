@@ -209,3 +209,7 @@ CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test
 - crate name: `sentinel-guard` (binary is still `sentinel`). `sentinel` was taken on crates.io.
 - installed via `cargo install sentinel-guard`.
 - github pages site served from `docs/index.html` at stresstestor.github.io/sentinel.
+
+---
+
+last updated: 2026-06-01 by StressTestor (release v0.2.0: check/verify/doctor/policy-diff/policy-lint + Miasma hardening)
