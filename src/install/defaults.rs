@@ -62,9 +62,14 @@ action = "block"
 reason = "system password file"
 
 [[deny.paths]]
-pattern = "/etc/shadow"
+pattern = "/etc/shadow*"
 action = "block"
-reason = "system shadow password file"
+reason = "system shadow password file (incl. backups like /etc/shadow-)"
+
+[[deny.paths]]
+pattern = "/etc/master.passwd"
+action = "block"
+reason = "macOS shadowed password hashes"
 
 [[deny.paths]]
 pattern = "*/.env"
@@ -87,14 +92,39 @@ action = "block"
 reason = "recursive deletion of credential directory"
 
 [[deny.commands]]
-pattern = 'curl\s+.*\|\s*.*sh'
+pattern = '\b(curl|wget|fetch)\b[^|]*\|\s*[a-z/]*sh\b'
 action = "block"
 reason = "pipe to shell execution"
 
 [[deny.commands]]
-pattern = 'wget\s+.*\|\s*.*sh'
+pattern = '<\(\s*(curl|wget|fetch)\b'
 action = "block"
-reason = "pipe to shell execution"
+reason = "process substitution of a remote fetch into a shell"
+
+[[deny.commands]]
+pattern = '\$\(\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "command substitution of a remote fetch"
+
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*-[oO]\b.*[;&|].*\b(ba|z|da)?sh\b'
+action = "block"
+reason = "staged fetch-then-run (download then execute)"
+
+[[deny.commands]]
+pattern = 'base64\s+-{{1,2}}d\w*\b.*\|\s*[a-z/]*sh\b'
+action = "block"
+reason = "base64-decode piped to shell"
+
+[[deny.commands]]
+pattern = '\b(python3?|perl|ruby|node|php|osascript)\b\s+-\w*[ce]\b.*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|os\.system|\bexec\b|\beval\b|popen|subprocess|child_process)'
+action = "block"
+reason = "interpreter fetch-exec / inline remote code execution"
+
+[[deny.commands]]
+pattern = '`\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "backtick substitution of a remote fetch"
 
 [[deny.commands]]
 pattern = 'curl\s+.*@~?/?\.?(ssh|aws|gnupg|netrc|config)'
@@ -102,17 +132,17 @@ action = "block"
 reason = "curl exfiltration of credential file"
 
 [[deny.commands]]
-pattern = 'curl\s+.*@/etc/(passwd|shadow)'
+pattern = 'curl\s+.*@/etc/(passwd|shadow|master\.passwd)'
 action = "block"
 reason = "curl exfiltration of system file"
 
 [[deny.commands]]
-pattern = 'env\s*\|\s*grep\s+-i?\s*(key|secret|token|pass|auth)'
+pattern = '(?i)\b(env|printenv|set|export|declare)\b\s*\|\s*grep\b.*(key|secret|token|pass|auth|aws|gcp|azure|cred|api|access|private)'
 action = "block"
 reason = "environment variable exfiltration"
 
 [[deny.commands]]
-pattern = 'find\s+/\s.*-name.*(credentials|id_rsa|\.pem|\.key).*'
+pattern = '\bfind\b\s+(/|~|\$HOME|\.)\S*.*-i?name\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|\.key|\.gpg|\.kdbx)'
 action = "block"
 reason = "filesystem scan for credential files"
 

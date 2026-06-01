@@ -196,13 +196,56 @@ fn lexical_normalize(p: &str) -> String {
 
 /// match a command string against a regex pattern
 pub fn matches_command(pattern: &str, command: &str) -> bool {
+    let normalized = normalize_command(command);
     match Regex::new(pattern) {
-        Ok(re) => re.is_match(command),
+        Ok(re) => re.is_match(command) || (normalized != command && re.is_match(&normalized)),
         Err(_) => {
             tracing::warn!("invalid command pattern: {pattern}");
             false
         }
     }
+}
+
+/// Canonicalize a command for matching so trivial spelling variants don't dodge
+/// a rule: strip surrounding quotes per token, and rewrite any `rm` invocation
+/// whose flags carry BOTH recursive and force (in any form — `-fr`, `-r -f`,
+/// `--recursive --force`) to the canonical `rm -rf`. Matched alongside the
+/// original, so this only ever adds matches.
+fn normalize_command(cmd: &str) -> String {
+    let tokens: Vec<String> = cmd
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\'').to_string())
+        .collect();
+    let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i] == "rm" {
+            let mut j = i + 1;
+            let (mut recursive, mut force) = (false, false);
+            while j < tokens.len() && tokens[j].starts_with('-') {
+                let t = &tokens[j];
+                let long = t.starts_with("--");
+                if (long && *t == "--recursive") || (!long && (t.contains('r') || t.contains('R'))) {
+                    recursive = true;
+                }
+                if (long && *t == "--force") || (!long && t.contains('f')) {
+                    force = true;
+                }
+                j += 1;
+            }
+            out.push("rm".into());
+            if recursive && force {
+                out.push("-rf".into());
+            } else {
+                out.extend(tokens[i + 1..j].iter().cloned());
+            }
+            i = j;
+        } else {
+            out.push(tokens[i].clone());
+            i += 1;
+        }
+    }
+    out.join(" ")
 }
 
 /// match raw params against a secret regex pattern
@@ -355,6 +398,20 @@ mod tests {
         assert!(matches_command(r"rm\s+-rf\s+/.*", "rm -rf /etc"));
         assert!(matches_command(r"rm\s+-rf\s+/.*", "rm  -rf  /"));
         assert!(!matches_command(r"rm\s+-rf\s+/.*", "rm file.txt"));
+    }
+
+    #[test]
+    fn normalize_canonicalizes_rm_flag_variants() {
+        // the shipped root-deletion rule, against every flag spelling
+        let rule = r"rm\s+-rf\s+/(\s|$|[^~])";
+        assert!(matches_command(rule, "rm -fr /"));
+        assert!(matches_command(rule, "rm -r -f /etc"));
+        assert!(matches_command(rule, "rm --recursive --force /"));
+        assert!(matches_command(rule, r#"rm -rf "/""#));
+        assert!(matches_command(rule, "rm -rf /"));
+        // a non-recursive or non-force rm must NOT be canonicalized into a match
+        assert!(!matches_command(rule, "rm -f /etc/hosts"));
+        assert!(!matches_command(rule, "rm file.txt"));
     }
 
     #[test]

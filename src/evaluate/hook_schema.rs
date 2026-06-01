@@ -115,18 +115,22 @@ fn extract_paths_from_command(cmd: &str) -> Vec<String> {
     paths
 }
 
-/// the path-bearing substrings of a single token: a bare token is itself; a
-/// flag token (`-x`) may still glue a path after `=` or after the flag letters.
+/// the path-bearing substrings of a single token. The whole token, plus the
+/// value after `=` (`--upload-file=<path>`, `file=@<path>`) and after `@`
+/// (`curl -d @<path>`, `-F x=@<path>`), plus — for a flag token — the path
+/// glued after the flag letters (`-T<path>`, `-C<path>`).
 fn path_candidates(token: &str) -> Vec<String> {
-    if !token.starts_with('-') {
-        return vec![token.to_string()];
-    }
-    let mut out = Vec::new();
+    let mut out = vec![token.to_string()];
     if let Some(eq) = token.find('=') {
         out.push(token[eq + 1..].to_string());
     }
-    if let Some(pos) = token.find(['/', '~']) {
-        out.push(token[pos..].to_string());
+    if let Some(at) = token.find('@') {
+        out.push(token[at + 1..].to_string());
+    }
+    if token.starts_with('-') {
+        if let Some(pos) = token.find(['/', '~']) {
+            out.push(token[pos..].to_string());
+        }
     }
     out
 }
