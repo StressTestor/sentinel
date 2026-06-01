@@ -57,7 +57,13 @@ impl PolicyEngine {
     pub fn load(path: &Path) -> Result<Self, PolicyError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| PolicyError::ReadError(e.to_string()))?;
-        let config: PolicyConfig = toml::from_str(&content)
+        Self::from_toml_str(&content)
+    }
+
+    /// Build an engine from a policy TOML string (no filesystem read). Used by
+    /// `sentinel verify` to evaluate against the bundled default policy in-memory.
+    pub fn from_toml_str(content: &str) -> Result<Self, PolicyError> {
+        let config: PolicyConfig = toml::from_str(content)
             .map_err(|e| PolicyError::ParseError(format!("{e}")))?;
         Ok(Self { config: config.finalize() })
     }

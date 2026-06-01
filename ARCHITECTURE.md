@@ -184,8 +184,12 @@ idempotent: running install twice doesn't duplicate hooks.
 | `sentinel install` | install PreToolUse hook (audit mode) |
 | `sentinel install --enforce` | install with enforcement |
 | `sentinel uninstall` | remove hooks |
+| `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
+| `sentinel verify [--policy <file>]` | replay a pinned attack set through the policy, assert each is caught; non-zero exit on miss (CI gate) |
 | `sentinel status` | show config + hooks |
 | `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
+
+CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test` + `cargo clippy -- -D warnings` (see `.github/workflows/ci.yml`).
 
 ## publishing
 

@@ -135,9 +135,13 @@ sentinel install          install hooks + default policy (audit mode)
 sentinel install --enforce  install with enforcement
 sentinel uninstall        remove hooks
 sentinel evaluate         evaluate a tool call (called by the hook)
+sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
+sentinel verify           replay pinned attacks through the policy, assert each is caught
 sentinel status           show config, hooks, policy summary
 sentinel corpus-update    fetch latest attack corpus
 ```
+
+`sentinel verify` is also wired into CI as a regression gate: a fixed bypass that silently reopens, or a new rule that starts false-blocking benign dev work, turns the build red.
 
 ## built with
 

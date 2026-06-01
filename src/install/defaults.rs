@@ -19,7 +19,7 @@ pub fn write_default_policy(path: &Path, mode: &str) -> Result<(), InstallError>
         .map_err(|e| InstallError::WriteError(e.to_string()))
 }
 
-fn default_policy_content(mode: &str) -> String {
+pub(crate) fn default_policy_content(mode: &str) -> String {
     format!(
         r#"# sentinel policy configuration
 # docs: https://github.com/StressTestor/sentinel
@@ -114,13 +114,17 @@ pattern = "~/.azure/*"
 action = "block"
 reason = "Azure CLI tokens (accessTokens.json / msal cache)"
 
+# `**/` so an absolute, deep path (/Users/me/app/config/.env) matches, not just a
+# single-segment `dir/.env`. This broadens the WARN surface to any path ending in
+# `.env` (vars.env, production.env, *.env.bak); acceptable because it's warn-tier
+# (never block) and such files commonly hold secrets.
 [[deny.paths]]
-pattern = "*/.env"
+pattern = "**/.env"
 action = "warn"
 reason = "environment file may contain secrets"
 
 [[deny.paths]]
-pattern = "*/.env.*"
+pattern = "**/.env.*"
 action = "warn"
 reason = "environment file may contain secrets"
 
@@ -572,5 +576,17 @@ mod tests {
         assert_eq!(action_of(&path_call("./src/main.rs")), Action::Allow);
         assert_eq!(action_of(&path_call("~/.kube/notes.md")), Action::Allow);
         assert_eq!(action_of(&cmd_call("cargo build --release")), Action::Allow);
+    }
+
+    #[test]
+    fn env_files_warn_across_depth_but_never_block() {
+        // the **/.env anchor fix: an absolute, deep path must hit the warn rule
+        // (the old */.env compiled to ^[^/]*/\.env$ and missed it).
+        assert_eq!(action_of(&path_call("/Users/dev/app/config/.env")), Action::Warn);
+        assert_eq!(action_of(&path_call("./.env")), Action::Warn);
+        assert_eq!(action_of(&path_call("./config/.env.local")), Action::Warn);
+        // broadened warn surface: *.env-suffixed files now warn too - acceptable
+        // because it's warn-tier and must NEVER escalate to block.
+        assert_eq!(action_of(&path_call("/repo/production.env")), Action::Warn);
     }
 }
