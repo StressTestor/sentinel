@@ -88,6 +88,15 @@ impl PolicyEngine {
         !self.config.policy.on_failure.eq_ignore_ascii_case("open")
     }
 
+    /// Whether the policy guards Sentinel's own policy file (the self-protect
+    /// rule). Used by `sentinel doctor` to confirm the guard can't be trivially
+    /// reconfigured by the agent.
+    pub fn has_self_protect_rule(&self) -> bool {
+        self.config.deny_paths.iter().any(|r| {
+            r.pattern.contains(".sentinel/policy.toml") && r.action.eq_ignore_ascii_case("block")
+        })
+    }
+
     /// evaluate a tool call against the policy.
     /// deny rules are checked first. if any match, that action wins.
     /// if no deny matches and an allow list exists, paths outside

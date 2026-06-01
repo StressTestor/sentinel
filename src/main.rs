@@ -4,6 +4,7 @@ mod check;
 #[allow(dead_code)]
 mod classifier;
 mod cli;
+mod doctor;
 mod common;
 mod corpus;
 mod evaluate;
@@ -46,6 +47,7 @@ async fn main() {
         Command::Status => run_status(),
         Command::Check(args) => check::run(args),
         Command::Verify(args) => verify::run(args),
+        Command::Doctor(args) => doctor::run(args),
     };
 
     if let Err(e) = result {

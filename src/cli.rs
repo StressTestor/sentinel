@@ -38,6 +38,20 @@ pub enum Command {
 
     /// replay a pinned set of attacks through the policy and assert each is caught (CI gate)
     Verify(VerifyArgs),
+
+    /// validate the full install chain (hook, binary, policy) and probe liveness
+    Doctor(DoctorArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct DoctorArgs {
+    /// exit non-zero if any check fails (for use as a CI/cron gate)
+    #[arg(long, default_value_t = false)]
+    pub strict: bool,
+
+    /// emit a JSON report instead of human-readable output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]
