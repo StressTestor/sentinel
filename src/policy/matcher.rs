@@ -1,16 +1,177 @@
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 /// match a path against a glob-like pattern.
 /// supports: * (any segment), ** (recursive), ? (single char)
 /// also handles ~ expansion to match literal ~ paths.
 pub fn matches_path(pattern: &str, path: &str) -> bool {
-    let regex_str = glob_to_regex(pattern);
-    match Regex::new(&regex_str) {
-        Ok(re) => re.is_match(path),
-        Err(_) => {
-            tracing::warn!("invalid path pattern: {pattern}");
-            false
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    matches_path_resolved(pattern, path, &home, &user)
+}
+
+/// Resolve path equivalence, then match against the (home-expanded) glob.
+///
+/// A naive literal match lets an attacker dodge a rule like `~/.ssh/*` just by
+/// using the absolute path (`/Users/me/.ssh/id_rsa`) — the exact form Claude
+/// Code's Read/Write/Edit tools emit. We canonicalize both sides first: expand
+/// `~` / `~$USER` / `$HOME`, normalize `.`/`..`/`//`, resolve symlinks when the
+/// file exists, and match case-insensitively (macOS/APFS is case-insensitive).
+fn matches_path_resolved(pattern: &str, path: &str, home: &str, user: &str) -> bool {
+    let expanded_pattern = lexical_normalize(&expand_home(pattern, home, user));
+    let regexes = pattern_regexes(&expanded_pattern, pattern);
+    if regexes.is_empty() {
+        return false;
+    }
+    let candidates = candidate_forms(path, home, user);
+    regexes
+        .iter()
+        .any(|re| candidates.iter().any(|c| re.is_match(c)))
+}
+
+/// Build the case-insensitive regex(es) for an (already home-expanded) pattern.
+/// In addition to the literal pattern we add a symlink-resolved variant of its
+/// literal directory prefix, so a rule written against `/etc/passwd` also covers
+/// the canonical `/private/etc/passwd` an attacker can name directly (and any
+/// symlinked credential dir). Without this the canonicalization is asymmetric.
+fn pattern_regexes(expanded_pattern: &str, original: &str) -> Vec<regex::Regex> {
+    let mut pats = vec![expanded_pattern.to_string()];
+    if let Some(resolved) = canonicalize_pattern_prefix(expanded_pattern) {
+        if !pats.contains(&resolved) {
+            pats.push(resolved);
         }
+    }
+    pats.iter()
+        .filter_map(|p| {
+            RegexBuilder::new(&glob_to_regex(p))
+                .case_insensitive(true)
+                .build()
+                .map_err(|_| tracing::warn!("invalid path pattern: {original}"))
+                .ok()
+        })
+        .collect()
+}
+
+/// Symlink-resolve the literal directory prefix of a pattern (the part before
+/// the first glob metacharacter), re-appending the glob tail. Returns None when
+/// the prefix doesn't exist on disk or doesn't resolve to anything new.
+fn canonicalize_pattern_prefix(pattern: &str) -> Option<String> {
+    // only `*` and `?` are wildcards in glob_to_regex; `[`/`{` are escaped to
+    // literals, so they stay part of the literal prefix.
+    let glob_at = pattern.find(['*', '?']);
+    let (literal, tail) = match glob_at {
+        Some(i) => {
+            let cut = pattern[..i].rfind('/').map(|s| s + 1).unwrap_or(0);
+            (&pattern[..cut], &pattern[cut..])
+        }
+        None => (pattern, ""),
+    };
+    let literal = literal.trim_end_matches('/');
+    if literal.is_empty() {
+        return None;
+    }
+    let real = std::fs::canonicalize(literal).ok()?;
+    let real = real.to_str()?;
+    Some(if tail.is_empty() {
+        real.to_string()
+    } else {
+        format!("{real}/{tail}")
+    })
+}
+
+/// The equivalent spellings of `path` to test against a rule: the
+/// home/var-expanded + lexically-normalized form, the bare expanded form, the
+/// original spelling, and — when the file actually exists — the symlink-resolved
+/// canonical form (catches `/etc` → `/private/etc` and symlink-to-key tricks).
+fn candidate_forms(path: &str, home: &str, user: &str) -> Vec<String> {
+    let expanded = expand_home(path, home, user);
+    let lexical = lexical_normalize(&expanded);
+    let mut forms = vec![lexical.clone()];
+    for extra in [expanded, path.to_string()] {
+        if !forms.contains(&extra) {
+            forms.push(extra);
+        }
+    }
+    if let Ok(real) = std::fs::canonicalize(&lexical) {
+        if let Some(s) = real.to_str() {
+            if !forms.iter().any(|f| f == s) {
+                forms.push(s.to_string());
+            }
+        }
+    }
+    forms
+}
+
+/// Expand a leading `~`, `~/`, `~$USER`, `$HOME`, or `${HOME}` to the home dir.
+/// Glob metacharacters and the rest of the path are left intact.
+fn expand_home(p: &str, home: &str, user: &str) -> String {
+    if home.is_empty() {
+        return p.to_string();
+    }
+    let home = home.trim_end_matches('/');
+    if p == "~" {
+        return home.to_string();
+    }
+    if let Some(rest) = p.strip_prefix("~/") {
+        return format!("{home}/{rest}");
+    }
+    for var in ["${HOME}", "$HOME"] {
+        if let Some(rest) = p.strip_prefix(var) {
+            // only a real variable reference — `$HOME/...` or bare `$HOME`,
+            // not `$HOMEWORK`.
+            if rest.is_empty() || rest.starts_with('/') {
+                return format!("{home}{rest}");
+            }
+        }
+    }
+    // `~name` written for the current user's own home (e.g. `~joe/.ssh/...`).
+    if !user.is_empty() {
+        let tilde_user = format!("~{user}");
+        if p == tilde_user {
+            return home.to_string();
+        }
+        if let Some(rest) = p.strip_prefix(&format!("{tilde_user}/")) {
+            return format!("{home}/{rest}");
+        }
+    }
+    p.to_string()
+}
+
+/// Lexically normalize a path — collapse `//` and resolve `.`/`..` segments —
+/// WITHOUT touching the filesystem, so it also works for paths that don't exist
+/// yet (e.g. a `Write` to a new file). Glob metacharacters live inside a single
+/// segment and pass through untouched.
+///
+/// Lexical `..` can diverge from the real target through a symlinked directory.
+/// That is covered on the other side: `candidate_forms` also tests the
+/// `fs::canonicalize` form whenever the file exists (the authoritative
+/// resolution), and a symlink whose target does NOT exist yields no readable
+/// content — so the lexical-only path can't disclose a real credential.
+fn lexical_normalize(p: &str) -> String {
+    if p.is_empty() {
+        return p.to_string();
+    }
+    let is_abs = p.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if matches!(out.last(), Some(&s) if s != "..") {
+                    out.pop();
+                } else if !is_abs {
+                    out.push("..");
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    let joined = out.join("/");
+    if is_abs {
+        format!("/{joined}")
+    } else if joined.is_empty() {
+        ".".to_string()
+    } else {
+        joined
     }
 }
 
@@ -144,5 +305,71 @@ mod tests {
     fn secret_github_token() {
         assert!(matches_secret(r"ghp_[A-Za-z0-9]{36}", "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"));
         assert!(!matches_secret(r"ghp_[A-Za-z0-9]{36}", "ghp_tooshort"));
+    }
+
+    // ── path canonicalization (audit PR #1) ────────────────────────────────
+    // Regression guards for the absolute-path / $HOME / case / slash / dotdot
+    // bypasses of the credential path rules. home/user are injected so these
+    // are deterministic regardless of the machine they run on.
+    const TH: &str = "/Users/testuser";
+    const TU: &str = "testuser";
+
+    #[test]
+    fn canon_absolute_form_hits_tilde_rule() {
+        // THE headline bypass: Read emits absolute paths; they must hit the ~ rule.
+        assert!(matches_path_resolved("~/.ssh/*", "/Users/testuser/.ssh/id_rsa", TH, TU));
+        assert!(matches_path_resolved("~/.aws/*", "/Users/testuser/.aws/credentials", TH, TU));
+        assert!(matches_path_resolved("~/.gnupg/*", "/Users/testuser/.gnupg/secring.gpg", TH, TU));
+        assert!(matches_path_resolved("~/.config/gh/*", "/Users/testuser/.config/gh/hosts.yml", TH, TU));
+        assert!(matches_path_resolved("~/.netrc", "/Users/testuser/.netrc", TH, TU));
+    }
+
+    #[test]
+    fn canon_home_var_and_tilde_user() {
+        assert!(matches_path_resolved("~/.ssh/*", "$HOME/.ssh/id_rsa", TH, TU));
+        assert!(matches_path_resolved("~/.ssh/*", "${HOME}/.ssh/id_rsa", TH, TU));
+        assert!(matches_path_resolved("~/.ssh/*", "~testuser/.ssh/id_rsa", TH, TU));
+    }
+
+    #[test]
+    fn canon_double_slash_and_dotdot() {
+        assert!(matches_path_resolved("~/.netrc", "~//.netrc", TH, TU));
+        assert!(matches_path_resolved("/etc/passwd", "/etc/../etc/passwd", TH, TU));
+        assert!(matches_path_resolved("/etc/passwd", "//etc/passwd", TH, TU));
+    }
+
+    #[test]
+    fn canon_case_insensitive() {
+        assert!(matches_path_resolved("~/.ssh/*", "~/.SSH/id_rsa", TH, TU));
+        assert!(matches_path_resolved("~/.aws/*", "/Users/testuser/.AWS/credentials", TH, TU));
+    }
+
+    #[test]
+    fn canon_does_not_overmatch_unrelated_paths() {
+        // canonicalization must stay precise — these are NOT credential paths.
+        assert!(!matches_path_resolved("~/.ssh/*", "/Users/testuser/.config/foo", TH, TU));
+        assert!(!matches_path_resolved("~/.ssh/*", "/tmp/notes.txt", TH, TU));
+        assert!(!matches_path_resolved("~/.aws/*", "/Users/testuser/aws-notes.md", TH, TU));
+    }
+
+    #[test]
+    fn canon_pattern_resolves_symlinked_dir() {
+        // The /private/etc class: a rule names the symlink path while the attacker
+        // names the resolved real path. Canonicalizing only the candidate (not the
+        // rule) would miss it. Portable: build our own symlink in a tempdir.
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("sentinel_canon_{}", std::process::id()));
+        let real = base.join("realdir");
+        let link = base.join("linkdir");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("secret"), b"x").unwrap();
+        let _ = std::fs::remove_file(&link);
+        symlink(&real, &link).unwrap();
+
+        let rule = format!("{}/*", link.display()); // rule names the SYMLINK dir
+        let attack = format!("{}/secret", real.display()); // attacker names the REAL dir
+        let hit = matches_path_resolved(&rule, &attack, "/home/x", "x");
+        std::fs::remove_dir_all(&base).ok();
+        assert!(hit, "a rule on a symlinked dir must match the resolved real path");
     }
 }

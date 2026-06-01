@@ -40,7 +40,7 @@ fn build_dimension_summaries(results: &[AttackResult]) -> Vec<DimensionSummary> 
         })
         .collect();
 
-    summaries.sort_by(|a, b| b.vulnerable.cmp(&a.vulnerable));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.vulnerable));
     summaries
 }
 
