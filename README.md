@@ -100,15 +100,15 @@ reason = "AWS access key in command args"
 
 deny rules evaluate first. glob patterns for paths, regex for commands and secrets.
 
-## three-tier defense
+## defense tiers
 
-| tier | what | latency | false positives |
-|------|------|---------|-----------------|
-| 1. policy | deterministic deny/allow rules | <1ms | zero (by design) |
-| 2. heuristic | aho-corasick patterns from attack corpus | <10ms | yes (configurable) |
-| 3. LLM classifier | secondary model for ambiguous inputs | 100-500ms | yes (opt-in only) |
+| tier | what | status |
+|------|------|--------|
+| 1. policy | deterministic deny/allow rules — path canonicalization, shell-aware command matching, secret patterns, fail-closed on un-inspectable input | **active** — runs on every tool call |
+| 2. heuristic | aho-corasick patterns from the attack corpus + multi-turn context | **implemented, not yet wired** into the hook path (see roadmap) |
+| 3. LLM classifier | secondary model for ambiguous inputs | **planned** — interface only, not implemented |
 
-Tier 1 runs on every tool call. Tiers 2 and 3 add defense-in-depth for sophisticated attacks.
+Enforcement today is the Tier-1 policy engine. It's the deterministic, zero-false-positive layer and it's what blocks the attacks in the demo. Tiers 2 and 3 are scaffolding for defense-in-depth: the heuristic analyzer is written but isn't called on the evaluate hot path yet (wiring it needs a concurrency-safe context buffer and a false-positive budget), and the LLM classifier is an interface stub. Don't rely on 2 or 3 being active.
 
 ## commands
 

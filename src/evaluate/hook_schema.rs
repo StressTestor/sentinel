@@ -105,10 +105,10 @@ fn extract_paths_from_command(cmd: &str) -> Vec<String> {
             continue;
         }
         for cand in path_candidates(raw) {
-            let token = cand
-                .trim_matches(|c| c == '"' || c == '\'')
-                .trim_start_matches('@')
-                .trim_end_matches([',', ';', '"', '\'']);
+            // strip ALL quotes, not just surrounding, so `"$HOME"/.ssh` and
+            // `~/'.ssh'` normalize to a matchable path.
+            let stripped = cand.replace(['"', '\''], "");
+            let token = stripped.trim_start_matches('@').trim_end_matches([',', ';']);
             if token.contains('/') || token.starts_with('~') || token.starts_with('.') {
                 paths.push(token.to_string());
             }
@@ -256,6 +256,17 @@ mod tests {
             t3.paths.iter().any(|p| p.contains("authorized_keys")),
             "redir: {:?}",
             t3.paths
+        );
+    }
+
+    #[test]
+    fn paths_extracted_through_inner_quotes() {
+        // `"$HOME"/.ssh` — quotes mid-token must not hide the path
+        let t = tc(r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf \"$HOME\"/.ssh"}}"#);
+        assert!(
+            t.paths.iter().any(|p| p.contains("$HOME/.ssh")),
+            "{:?}",
+            t.paths
         );
     }
 
