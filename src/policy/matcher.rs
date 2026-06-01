@@ -1,12 +1,23 @@
 use regex::{Regex, RegexBuilder};
 
-/// match a path against a glob-like pattern.
-/// supports: * (any segment), ** (recursive), ? (single char)
-/// also handles ~ expansion to match literal ~ paths.
+/// Match a path against a **deny** rule. A trailing `/*` covers the whole
+/// subtree + the directory itself (a credential dir can't be dodged with a
+/// nested path or by naming the bare dir). Use this for deny.paths.
 pub fn matches_path(pattern: &str, path: &str) -> bool {
+    matches_path_env(pattern, path, true)
+}
+
+/// Match a path against an **allow** rule. A trailing `/*` stays strict
+/// (direct children only) so a narrow allow-list isn't silently widened — use
+/// `/**` for an intentional recursive allow. Use this for allow.paths.
+pub fn matches_allow_path(pattern: &str, path: &str) -> bool {
+    matches_path_env(pattern, path, false)
+}
+
+fn matches_path_env(pattern: &str, path: &str, recursive_dir: bool) -> bool {
     let home = std::env::var("HOME").unwrap_or_default();
     let user = std::env::var("USER").unwrap_or_default();
-    matches_path_resolved(pattern, path, &home, &user)
+    matches_path_resolved(pattern, path, &home, &user, recursive_dir)
 }
 
 /// Resolve path equivalence, then match against the (home-expanded) glob.
@@ -16,9 +27,17 @@ pub fn matches_path(pattern: &str, path: &str) -> bool {
 /// Code's Read/Write/Edit tools emit. We canonicalize both sides first: expand
 /// `~` / `~$USER` / `$HOME`, normalize `.`/`..`/`//`, resolve symlinks when the
 /// file exists, and match case-insensitively (macOS/APFS is case-insensitive).
-fn matches_path_resolved(pattern: &str, path: &str, home: &str, user: &str) -> bool {
+/// `recursive_dir` controls whether a trailing `/*` covers the subtree (deny)
+/// or only direct children (allow).
+fn matches_path_resolved(
+    pattern: &str,
+    path: &str,
+    home: &str,
+    user: &str,
+    recursive_dir: bool,
+) -> bool {
     let expanded_pattern = lexical_normalize(&expand_home(pattern, home, user));
-    let regexes = pattern_regexes(&expanded_pattern, pattern);
+    let regexes = pattern_regexes(&expanded_pattern, pattern, recursive_dir);
     if regexes.is_empty() {
         return false;
     }
@@ -33,7 +52,7 @@ fn matches_path_resolved(pattern: &str, path: &str, home: &str, user: &str) -> b
 /// literal directory prefix, so a rule written against `/etc/passwd` also covers
 /// the canonical `/private/etc/passwd` an attacker can name directly (and any
 /// symlinked credential dir). Without this the canonicalization is asymmetric.
-fn pattern_regexes(expanded_pattern: &str, original: &str) -> Vec<regex::Regex> {
+fn pattern_regexes(expanded_pattern: &str, original: &str, recursive_dir: bool) -> Vec<regex::Regex> {
     let mut pats = vec![expanded_pattern.to_string()];
     if let Some(resolved) = canonicalize_pattern_prefix(expanded_pattern) {
         if !pats.contains(&resolved) {
@@ -42,7 +61,7 @@ fn pattern_regexes(expanded_pattern: &str, original: &str) -> Vec<regex::Regex> 
     }
     pats.iter()
         .filter_map(|p| {
-            RegexBuilder::new(&glob_to_regex(p))
+            RegexBuilder::new(&glob_to_regex(p, recursive_dir))
                 .case_insensitive(true)
                 .build()
                 .map_err(|_| tracing::warn!("invalid path pattern: {original}"))
@@ -197,14 +216,31 @@ pub fn matches_secret(pattern: &str, raw: &str) -> bool {
     }
 }
 
-/// convert a glob pattern to a regex string.
-/// - `*` matches anything except `/`
-/// - `**` matches anything including `/`
-/// - `?` matches a single character
-/// - `.` is escaped
-/// - `~` is literal
-fn glob_to_regex(pattern: &str) -> String {
-    let mut regex = String::from("^");
+/// convert a glob pattern to an anchored regex string.
+/// - `*` matches anything except `/`, `**` matches anything including `/`,
+///   `?` matches a single character, `.` is escaped.
+/// - a TRAILING `/*` or `/**` means "this directory and everything under it":
+///   the directory itself plus any descendant. So a deny rule `~/.ssh/*` covers
+///   `~/.ssh`, `~/.ssh/id_rsa`, and `~/.ssh/keys/id_rsa` alike — a credential
+///   directory can't be dodged with a nested path or by naming the bare dir.
+fn glob_to_regex(pattern: &str, recursive_dir: bool) -> String {
+    // `/**` is an explicit recursive match (subtree + the dir itself), always.
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return format!("^{}(?:/.*)?$", glob_body(prefix));
+    }
+    // a trailing `/*` is recursive ONLY for deny rules; for allow rules it stays
+    // strict (direct children) so a narrow allow-list isn't silently widened.
+    if recursive_dir {
+        if let Some(prefix) = pattern.strip_suffix("/*") {
+            return format!("^{}(?:/.*)?$", glob_body(prefix));
+        }
+    }
+    format!("^{}$", glob_body(pattern))
+}
+
+/// convert a glob pattern to a regex fragment (no `^`/`$` anchors).
+fn glob_body(pattern: &str) -> String {
+    let mut regex = String::new();
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
 
@@ -245,7 +281,6 @@ fn glob_to_regex(pattern: &str) -> String {
         }
     }
 
-    regex.push('$');
     regex
 }
 
@@ -257,7 +292,41 @@ mod tests {
     fn glob_star_matches_filename() {
         assert!(matches_path("~/.ssh/*", "~/.ssh/id_rsa"));
         assert!(matches_path("~/.ssh/*", "~/.ssh/known_hosts"));
-        assert!(!matches_path("~/.ssh/*", "~/.ssh/subdir/key"));
+        // PR #1b: a trailing `/*` deny rule now covers the whole subtree, not
+        // just direct children — a nested key must not slip through.
+        assert!(matches_path("~/.ssh/*", "~/.ssh/subdir/key"));
+    }
+
+    #[test]
+    fn glob_dir_rule_matches_subtree_and_self() {
+        // nested keys under a credential dir
+        assert!(matches_path_resolved("~/.ssh/*", "/Users/testuser/.ssh/keys/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved(
+            "~/.aws/*",
+            "/Users/testuser/.aws/sso/cache/tok.json",
+            TH,
+            TU,
+            true
+        ));
+        // the bare directory itself (tar/grep/rm of the dir)
+        assert!(matches_path_resolved("~/.ssh/*", "/Users/testuser/.ssh", TH, TU, true));
+        assert!(matches_path_resolved("~/.aws/*", "/Users/testuser/.aws", TH, TU, true));
+        // still must not leak to a sibling that merely shares a prefix
+        assert!(!matches_path_resolved("~/.ssh/*", "/Users/testuser/.ssh_backup", TH, TU, true));
+    }
+
+    #[test]
+    fn allow_star_stays_strict_deny_star_is_recursive() {
+        // Same `/*` pattern, two contexts. Deny must cover the subtree; allow must
+        // NOT — otherwise a narrow allow-list + default=block silently lets a
+        // nested path through (the lockdown-config regression).
+        assert!(matches_path_resolved("/p/src/*", "/p/src/sub/evil.sh", "/h", "u", true));
+        assert!(!matches_path_resolved("/p/src/*", "/p/src/sub/evil.sh", "/h", "u", false));
+        // allow still matches a direct child, as written
+        assert!(matches_path_resolved("/p/src/*", "/p/src/main.rs", "/h", "u", false));
+        // public allow entry point mirrors the strict semantics
+        assert!(!matches_allow_path("/p/src/*", "/p/src/sub/evil.sh"));
+        assert!(matches_allow_path("/p/src/*", "/p/src/main.rs"));
     }
 
     #[test]
@@ -317,39 +386,39 @@ mod tests {
     #[test]
     fn canon_absolute_form_hits_tilde_rule() {
         // THE headline bypass: Read emits absolute paths; they must hit the ~ rule.
-        assert!(matches_path_resolved("~/.ssh/*", "/Users/testuser/.ssh/id_rsa", TH, TU));
-        assert!(matches_path_resolved("~/.aws/*", "/Users/testuser/.aws/credentials", TH, TU));
-        assert!(matches_path_resolved("~/.gnupg/*", "/Users/testuser/.gnupg/secring.gpg", TH, TU));
-        assert!(matches_path_resolved("~/.config/gh/*", "/Users/testuser/.config/gh/hosts.yml", TH, TU));
-        assert!(matches_path_resolved("~/.netrc", "/Users/testuser/.netrc", TH, TU));
+        assert!(matches_path_resolved("~/.ssh/*", "/Users/testuser/.ssh/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.aws/*", "/Users/testuser/.aws/credentials", TH, TU, true));
+        assert!(matches_path_resolved("~/.gnupg/*", "/Users/testuser/.gnupg/secring.gpg", TH, TU, true));
+        assert!(matches_path_resolved("~/.config/gh/*", "/Users/testuser/.config/gh/hosts.yml", TH, TU, true));
+        assert!(matches_path_resolved("~/.netrc", "/Users/testuser/.netrc", TH, TU, true));
     }
 
     #[test]
     fn canon_home_var_and_tilde_user() {
-        assert!(matches_path_resolved("~/.ssh/*", "$HOME/.ssh/id_rsa", TH, TU));
-        assert!(matches_path_resolved("~/.ssh/*", "${HOME}/.ssh/id_rsa", TH, TU));
-        assert!(matches_path_resolved("~/.ssh/*", "~testuser/.ssh/id_rsa", TH, TU));
+        assert!(matches_path_resolved("~/.ssh/*", "$HOME/.ssh/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.ssh/*", "${HOME}/.ssh/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.ssh/*", "~testuser/.ssh/id_rsa", TH, TU, true));
     }
 
     #[test]
     fn canon_double_slash_and_dotdot() {
-        assert!(matches_path_resolved("~/.netrc", "~//.netrc", TH, TU));
-        assert!(matches_path_resolved("/etc/passwd", "/etc/../etc/passwd", TH, TU));
-        assert!(matches_path_resolved("/etc/passwd", "//etc/passwd", TH, TU));
+        assert!(matches_path_resolved("~/.netrc", "~//.netrc", TH, TU, true));
+        assert!(matches_path_resolved("/etc/passwd", "/etc/../etc/passwd", TH, TU, true));
+        assert!(matches_path_resolved("/etc/passwd", "//etc/passwd", TH, TU, true));
     }
 
     #[test]
     fn canon_case_insensitive() {
-        assert!(matches_path_resolved("~/.ssh/*", "~/.SSH/id_rsa", TH, TU));
-        assert!(matches_path_resolved("~/.aws/*", "/Users/testuser/.AWS/credentials", TH, TU));
+        assert!(matches_path_resolved("~/.ssh/*", "~/.SSH/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.aws/*", "/Users/testuser/.AWS/credentials", TH, TU, true));
     }
 
     #[test]
     fn canon_does_not_overmatch_unrelated_paths() {
         // canonicalization must stay precise — these are NOT credential paths.
-        assert!(!matches_path_resolved("~/.ssh/*", "/Users/testuser/.config/foo", TH, TU));
-        assert!(!matches_path_resolved("~/.ssh/*", "/tmp/notes.txt", TH, TU));
-        assert!(!matches_path_resolved("~/.aws/*", "/Users/testuser/aws-notes.md", TH, TU));
+        assert!(!matches_path_resolved("~/.ssh/*", "/Users/testuser/.config/foo", TH, TU, true));
+        assert!(!matches_path_resolved("~/.ssh/*", "/tmp/notes.txt", TH, TU, true));
+        assert!(!matches_path_resolved("~/.aws/*", "/Users/testuser/aws-notes.md", TH, TU, true));
     }
 
     #[test]
@@ -368,7 +437,7 @@ mod tests {
 
         let rule = format!("{}/*", link.display()); // rule names the SYMLINK dir
         let attack = format!("{}/secret", real.display()); // attacker names the REAL dir
-        let hit = matches_path_resolved(&rule, &attack, "/home/x", "x");
+        let hit = matches_path_resolved(&rule, &attack, "/home/x", "x", true);
         std::fs::remove_dir_all(&base).ok();
         assert!(hit, "a rule on a symlinked dir must match the resolved real path");
     }
