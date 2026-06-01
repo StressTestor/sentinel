@@ -162,19 +162,29 @@ action = "warn"
 reason = "world-writable permissions"
 
 [[deny.secrets]]
-pattern = 'AKIA[0-9A-Z]{{16}}'
+pattern = '\b(AKIA|ASIA)[0-9A-Z]{{16}}\b'
 action = "block"
-reason = "AWS access key ID"
+reason = "AWS access key ID (long-term AKIA + temporary ASIA)"
 
 [[deny.secrets]]
-pattern = 'ghp_[A-Za-z0-9]{{36}}'
+pattern = '(gh[posru]_[A-Za-z0-9]{{36,}}|github_pat_[A-Za-z0-9_]{{40,}})'
 action = "block"
-reason = "GitHub personal access token"
+reason = "GitHub token (classic or fine-grained PAT)"
 
 [[deny.secrets]]
-pattern = 'sk-[A-Za-z0-9]{{48}}'
+pattern = '\bsk-(ant-)?[A-Za-z0-9_-]{{20,}}'
 action = "block"
-reason = "OpenAI/Anthropic API key"
+reason = "OpenAI / Anthropic API key"
+
+[[deny.secrets]]
+pattern = 'npm_[A-Za-z0-9]{{36}}'
+action = "block"
+reason = "npm access token"
+
+[[deny.secrets]]
+pattern = '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'
+action = "block"
+reason = "private key material"
 
 # allow rules — if present, paths not matching any allow rule get the default action.
 # uncomment and customize for your project:
