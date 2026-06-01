@@ -48,6 +48,14 @@ pub struct ToolCall {
     pub raw_params: String,
 }
 
+/// A borrowed, section-tagged view of one policy rule.
+pub struct RuleView<'a> {
+    pub section: &'a str,
+    pub pattern: &'a str,
+    pub action: &'a str,
+    pub reason: &'a str,
+}
+
 /// load and evaluate tool calls against a policy file
 pub struct PolicyEngine {
     config: PolicyConfig,
@@ -95,6 +103,29 @@ impl PolicyEngine {
         self.config.deny_paths.iter().any(|r| {
             r.pattern.contains(".sentinel/policy.toml") && r.action.eq_ignore_ascii_case("block")
         })
+    }
+
+    /// A flat, read-only view of every rule (for `policy-diff` and `policy lint`).
+    pub fn rules(&self) -> Vec<RuleView<'_>> {
+        let mut out = Vec::new();
+        for r in &self.config.deny_paths {
+            out.push(RuleView { section: "deny.paths", pattern: &r.pattern, action: &r.action, reason: &r.reason });
+        }
+        for r in &self.config.deny_commands {
+            out.push(RuleView { section: "deny.commands", pattern: &r.pattern, action: &r.action, reason: &r.reason });
+        }
+        for r in &self.config.deny_secrets {
+            out.push(RuleView { section: "deny.secrets", pattern: &r.pattern, action: &r.action, reason: &r.reason });
+        }
+        for r in &self.config.allow_paths {
+            out.push(RuleView {
+                section: "allow.paths",
+                pattern: &r.pattern,
+                action: "allow",
+                reason: r.note.as_deref().unwrap_or(""),
+            });
+        }
+        out
     }
 
     /// evaluate a tool call against the policy.
