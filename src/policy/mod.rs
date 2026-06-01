@@ -75,6 +75,13 @@ impl PolicyEngine {
         self.config.policy.mode == "audit"
     }
 
+    /// Whether an input sentinel can't evaluate should be denied rather than
+    /// allowed. Anything other than an explicit `on_failure = "open"` fails
+    /// closed (the documented + default-shipped posture).
+    pub fn fail_closed(&self) -> bool {
+        !self.config.policy.on_failure.eq_ignore_ascii_case("open")
+    }
+
     /// evaluate a tool call against the policy.
     /// deny rules are checked first. if any match, that action wins.
     /// if no deny matches and an allow list exists, paths outside
@@ -363,5 +370,28 @@ mod tests {
             raw_params: "{}".into(),
         };
         assert_eq!(engine.evaluate(&nested).action, Action::Block);
+    }
+
+    #[test]
+    fn fail_closed_posture_from_on_failure() {
+        let mk = |of: &str| {
+            PolicyEngine::from_config(PolicyConfig::new(
+                PolicySettings {
+                    mode: "enforce".into(),
+                    on_failure: of.into(),
+                    default: "warn".into(),
+                },
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ))
+        };
+        // anything that isn't an explicit "open" fails closed
+        assert!(mk("closed").fail_closed());
+        assert!(mk("Closed").fail_closed());
+        assert!(mk("").fail_closed());
+        assert!(!mk("open").fail_closed());
+        assert!(!mk("OPEN").fail_closed());
     }
 }

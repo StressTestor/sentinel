@@ -72,6 +72,11 @@ action = "block"
 reason = "macOS shadowed password hashes"
 
 [[deny.paths]]
+pattern = "/proc/*/environ"
+action = "block"
+reason = "process environment (env-var exfil via file read)"
+
+[[deny.paths]]
 pattern = "*/.env"
 action = "warn"
 reason = "environment file may contain secrets"
@@ -145,6 +150,11 @@ reason = "environment variable exfiltration"
 pattern = '\bfind\b\s+(/|~|\$HOME|\.)\S*.*-i?name\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|\.key|\.gpg|\.kdbx)'
 action = "block"
 reason = "filesystem scan for credential files"
+
+[[deny.commands]]
+pattern = '\b(locate|mdfind)\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|secring|\.kdbx)'
+action = "block"
+reason = "credential filesystem scan via locate/mdfind"
 
 [[deny.commands]]
 pattern = 'chmod\s+777\s+.*'
