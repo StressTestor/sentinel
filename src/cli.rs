@@ -32,6 +32,24 @@ pub enum Command {
 
     /// show current config, active hooks, policy summary
     Status,
+
+    /// dry-run a tool call against the policy and explain the decision (no execution, no logging)
+    Check(CheckArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CheckArgs {
+    /// the PreToolUse hook JSON to evaluate, e.g. '{"tool_name":"Read","tool_input":{"file_path":"~/.ssh/id_rsa"}}'
+    /// (if omitted and --file is not given, reads from stdin)
+    pub input: Option<String>,
+
+    /// read the hook JSON from a file instead of an argument
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+
+    /// emit a stable JSON result instead of human-readable output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]
