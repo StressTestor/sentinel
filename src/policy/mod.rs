@@ -1,7 +1,7 @@
 pub mod matcher;
 pub mod schema;
 
-use matcher::{matches_command, matches_path, matches_secret};
+use matcher::{matches_allow_path, matches_command, matches_path, matches_secret};
 use schema::PolicyConfig;
 use std::path::Path;
 use thiserror::Error;
@@ -124,7 +124,7 @@ impl PolicyEngine {
                     .config
                     .allow_paths
                     .iter()
-                    .any(|rule| matches_path(&rule.pattern, path));
+                    .any(|rule| matches_allow_path(&rule.pattern, path));
                 if !allowed {
                     return PolicyDecision {
                         action: parse_action(&self.config.policy.default),
@@ -328,5 +328,40 @@ mod tests {
         };
         let decision = engine.evaluate(&call);
         assert_eq!(decision.action, Action::Allow);
+    }
+
+    #[test]
+    fn allow_list_star_is_not_widened_to_subtree() {
+        // lockdown config: narrow allow + default=block. A nested path under an
+        // allow `/*` rule must still fall through to the default (block) — the
+        // deny-side recursive-glob fix must not silently widen allow-lists.
+        let engine = PolicyEngine::from_config(PolicyConfig::new(
+            PolicySettings {
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "block".into(),
+            },
+            vec![],
+            vec![],
+            vec![],
+            vec![AllowPathRule {
+                pattern: "./src/*".into(),
+                note: None,
+            }],
+        ));
+        let direct = ToolCall {
+            tool_name: "Edit".into(),
+            command: None,
+            paths: vec!["./src/main.rs".into()],
+            raw_params: "{}".into(),
+        };
+        assert_eq!(engine.evaluate(&direct).action, Action::Allow);
+        let nested = ToolCall {
+            tool_name: "Edit".into(),
+            command: None,
+            paths: vec!["./src/secrets/prod.env".into()],
+            raw_params: "{}".into(),
+        };
+        assert_eq!(engine.evaluate(&nested).action, Action::Block);
     }
 }
