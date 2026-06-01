@@ -35,6 +35,16 @@ pub enum Command {
 
     /// dry-run a tool call against the policy and explain the decision (no execution, no logging)
     Check(CheckArgs),
+
+    /// replay a pinned set of attacks through the policy and assert each is caught (CI gate)
+    Verify(VerifyArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct VerifyArgs {
+    /// verify a specific policy file instead of the bundled default policy
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

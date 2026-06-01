@@ -11,6 +11,7 @@ mod evaluate;
 mod heuristic;
 mod install;
 mod policy;
+mod verify;
 mod wrap;
 
 use clap::Parser;
@@ -44,6 +45,7 @@ async fn main() {
         }
         Command::Status => run_status(),
         Command::Check(args) => check::run(args),
+        Command::Verify(args) => verify::run(args),
     };
 
     if let Err(e) = result {

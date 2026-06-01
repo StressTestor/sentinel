@@ -20,6 +20,8 @@ jobs:
         run: cargo test --verbose
       - name: clippy
         run: cargo clippy -- -D warnings
+      - name: attack regression gate
+        run: cargo run --quiet -- verify
 
   cross:
     needs: test
