@@ -51,6 +51,12 @@ sentinel/
 │   ├── evaluate/
 │   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> stdout JSON)
 │   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema
+│   ├── check/
+│   │   └── mod.rs          sentinel check: dry-run/explain a tool call (read-only)
+│   ├── verify/
+│   │   └── mod.rs          sentinel verify: pinned attack regression set (CI gate)
+│   ├── doctor/
+│   │   └── mod.rs          sentinel doctor: install-chain validation + liveness probe
 │   ├── install/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
 │   │   ├── hooks.rs        read/merge/write ~/.claude/settings.json
@@ -186,6 +192,7 @@ idempotent: running install twice doesn't duplicate hooks.
 | `sentinel uninstall` | remove hooks |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
 | `sentinel verify [--policy <file>]` | replay a pinned attack set through the policy, assert each is caught; non-zero exit on miss (CI gate) |
+| `sentinel doctor [--strict] [--json]` | validate the install chain (hook entry, binary runs, policy loads, self-protect rule) + probe liveness; detects a disarmed guard; `--strict` exits non-zero on any failure |
 | `sentinel status` | show config + hooks |
 | `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
 

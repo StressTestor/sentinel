@@ -137,6 +137,7 @@ sentinel uninstall        remove hooks
 sentinel evaluate         evaluate a tool call (called by the hook)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
 sentinel verify           replay pinned attacks through the policy, assert each is caught
+sentinel doctor [--strict] validate the install chain + probe liveness (detects a disarmed guard)
 sentinel status           show config, hooks, policy summary
 sentinel corpus-update    fetch latest attack corpus
 ```
