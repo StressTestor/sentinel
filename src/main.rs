@@ -12,6 +12,7 @@ mod evaluate;
 mod heuristic;
 mod install;
 mod policy;
+mod policy_diff;
 mod verify;
 mod wrap;
 
@@ -48,6 +49,7 @@ async fn main() {
         Command::Check(args) => check::run(args),
         Command::Verify(args) => verify::run(args),
         Command::Doctor(args) => doctor::run(args),
+        Command::PolicyDiff(args) => policy_diff::run(args),
     };
 
     if let Err(e) = result {

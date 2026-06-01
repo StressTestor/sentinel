@@ -41,6 +41,17 @@ pub enum Command {
 
     /// validate the full install chain (hook, binary, policy) and probe liveness
     Doctor(DoctorArgs),
+
+    /// show which bundled-default rules are missing from your policy (read-only)
+    #[command(name = "policy-diff")]
+    PolicyDiff(PolicyDiffArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PolicyDiffArgs {
+    /// diff a specific policy file instead of the installed ~/.sentinel/policy.toml
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
