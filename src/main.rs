@@ -11,6 +11,7 @@ mod evaluate;
 #[allow(dead_code)]
 mod heuristic;
 mod install;
+mod lint;
 mod policy;
 mod policy_diff;
 mod verify;
@@ -50,6 +51,7 @@ async fn main() {
         Command::Verify(args) => verify::run(args),
         Command::Doctor(args) => doctor::run(args),
         Command::PolicyDiff(args) => policy_diff::run(args),
+        Command::PolicyLint(args) => lint::run(args),
     };
 
     if let Err(e) = result {
