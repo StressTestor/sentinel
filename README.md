@@ -110,6 +110,23 @@ deny rules evaluate first. glob patterns for paths, regex for commands and secre
 
 Enforcement today is the Tier-1 policy engine. It's the deterministic, zero-false-positive layer and it's what blocks the attacks in the demo. Tiers 2 and 3 are scaffolding for defense-in-depth: the heuristic analyzer is written but isn't called on the evaluate hot path yet (wiring it needs a concurrency-safe context buffer and a false-positive budget), and the LLM classifier is an interface stub. Don't rely on 2 or 3 being active.
 
+## supply-chain hardening (and what it can't do)
+
+the self-propagating npm/pypi worms in the shai-hulud / Miasma family inject persistence and steal credentials through package lifecycle scripts. the default policy now covers the part of that an agent runtime can actually see:
+
+- **self-protect.** the agent can't write `~/.sentinel/policy.toml`. a guard that lets an injected agent flip itself to audit mode is not a guard. blocked at the tool-call layer (your own editor, and `sentinel install`, are unaffected since they don't go through the hook).
+- **credential coverage.** more credential files and secret formats: `~/.npmrc`, `~/.kube/config`, `~/.config/gcloud/`, `~/.azure/` (block), plus GCP / Azure / Vault / kubeconfig secret content in writes.
+- **warn-level tripwires** for the agent-driven version of the TTPs: writes to other agents' hook configs (`.claude/settings.json`, `~/.codex`, `~/.gemini`, `.vscode/tasks.json`), LaunchAgent / systemd-user persistence units, and `npm publish` / `npm token` / `gh repo create --public`. these are warn, not block, because developers do all of them legitimately.
+
+now the part nobody else says out loud:
+
+**sentinel hooks the agent's tool calls. it does not and cannot see npm lifecycle scripts.** when the worm's payload runs, it runs inside a child process of `npm install`, not as an agent tool call. that never crosses the PreToolUse hook. so these rules catch the case where a prompt injection drives *the agent itself* into writing a LaunchAgent or exfiltrating a credential. they do not catch the worm propagating on its own. anything that claims a runtime hook stops a lifecycle-script worm is lying to you.
+
+two more honest caveats:
+
+- the self-protect block is porous, and it only covers `policy.toml`. the more complete disable vector is removing sentinel's own PreToolUse hook entry from `~/.claude/settings.json`. that path is `warn`, not block: you can't path-isolate one entry inside a dual-use file without false-blocking every legit settings edit, so a hook-removal is surfaced but allowed. a path assembled from a shell variable, or a write from a subprocess, also gets through. this raises the cost of disarming sentinel; it is not tamper-proof. content-aware protection of the hook entry is a follow-up.
+- `sentinel install` does **not** overwrite an existing `~/.sentinel/policy.toml`, and the default is audit mode. if you already have a policy, these new rules won't appear until you regenerate it, and nothing blocks until you switch to `--enforce`.
+
 ## commands
 
 ```

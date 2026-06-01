@@ -117,6 +117,28 @@ Tool call arrives (via PreToolUse hook)
 > "three-tier defense" framing oversold tiers 2/3 — they're scaffolding, not
 > active mitigations. Treat anything Tier 1 doesn't catch as not caught.
 
+### default policy coverage
+
+`install/defaults.rs` generates the default `policy.toml`. Beyond the baseline
+(credential paths, recursive deletion, pipe-to-shell, secret patterns) it ships a
+shai-hulud / Miasma supply-chain hardening pack, organized by honesty tier:
+
+- **block (zero-FP):** self-protect of `~/.sentinel/policy.toml`; expanded
+  credential paths (`~/.npmrc`, `~/.kube/config`, `~/.config/gcloud/`, `~/.azure/`)
+  and secret content (GCP service-account, Azure storage/SAS, Vault, kubeconfig key).
+- **warn (dual-use tripwires):** writes to other agents' hook configs
+  (`.claude/settings*.json`, `~/.codex`, `~/.gemini`, `.vscode/tasks.json`),
+  LaunchAgent / systemd-user persistence units, project-local `kubeconfig`, and
+  `npm/pnpm/yarn/bun publish` / `npm token` / `gh repo create --public`.
+
+Structural limit, by design: the PreToolUse hook only sees the agent's own tool
+calls. The worm's real payload runs in npm/pip lifecycle-script child processes,
+which never traverse the hook, so this pack covers the prompt-injection-drives-the-
+agent variant of the TTPs, not the worm self-propagating. The secret rules sit
+**after** the private-key rule so a GCP SA file (which matches both) blocks via the
+key rule rather than downgrading to the GCP-SA warn; an assembled-policy test in
+`install/defaults.rs` pins that ordering.
+
 ### Claude Code adapter (PreToolUse hook)
 
 ```
