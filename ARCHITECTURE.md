@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-04-15
+last updated: 2026-06-01
 
 ## overview
 
@@ -82,24 +82,40 @@ sentinel/
 
 ## key patterns
 
-### three-tier defense pipeline
+### defense pipeline
+
+Enforcement today is **Tier 1 only**. Tiers 2 and 3 exist in the tree but are
+not wired into the `evaluate` hot path — see status below.
 
 ```
-Tool call arrives (via PreToolUse hook or pty proxy)
+Tool call arrives (via PreToolUse hook)
      │
-     ├── Tier 1: Policy Engine (<1ms)
-     │   deterministic TOML rules. deny paths (glob), deny commands (regex),
-     │   deny secrets (regex). deny-first evaluation. zero false positives.
-     │
-     ├── Tier 2: Heuristic Analyzer (<10ms)
-     │   aho-corasick automata from PromptPressure corpus.
-     │   multi-turn context ring buffer. entropy scoring.
-     │   produces false positives by design (configurable sensitivity).
-     │
-     └── Tier 3: LLM Classifier (100-500ms, opt-in)
-         secondary model call for ambiguous inputs.
-         local Ollama or cloud API. stub implementation.
+     └── Tier 1: Policy Engine  [ACTIVE — runs on every call]
+         tool input -> ToolCall (command + canonicalized paths, extracted for
+         every tool type, not just "Bash"). deny-first evaluation:
+           - deny paths: glob, with ~ / $HOME / symlink / case canonicalization
+             and recursive directory coverage
+           - deny commands: regex over the raw + a normalized form (rm-flag
+             canonicalization), covering pipe-to-shell / fetch-exec variants
+           - deny secrets: regex over the request payload
+         un-inspectable input (empty / unparseable stdin) fails per on_failure
+         ("closed" by default → deny). zero false positives by design.
+
+   Tier 2: Heuristic Analyzer  [IMPLEMENTED, NOT WIRED]
+         aho-corasick over the PromptPressure corpus + a file-backed multi-turn
+         context buffer. `src/heuristic/` is complete but has no call site on
+         the evaluate path. Wiring it needs a concurrency-safe context buffer
+         (parallel hooks race on the ring-buffer file) and a false-positive
+         budget. Tracked as a follow-up.
+
+   Tier 3: LLM Classifier  [PLANNED — interface stub]
+         `src/classifier/` defines the interface; `classify()` returns None.
+         not implemented.
 ```
+
+> Honesty note: the policy engine (Tier 1) is the line of defense. The earlier
+> "three-tier defense" framing oversold tiers 2/3 — they're scaffolding, not
+> active mitigations. Treat anything Tier 1 doesn't catch as not caught.
 
 ### Claude Code adapter (PreToolUse hook)
 
@@ -130,10 +146,9 @@ idempotent: running install twice doesn't duplicate hooks.
 | failure | behavior |
 |---------|----------|
 | sentinel crash | fail-closed (configurable to open) |
-| policy parse error | refuse to start |
-| corpus corruption | fall back to Tier 1 only |
-| unknown hook schema | pass-through + warning |
-| context file corrupt | reset ring buffer + warning |
+| policy parse / load error | deny (can't make a safe decision) |
+| empty / unparseable / unreadable stdin | per `on_failure`: deny when "closed" (default), allow+warn when "open" |
+| policy file absent | deny |
 
 ## commands
 

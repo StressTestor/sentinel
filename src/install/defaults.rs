@@ -97,6 +97,11 @@ action = "block"
 reason = "recursive deletion of credential directory"
 
 [[deny.commands]]
+pattern = 'rm\s+-rf\s+(~|\$HOME)/?(\s|$)'
+action = "block"
+reason = "recursive deletion of the entire home directory"
+
+[[deny.commands]]
 pattern = '\b(curl|wget|fetch)\b[^|]*\|\s*[a-z/]*sh\b'
 action = "block"
 reason = "pipe to shell execution"
@@ -145,6 +150,11 @@ reason = "curl exfiltration of system file"
 pattern = '(?i)\b(env|printenv|set|export|declare)\b\s*\|\s*grep\b.*(key|secret|token|pass|auth|aws|gcp|azure|cred|api|access|private)'
 action = "block"
 reason = "environment variable exfiltration"
+
+[[deny.commands]]
+pattern = '\b(env|printenv|set|export|declare)\b\s*\|\s*(curl|wget|nc|ncat|telnet|fetch)\b'
+action = "block"
+reason = "environment piped straight to the network (exfiltration)"
 
 [[deny.commands]]
 pattern = '\bfind\b\s+(/|~|\$HOME|\.)\S*.*-i?name\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|\.key|\.gpg|\.kdbx)'
