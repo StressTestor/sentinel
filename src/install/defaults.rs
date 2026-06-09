@@ -136,6 +136,26 @@ action = "warn"
 reason = "agent write to Claude Code local settings (hook/permission surface) - review for unexpected changes"
 
 [[deny.paths]]
+pattern = "**/.claude/skills/**"
+action = "warn"
+reason = "agent write to a Claude Code skill (instruction-injection surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/agents/**"
+action = "warn"
+reason = "agent write to a Claude Code subagent definition (instruction-injection surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/hooks/**"
+action = "warn"
+reason = "agent write to a Claude Code hook script (execution surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.mcp.json"
+action = "warn"
+reason = "agent write to an MCP server config (adds tool/exec surface) - review for unexpected changes"
+
+[[deny.paths]]
 pattern = "~/.codex/*"
 action = "warn"
 reason = "agent write to Codex CLI config - review for unexpected changes"
@@ -533,6 +553,17 @@ mod tests {
         assert_eq!(action_of(&path_call("~/.codex/config.toml")), Action::Warn);
         assert_eq!(action_of(&path_call("~/.gemini/settings.json")), Action::Warn);
         assert_eq!(action_of(&path_call("./repo/.vscode/tasks.json")), Action::Warn);
+    }
+
+    #[test]
+    fn claude_extension_surfaces_warn() {
+        // skills / agents / hooks / MCP config are instruction- and exec-injection
+        // surfaces a poisoned repo can plant without ever issuing a blocked command
+        // (the mini-shai-hulud vector). Warn-tier: developers author these legitimately.
+        assert_eq!(action_of(&path_call("~/.claude/skills/evil/SKILL.md")), Action::Warn);
+        assert_eq!(action_of(&path_call("./project/.claude/agents/x.md")), Action::Warn);
+        assert_eq!(action_of(&path_call("~/.claude/hooks/clawd.js")), Action::Warn);
+        assert_eq!(action_of(&path_call("./repo/.mcp.json")), Action::Warn);
     }
 
     #[test]
