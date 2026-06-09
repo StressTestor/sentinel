@@ -7,13 +7,46 @@ use serde::Serialize;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
+/// PreToolUse hook output. Claude Code honors a block ONLY via the nested
+/// `hookSpecificOutput` form below — a flat top-level `permissionDecision` is
+/// silently ignored, which previously made every Sentinel block a no-op.
+/// An absent `hookSpecificOutput` (the `allow()` form) carries no decision, so
+/// Sentinel defers to Claude Code's normal permission flow rather than
+/// auto-approving the call.
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct HookOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub permission_decision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    #[serde(rename = "hookSpecificOutput", skip_serializing_if = "Option::is_none")]
+    hook_specific_output: Option<PreToolUseDecision>,
+}
+
+#[derive(Serialize)]
+struct PreToolUseDecision {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: &'static str,
+    #[serde(rename = "permissionDecision")]
+    permission_decision: &'static str,
+    #[serde(rename = "permissionDecisionReason")]
+    permission_decision_reason: String,
+}
+
+impl HookOutput {
+    /// No decision — defer to Claude Code's normal permission flow.
+    pub fn allow() -> Self {
+        HookOutput {
+            hook_specific_output: None,
+        }
+    }
+
+    /// Block the tool call via the nested PreToolUse contract Claude Code enforces.
+    pub fn deny(reason: impl Into<String>) -> Self {
+        HookOutput {
+            hook_specific_output: Some(PreToolUseDecision {
+                hook_event_name: "PreToolUse",
+                permission_decision: "deny",
+                permission_decision_reason: reason.into(),
+            }),
+        }
+    }
 }
 
 /// run the evaluate pipeline: read stdin JSON, evaluate policy, write stdout JSON.
@@ -27,10 +60,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => {
             tracing::error!("failed to load policy: {e}");
             // can't load policy → can't make a safe decision → deny
-            print_output(&HookOutput {
-                permission_decision: Some("deny".into()),
-                reason: Some(format!("policy load failed: {e}")),
-            });
+            print_output(&HookOutput::deny(format!("policy load failed: {e}")));
             return Ok(());
         }
     };
@@ -84,20 +114,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 decision.reason.as_deref().unwrap_or("no reason")
             );
         }
-        print_output(&HookOutput {
-            permission_decision: None, // no decision = allow
-            reason: None,
-        });
+        print_output(&HookOutput::allow()); // audit mode never blocks
         return Ok(());
     }
 
     // enforce mode
     match decision.action {
         Action::Block => {
-            print_output(&HookOutput {
-                permission_decision: Some("deny".into()),
-                reason: decision.reason,
-            });
+            print_output(&HookOutput::deny(
+                decision
+                    .reason
+                    .unwrap_or_else(|| "blocked by sentinel policy".into()),
+            ));
         }
         Action::Warn => {
             // warn = allow but log prominently
@@ -106,16 +134,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 tool_call.tool_name,
                 decision.reason.as_deref().unwrap_or("policy warning")
             );
-            print_output(&HookOutput {
-                permission_decision: None,
-                reason: None,
-            });
+            print_output(&HookOutput::allow());
         }
         Action::Allow => {
-            print_output(&HookOutput {
-                permission_decision: None,
-                reason: None,
-            });
+            print_output(&HookOutput::allow());
         }
     }
 
@@ -135,16 +157,10 @@ fn print_output(output: &HookOutput) {
 fn degraded(engine: &PolicyEngine, reason: &str) -> HookOutput {
     if engine.is_audit_mode() || !engine.fail_closed() {
         tracing::warn!("{reason} — allowing (audit/fail-open)");
-        HookOutput {
-            permission_decision: None,
-            reason: None,
-        }
+        HookOutput::allow()
     } else {
         tracing::warn!("{reason} — denying (fail-closed)");
-        HookOutput {
-            permission_decision: Some("deny".into()),
-            reason: Some(format!("{reason} — failing closed")),
-        }
+        HookOutput::deny(format!("{reason} — failing closed"))
     }
 }
 
@@ -153,4 +169,40 @@ fn degraded(engine: &PolicyEngine, reason: &str) -> HookOutput {
 pub(crate) fn resolve_policy_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".sentinel").join("policy.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude Code honors a PreToolUse block ONLY when `permissionDecision` is
+    /// nested under `hookSpecificOutput` with `hookEventName: "PreToolUse"` and
+    /// `permissionDecisionReason`. A flat top-level `permissionDecision` is
+    /// silently ignored — the bug that made every Sentinel block a no-op.
+    #[test]
+    fn deny_output_uses_nested_pretooluse_contract() {
+        let out = HookOutput::deny("pipe to shell execution");
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
+
+        let hso = &json["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PreToolUse");
+        assert_eq!(hso["permissionDecision"], "deny");
+        assert_eq!(hso["permissionDecisionReason"], "pipe to shell execution");
+        // and NOT the dead flat form that Claude Code ignores
+        assert!(
+            json.get("permissionDecision").is_none(),
+            "flat top-level permissionDecision is ignored by Claude Code"
+        );
+    }
+
+    /// allow/warn must emit NO decision (empty object) so Sentinel defers to
+    /// Claude Code's normal permission flow. Emitting `permissionDecision:"allow"`
+    /// would AUTO-APPROVE every tool call Sentinel doesn't block — a privilege
+    /// escalation, not a fix.
+    #[test]
+    fn allow_output_defers_to_normal_flow() {
+        let s = serde_json::to_string(&HookOutput::allow()).unwrap();
+        assert_eq!(s, "{}");
+    }
 }

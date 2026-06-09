@@ -161,8 +161,18 @@ Claude Code decides to use a tool
      │   parses tool call, extracts paths/commands
      │   evaluates against policy.toml
      │
-     └── stdout: { permissionDecision: "allow" | "deny" }
+     └── stdout (deny):  { "hookSpecificOutput": { "hookEventName": "PreToolUse",
+     │                       "permissionDecision": "deny", "permissionDecisionReason": ... } }
+     └── stdout (allow): {}   (no decision → defer to Claude Code's normal flow)
 ```
+
+> Gotcha: Claude Code only honors a PreToolUse block via the **nested**
+> `hookSpecificOutput.permissionDecision` form above. A flat top-level
+> `permissionDecision` (pre-0.2.1) is silently ignored — the policy decides and
+> the audit log records `block`, but the tool call runs anyway. Allow/warn emit
+> an empty object on purpose: emitting `permissionDecision: "allow"` would
+> auto-approve every un-blocked call instead of deferring to the normal prompt.
+> `tests/hook_contract.rs` pins this wire shape end-to-end through the real binary.
 
 installed by `sentinel install` which writes hook config to `~/.claude/settings.json`.
 the hook entry uses `matcher: ".*"` to intercept all tool types.
@@ -212,4 +222,4 @@ CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test
 
 ---
 
-last updated: 2026-06-01 by StressTestor (release v0.2.0: check/verify/doctor/policy-diff/policy-lint + Miasma hardening)
+last updated: 2026-06-09 by StressTestor (v0.2.1: fix silently-ignored blocks — emit nested hookSpecificOutput contract)
