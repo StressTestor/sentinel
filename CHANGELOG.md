@@ -4,6 +4,16 @@ All notable changes to sentinel-guard are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and this project uses semantic
 versioning.
 
+## [Unreleased]
+
+### Added
+- Default-policy warn coverage for the remaining Claude Code agent-config
+  surfaces a poisoned repo can plant on without issuing a blocked command:
+  `**/.claude/skills/**`, `**/.claude/agents/**`, `**/.claude/hooks/**`, and
+  `**/.mcp.json`. Warn-tier, matching the existing `settings.json` posture —
+  developers author these legitimately, so the write is surfaced for review,
+  not blocked. `policy-diff` surfaces them to installs that predate this.
+
 ## [0.2.1] - 2026-06-09
 
 Critical enforcement fix: blocks were silently ignored by Claude Code.
