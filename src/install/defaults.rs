@@ -309,8 +309,12 @@ pattern = '\b(rm|mv|ln|cp)\b.*\bsentinel-guard\b'
 action = "block"
 reason = "destructive operation against the Sentinel crate binary (sentinel-guard) - guard-disarm tamper"
 
+# the `/sentinel` must END the token (whitespace, quote, end-of-string, redirect,
+# or separator) so a dev checkout DIRECTORY named sentinel (`rm -rf
+# ~/projects/sentinel/target`) or a sentinel-prefixed file (`/tmp/sentinel-build`)
+# is NOT a false positive - only a path whose final component is the binary itself.
 [[deny.commands]]
-pattern = '\b(rm|mv|ln)\b.*/sentinel\b'
+pattern = '\b(rm|mv|ln)\b.*/sentinel(["\x27\s<>;|&]|$)'
 action = "block"
 reason = "destructive operation against a path ending in /sentinel - guard-disarm tamper"
 
@@ -760,6 +764,27 @@ mod tests {
         assert_eq!(action_of(&cmd_call("sentinel install")), Action::Allow);
         assert_eq!(action_of(&cmd_call("cargo install sentinel-guard")), Action::Allow);
         assert_eq!(action_of(&cmd_call("sentinel doctor")), Action::Allow);
+    }
+
+    #[test]
+    fn sentinel_tamper_rule_does_not_overmatch_dev_checkouts() {
+        // marko fix #1: `/sentinel` as a mid-path DIRECTORY component is a dev
+        // checkout (or a sentinel-prefixed sibling file), not the binary -
+        // rm/mv/ln there must sail through.
+        assert_eq!(action_of(&cmd_call("rm -rf ~/projects/sentinel/target")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("rm /tmp/sentinel-build")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("rm ~/code/sentinel/notes.md")), Action::Allow);
+    }
+
+    #[test]
+    fn sentinel_tamper_rule_still_blocks_final_component_binary() {
+        // the rule's actual target: a path whose FINAL component is exactly
+        // `sentinel` (the binary), terminated by whitespace/quote/end/redirect
+        assert_eq!(action_of(&cmd_call("rm ~/.cargo/bin/sentinel")), Action::Block);
+        // a non-install location only the COMMAND rule can know about
+        assert_eq!(action_of(&cmd_call("mv /opt/tools/sentinel /tmp/backup")), Action::Block);
+        // quoted form: the token ends at the closing quote
+        assert_eq!(action_of(&cmd_call("rm \"/usr/local/bin/sentinel\"")), Action::Block);
     }
 
     // ── FIX C: plain curl/wget data-exfil coverage ──────────────────────────────
