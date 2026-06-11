@@ -807,6 +807,41 @@ mod tests {
     }
 
     #[test]
+    fn secret_pop_directional_isolate_injected_aws_key_matches() {
+        let key = aws_shaped_key('F');
+        // U+2069 POP DIRECTIONAL ISOLATE mid-token: a format char the original
+        // 11-entry strip list missed (it had U+2066 but not U+2067..U+2069)
+        let evaded = format!("{}\u{2069}{}", &key[..8], &key[8..]);
+        assert!(
+            matches_secret(AWS_PATTERN, &format!("export AWS_KEY={evaded}")),
+            "U+2069-injected key must still match via the normalized form"
+        );
+    }
+
+    #[test]
+    fn secret_unicode_tag_chars_injected_aws_key_matches() {
+        let key = aws_shaped_key('G');
+        // U+E0001 LANGUAGE TAG + U+E0041 TAG LATIN CAPITAL A: invisible chars
+        // from the Unicode TAG block, also missing from the original list
+        let evaded = format!("{}\u{e0001}{}\u{e0041}{}", &key[..6], &key[6..12], &key[12..]);
+        assert!(
+            matches_secret(AWS_PATTERN, &format!("key = {evaded}")),
+            "tag-char-injected key must still match via the normalized form"
+        );
+    }
+
+    #[test]
+    fn secret_alm_and_isolate_injected_github_token_matches() {
+        let token = format!("ghp_{}", "b".repeat(36));
+        // U+061C ARABIC LETTER MARK + U+2068 FIRST STRONG ISOLATE mid-token
+        let evaded = format!("{}\u{061c}{}\u{2068}{}", &token[..4], &token[4..20], &token[20..]);
+        assert!(
+            matches_secret(r"ghp_[A-Za-z0-9]{36}", &format!("token: {evaded}")),
+            "ALM/FSI-injected ghp token must still match via the normalized form"
+        );
+    }
+
+    #[test]
     fn secret_zero_width_injected_github_token_matches() {
         let token = format!("ghp_{}", "a".repeat(36));
         // zero-width joiner injected right after the prefix
