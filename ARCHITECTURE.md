@@ -13,7 +13,6 @@ sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls b
 | language | Rust | 2021 edition |
 | CLI | clap | 4.x |
 | serialization | serde, toml, serde_json | 1.x |
-| docker API | bollard | 0.19 |
 | async runtime | tokio | 1.x |
 | pattern matching | aho-corasick | 1.x |
 | regex | regex | 1.x |
