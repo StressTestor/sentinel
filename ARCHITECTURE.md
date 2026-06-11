@@ -82,6 +82,9 @@ sentinel/
 ├── tests/
 │   └── fixtures/
 │       └── corpus/         test attack sequences (3 TOML files)
+├── scripts/
+│   └── ad5-network-lint.sh AD-5 lint: greps src/ for outbound-network imports
+│                           outside the allowlist (src/audit only); CI gate
 ├── docs/                   live attack demo + github pages site
 │   ├── index.html          write-up + attack matrix (published to stresstestor.github.io/sentinel)
 │   ├── target.html         poisoned "CloudSync" docs page with 20+ embedded injections
@@ -91,7 +94,7 @@ sentinel/
 │   └── record-*.sh         demo recording helpers
 └── .github/
     └── workflows/
-        └── ci.yml          cargo test + cross-compile
+        └── ci.yml          AD-5 lint + cargo test + verify gate + cross-compile
 ```
 
 ## key patterns
@@ -229,6 +232,7 @@ idempotent: running install twice doesn't duplicate hooks.
 | `cargo test --features proptest` | run property-based tests (slower) |
 | `cargo build --release` | build optimized binary |
 | `cargo clippy` | lint |
+| `bash scripts/ad5-network-lint.sh` | AD-5 lint: fail if outbound-network imports appear in src/ outside the allowlist (src/audit) |
 | `sentinel audit --corpus ./tests/fixtures/corpus --sandbox degraded` | test audit with fixture corpus |
 | `sentinel install` | install PreToolUse hook (audit mode) |
 | `sentinel install --enforce` | install with enforcement |
@@ -241,7 +245,7 @@ idempotent: running install twice doesn't duplicate hooks.
 | `sentinel status` | show config + hooks |
 | `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
 
-CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test` + `cargo clippy -- -D warnings` (see `.github/workflows/ci.yml`).
+CI runs the AD-5 network-call lint (`scripts/ad5-network-lint.sh` — enforces the README's "no ambient network calls" claim by grepping src/ for reqwest/hyper/Tcp\*/Udp\*/bollard imports outside the `src/audit` allowlist) and `cargo run -- verify` as an attack-regression gate, alongside `cargo test` + `cargo clippy -- -D warnings` (see `.github/workflows/ci.yml`).
 
 ## publishing
 
@@ -251,4 +255,4 @@ CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test
 
 ---
 
-last updated: 2026-06-11 by StressTestor (encoded-secret normalization: full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; prior pass: red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-11 by StressTestor (encoded-secret normalization: full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; prior pass: red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
