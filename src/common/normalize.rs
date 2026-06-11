@@ -50,19 +50,19 @@ fn strip_invisible_controls(input: &str) -> String {
     input.chars().filter(|c| !is_format_char(*c)).collect()
 }
 
-fn collapse_whitespace(input: &str) -> String {
-    input.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// normalize secrets WITHOUT lowercasing, so case-sensitive token formats
 /// (AKIA…, ghp_…) still match their patterns: HTML-entity decode, strip
-/// Unicode format chars (full Cf set + TAG block), NFKC fold, collapse
-/// whitespace.
+/// Unicode format chars (full Cf set + TAG block), NFKC fold.
+///
+/// Deliberately does NOT collapse whitespace: secret rules are whitespace-free
+/// token regexes, and collapsing runs to a single space never joins a split
+/// token — it only implied cross-whitespace coverage that didn't exist, at the
+/// cost of an extra pass on the hot path. A whitespace-split token is out of
+/// scope for this normalizer either way.
 pub fn normalize_for_secret_match(input: &str) -> String {
     let decoded = decode_html_entities(input).to_string();
     let stripped = strip_invisible_controls(&decoded);
-    let normalized: String = stripped.nfkc().collect();
-    collapse_whitespace(&normalized)
+    stripped.nfkc().collect()
 }
 
 #[cfg(test)]
