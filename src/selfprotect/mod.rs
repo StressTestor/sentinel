@@ -170,15 +170,27 @@ fn settings_contains_sentinel_hook(settings: &Value) -> bool {
 }
 
 /// thin filesystem wrapper: is a sentinel hook currently installed in the live
-/// `~/.claude/settings.json`? unreadable/absent file → not installed (nothing
-/// to protect). readable but unparseable → fall back to a substring scan and
-/// err toward "installed" (protect rather than wave through).
+/// user-level Claude settings? checks under `$HOME/.claude`.
 fn live_hook_installed() -> bool {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let path = std::path::PathBuf::from(home)
-        .join(".claude")
-        .join("settings.json");
-    match std::fs::read_to_string(&path) {
+    hook_installed_under(std::path::Path::new(&home))
+}
+
+/// is a sentinel hook installed in the `.claude` dir under this home? Claude
+/// Code honors a hook installed in `settings.local.json` just as it does one
+/// in `settings.json` — the escalation guards both files, so the live-hook
+/// check must look at both or a local-only install silently never fires.
+fn hook_installed_under(home: &std::path::Path) -> bool {
+    let claude = home.join(".claude");
+    hook_installed_in_file(&claude.join("settings.json"))
+        || hook_installed_in_file(&claude.join("settings.local.json"))
+}
+
+/// per-file check. unreadable/absent file → not installed (nothing to
+/// protect). readable but unparseable → fall back to a substring scan and err
+/// toward "installed" (protect rather than wave through).
+fn hook_installed_in_file(path: &std::path::Path) -> bool {
+    match std::fs::read_to_string(path) {
         Ok(content) => match serde_json::from_str::<Value>(&content) {
             Ok(settings) => settings_contains_sentinel_hook(&settings),
             Err(_) => content.contains(SENTINEL_HOOK_MARKER),
@@ -426,6 +438,55 @@ mod tests {
     fn read_of_settings_is_not_escalated() {
         let input = json!({"file_path": SETTINGS});
         assert_eq!(escalate(allow_decision(), &input, true), allow_decision());
+    }
+
+    // marko fix #4: Claude Code honors a hook installed in settings.local.json
+    // too — the live-hook check must see it there, or a local-only install
+    // means hook_installed=false and the self-protect silently never fires.
+    #[test]
+    fn live_hook_detection_covers_settings_local_json() {
+        let base = std::env::temp_dir().join(format!(
+            "sentinel_selfprotect_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let claude = base.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        // no settings files at all → nothing installed
+        assert!(!hook_installed_under(&base));
+        // hook ONLY in settings.local.json → must count as installed
+        std::fs::write(claude.join("settings.local.json"), settings_with_hook()).unwrap();
+        assert!(
+            hook_installed_under(&base),
+            "a hook living only in settings.local.json is live — must be protected"
+        );
+        // hook in settings.json alone keeps working
+        std::fs::remove_file(claude.join("settings.local.json")).unwrap();
+        std::fs::write(claude.join("settings.json"), settings_with_hook()).unwrap();
+        assert!(hook_installed_under(&base));
+        // a settings.json without the hook does not count
+        std::fs::write(claude.join("settings.json"), settings_without_hook()).unwrap();
+        assert!(!hook_installed_under(&base));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    // the per-file check: absent → false; valid-with-hook → true; unparseable
+    // but marker-bearing → true (err toward protecting)
+    #[test]
+    fn hook_installed_in_file_per_file_semantics() {
+        let base = std::env::temp_dir().join(format!(
+            "sentinel_selfprotect_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let f = base.join("settings.json");
+        assert!(!hook_installed_in_file(&f), "absent file → not installed");
+        std::fs::write(&f, settings_with_hook()).unwrap();
+        assert!(hook_installed_in_file(&f));
+        std::fs::write(&f, "{ broken json but sentinel evaluate survives").unwrap();
+        assert!(hook_installed_in_file(&f), "unparseable + marker → err toward installed");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     // hook present but in a shape Claude Code does not honor (no nested hooks
