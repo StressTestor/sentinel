@@ -1,10 +1,18 @@
 //! Normalization of attacker-controlled text before secret matching.
 //!
-//! A token written with HTML entities, zero-width/bidi controls, or fullwidth
-//! compatibility characters evades a byte-level regex while still being the
-//! real secret to any consumer that decodes or renders it. This module
-//! produces the decoded form so the matcher can test BOTH spellings.
-//! Extracted from the tier-2 branch; only the secret-match path is wired.
+//! A token written with HTML entities, Unicode format characters (zero-width,
+//! bidi controls/isolates, tag chars), or fullwidth compatibility characters
+//! evades a byte-level regex while still being the real secret to any consumer
+//! that decodes or renders it. This module produces the decoded form so the
+//! matcher can test BOTH spellings. Extracted from the tier-2 branch.
+//!
+//! SCOPE — the secret-content path ONLY. This normalization is wired into
+//! `matches_secret_normalized` (deny.secrets) and nowhere else:
+//! `matches_command` and `matches_path` do NOT see it, so an entity-encoded or
+//! format-char-injected command or path still evades those rule families.
+//! That is a known, deliberate limit, not an oversight: wiring command/path
+//! normalization changes match semantics for every existing rule and needs its
+//! own false-positive analysis. It is tracked as a separate follow-up.
 
 use html_escape::decode_html_entities;
 use unicode_normalization::UnicodeNormalization;
