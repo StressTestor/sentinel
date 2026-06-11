@@ -196,6 +196,11 @@ pattern = "**/.vscode/tasks.json"
 action = "warn"
 reason = "agent write to VS Code tasks.json (auto-run-on-open surface) - review for unexpected changes"
 
+[[deny.paths]]
+pattern = "**/.github/workflows/*"
+action = "warn"
+reason = "agent write to a GitHub Actions workflow (auto-run-on-push CI + secrets/OIDC surface) - review for unexpected changes"
+
 # warn (not block): matches any path ending in `kubeconfig` (a project-local
 # `kubeconfig`, `admin.kubeconfig`, etc.) - a common kind/k3s/eks convention that
 # developers read and edit, so blocking would be a false positive. Mirrors the
@@ -684,6 +689,25 @@ mod tests {
     fn persistence_unit_writes_warn() {
         assert_eq!(action_of(&path_call("~/Library/LaunchAgents/com.evil.agent.plist")), Action::Warn);
         assert_eq!(action_of(&path_call("~/.config/systemd/user/evil.service")), Action::Warn);
+    }
+
+    #[test]
+    fn github_workflow_writes_warn() {
+        // CI workflows auto-run on push with access to repo secrets/OIDC - a
+        // poisoned repo or injected agent planting one is the same class of
+        // exec-surface tripwire as .vscode/tasks.json. Warn-tier: devs author
+        // workflows legitimately.
+        assert_eq!(action_of(&path_call("~/repo/.github/workflows/ci.yml")), Action::Warn);
+        assert_eq!(action_of(&path_call("./proj/.github/workflows/deploy.yml")), Action::Warn);
+    }
+
+    #[test]
+    fn github_workflow_rule_does_not_overmatch() {
+        // FP guard: only the workflows/ dir is the exec surface - other .github
+        // content and source files merely named "workflows" must sail through.
+        assert_eq!(action_of(&path_call("~/repo/.github/ISSUE_TEMPLATE/bug.md")), Action::Allow);
+        assert_eq!(action_of(&path_call("~/repo/.github/dependabot.yml")), Action::Allow);
+        assert_eq!(action_of(&path_call("~/repo/src/workflows.rs")), Action::Allow);
     }
 
     // ── self-propagation command tripwires (warn) - incl. the pnpm -r form ──────
