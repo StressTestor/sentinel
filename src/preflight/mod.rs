@@ -15,6 +15,12 @@
 //! - So it catches: the agent writing/installing a manifest whose OWN lifecycle
 //!   script is malicious, or a direct dep added from a suspicious non-registry
 //!   source. It does NOT catch the worm arriving via a poisoned transitive dep.
+//! - Preflight inspects the SESSION-cwd manifest — the `cwd` the hook hands us —
+//!   not necessarily the one the install actually uses. A command that changes
+//!   the install directory (`cd subdir && npm install`, `npm install --prefix
+//!   <dir>`, `npm i -C <dir>`) installs from a manifest preflight did NOT
+//!   inspect, or none at all. The hook only gives us the session cwd; we do not
+//!   follow `cd` or `--prefix`, so this evasion is inherent.
 //! - Like every PreToolUse check, it sees only the agent's own tool calls. A
 //!   child-process install kicked off some other way is invisible here.
 //!

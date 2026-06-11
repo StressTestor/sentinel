@@ -218,6 +218,13 @@ preflight reads the top-level `package.json` in the call's `cwd` and inspects it
 > non-registry source. It does NOT catch the worm arriving via a poisoned
 > transitive dep. Pure core (`inspect`/`is_install_like`) is unit-tested without
 > the filesystem; the `apply` wrapper does the cwd read.
+>
+> **Second honest limit:** the cwd preflight inspects is the **session** cwd —
+> the one the hook hands us — not necessarily the directory the install runs in.
+> A command that changes the install directory (`cd subdir && npm install`,
+> `npm install --prefix <dir>`, `npm i -C <dir>`) installs from a manifest
+> preflight did not inspect, or none at all. The hook only provides the session
+> cwd; preflight does not follow `cd` or `--prefix`, so this evasion is inherent.
 
 Structural limit, by design: the PreToolUse hook only sees the agent's own tool
 calls. The worm's real payload runs in npm/pip lifecycle-script child processes,
@@ -301,4 +308,4 @@ CI runs the AD-5 network-call lint (`scripts/ad5-network-lint.sh` — enforces t
 
 ---
 
-last updated: 2026-06-11 by StressTestor (install-preflight: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-11 by StressTestor (install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
