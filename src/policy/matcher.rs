@@ -400,10 +400,20 @@ fn normalize_command(cmd: &str) -> String {
     out.join(" ")
 }
 
-/// match raw params against a secret regex pattern
+/// Match raw params against a secret regex pattern. Tested against BOTH the
+/// raw string and its normalized form (HTML-entity decode, zero-width/bidi
+/// strip, NFKC fold) so an entity-encoded, zero-width-injected, or fullwidth
+/// spelling of a token can't dodge the rule. Additive only: the raw check runs
+/// first and is never replaced, so anything that matched before still matches.
 pub fn matches_secret(pattern: &str, raw: &str) -> bool {
     match Regex::new(pattern) {
-        Ok(re) => re.is_match(raw),
+        Ok(re) => {
+            if re.is_match(raw) {
+                return true;
+            }
+            let normalized = crate::common::normalize::normalize_for_secret_match(raw);
+            normalized != raw && re.is_match(&normalized)
+        }
         Err(_) => {
             tracing::warn!("invalid secret pattern: {pattern}");
             false
@@ -742,5 +752,87 @@ mod tests {
             TU,
             true
         ));
+    }
+
+    // ── encoded-secret normalization ────────────────────────────────────────
+    // A secret token written with invisible/encoded characters dodges a raw
+    // regex byte-for-byte, yet any downstream consumer that decodes or renders
+    // the text sees the real key. matches_secret must test a normalized form
+    // (entity-decode, zero-width strip, NFKC) ALONGSIDE the raw string. Every
+    // fixture is constructed at runtime so no literal token appears here.
+
+    /// an AWS-access-key-shaped token, built at runtime
+    fn aws_shaped_key(fill: char) -> String {
+        format!("AKIA{}", fill.to_string().repeat(16))
+    }
+
+    const AWS_PATTERN: &str = r"AKIA[0-9A-Z]{16}";
+
+    #[test]
+    fn secret_zero_width_injected_aws_key_matches() {
+        let key = aws_shaped_key('A');
+        // inject a zero-width space mid-token: raw regex can no longer match
+        let evaded = format!("{}\u{200b}{}", &key[..8], &key[8..]);
+        assert!(
+            matches_secret(AWS_PATTERN, &format!("export AWS_KEY={evaded}")),
+            "zero-width-injected key must still match via the normalized form"
+        );
+    }
+
+    #[test]
+    fn secret_entity_encoded_aws_key_matches() {
+        // every char spelled as a decimal HTML entity (`&#65;` for 'A', …)
+        let encoded: String = aws_shaped_key('B')
+            .chars()
+            .map(|c| format!("&#{};", c as u32))
+            .collect();
+        assert!(!matches_secret(AWS_PATTERN, "no token here"));
+        assert!(
+            matches_secret(AWS_PATTERN, &format!("Authorization: {encoded}")),
+            "entity-encoded key must still match via the normalized form"
+        );
+    }
+
+    #[test]
+    fn secret_fullwidth_aws_key_matches() {
+        // every uppercase letter mapped to its fullwidth form (NFKC folds back)
+        let fullwidth: String = aws_shaped_key('C')
+            .chars()
+            .map(|c| char::from_u32(c as u32 - 'A' as u32 + 0xFF21).unwrap())
+            .collect();
+        assert!(
+            matches_secret(AWS_PATTERN, &format!("key = {fullwidth}")),
+            "fullwidth-spelled key must still match via the normalized form"
+        );
+    }
+
+    #[test]
+    fn secret_zero_width_injected_github_token_matches() {
+        let token = format!("ghp_{}", "a".repeat(36));
+        // zero-width joiner injected right after the prefix
+        let evaded = format!("{}\u{200d}{}", &token[..4], &token[4..]);
+        assert!(
+            matches_secret(r"ghp_[A-Za-z0-9]{36}", &format!("token: {evaded}")),
+            "zero-width-injected ghp token must still match via the normalized form"
+        );
+    }
+
+    #[test]
+    fn secret_raw_match_still_works_unchanged() {
+        // the raw path is checked first and never replaced
+        let key = aws_shaped_key('D');
+        assert!(matches_secret(AWS_PATTERN, &format!("plain {key} text")));
+    }
+
+    #[test]
+    fn secret_benign_normalized_text_does_not_newly_match() {
+        // FP guard: benign text full of entities + zero-width chars must not
+        // become a secret match just because it normalizes
+        let benign = "caf\u{200d}e &amp; r&#x65;sum&#x65; \u{200b}notes ＨｅｌｌｏＷｏｒｌｄ";
+        assert!(!matches_secret(AWS_PATTERN, benign));
+        assert!(!matches_secret(r"ghp_[A-Za-z0-9]{36}", benign));
+        // a too-short encoded token shape must also stay a non-match
+        let short = format!("AKIA\u{200b}{}", "E".repeat(8));
+        assert!(!matches_secret(AWS_PATTERN, &short));
     }
 }
