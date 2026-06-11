@@ -50,10 +50,12 @@ sentinel/
 │   │   ├── schema.rs       TOML policy schema + parsing
 │   │   └── matcher.rs      glob path matching, regex command/secret matching
 │   ├── evaluate/
-│   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> selfprotect -> stdout JSON); --canary dry-run for doctor
-│   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema; command extraction incl. exec-named MCP tools
+│   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> selfprotect -> preflight -> stdout JSON); --canary dry-run for doctor
+│   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema; command extraction incl. exec-named MCP tools; explicit `cwd` field
 │   ├── selfprotect/
 │   │   └── mod.rs          content-aware escalation: block writes that remove sentinel's own hook entry
+│   ├── preflight/
+│   │   └── mod.rs          install-preflight: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm TTP
 │   ├── check/
 │   │   └── mod.rs          sentinel check: dry-run/explain a tool call (read-only)
 │   ├── verify/
@@ -172,6 +174,51 @@ onto a protected target can't dodge the anchored rule. Hook-removal protection
 `.claude/settings(.local).json` that drops the `sentinel evaluate` hook escalates
 warn → block; hook-preserving edits keep their policy action.
 
+### install-preflight (worm TTP)
+
+`src/preflight/` runs immediately after self-protect on the evaluate path. A
+PreToolUse hook cannot see npm/pip lifecycle scripts — they run in a child
+process of `npm install`, which never crosses the hook. The one point the hook
+CAN act is when the **agent itself** runs an install-like command. At that moment
+preflight reads the top-level `package.json` in the call's `cwd` and inspects it.
+
+- **trigger** (the only thing that does any I/O): the command is an install-like
+  invocation at a command position — `npm install|i|ci|add`, `pnpm install|i|add`,
+  bare `yarn` / `yarn install|add`, `bun install|add`. NOT `npm run`/`test`/
+  `publish`/`ls`, `npx`, or a package-manager name appearing as an argument
+  (`echo npm install`). `cwd` is plumbed as an explicit field on `HookInput`
+  (Claude Code sends it; it previously only landed in `_extra`).
+- **signals inspected:** ONLY the `scripts` lifecycle values (`preinstall`,
+  `install`, `postinstall`, `prepare`, `prepublish`, `prepublishOnly`) and the
+  dependency **version specifiers**. NEVER `repository`/`homepage`/`funding`/
+  `author` URLs — matching those was the abandoned tier-2 branch's false positive
+  (it did `contains("https://")` over the whole manifest, so any repo URL + a
+  postinstall got blocked).
+- **BLOCK** (near-zero FP): a lifecycle script value that fetches-and-executes
+  remote code — `curl|wget|fetch` piped to a shell, `$(curl…)`/backtick-curl,
+  `base64 -d | sh`, an interpreter (`node -e`/`python -c`/…) doing a network
+  fetch+exec, `eval` of fetched content, or a fetch from a raw IP. Conceptually
+  mirrors the curl/fetch deny.commands in the default policy, but applied ONLY to
+  the script string.
+- **WARN** (medium): a dependency whose version specifier is a raw URL /
+  `git+http(s)` / `git://` / tarball / IP host AND a lifecycle script is present.
+  Registry semver, `workspace:`, `file:`, `npm:` aliases, and `github:owner/repo`
+  shorthand are trusted.
+- **ALLOW** (no warn-spam): everything else, including ordinary lifecycle scripts
+  (`husky install`, `node-gyp rebuild`, `node scripts/build.js`) with registry
+  deps. cwd absent, manifest missing, or manifest unparseable → do nothing (you
+  cannot block a normal install over a manifest you can't read). Escalation is
+  one-directional (Block > Warn > Allow); an existing Block is never downgraded.
+
+> **Honest limit, by design:** preflight inspects ONLY the top-level manifest in
+> the command's cwd. It CANNOT see a poisoned **transitive** dependency's
+> lifecycle script — those resolve during the install, not in the top-level
+> package.json. So it catches the agent writing/installing a manifest whose OWN
+> lifecycle script is malicious, or a direct dep added from a suspicious
+> non-registry source. It does NOT catch the worm arriving via a poisoned
+> transitive dep. Pure core (`inspect`/`is_install_like`) is unit-tested without
+> the filesystem; the `apply` wrapper does the cwd read.
+
 Structural limit, by design: the PreToolUse hook only sees the agent's own tool
 calls. The worm's real payload runs in npm/pip lifecycle-script child processes,
 which never traverse the hook, so this pack covers the prompt-injection-drives-the-
@@ -254,4 +301,4 @@ CI runs the AD-5 network-call lint (`scripts/ad5-network-lint.sh` — enforces t
 
 ---
 
-last updated: 2026-06-11 by StressTestor (encoded-secret normalization: full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; prior pass: red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-11 by StressTestor (install-preflight: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)

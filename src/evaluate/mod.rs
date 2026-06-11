@@ -113,6 +113,21 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     // the canary/audit/enforce branches so all three see the escalated decision.
     let decision = crate::selfprotect::apply(decision, &hook_input.tool_input);
 
+    // install-preflight (worm TTP): when the agent runs an install-like command
+    // (`npm install`, `pnpm add`, `yarn`, `bun install`, …), inspect the
+    // top-level package.json in the call's cwd and escalate a lifecycle script
+    // that fetches-and-executes remote code (Block) or a non-registry dep source
+    // alongside a lifecycle script (Warn). reads the manifest ONLY when the
+    // command is install-like, so the hot path stays clean. applied before the
+    // canary/audit/enforce branches so all three see the escalated decision.
+    // HONEST LIMIT: sees only the TOP-LEVEL manifest — not poisoned transitive
+    // dependency lifecycle scripts, which resolve during the install itself.
+    let decision = crate::preflight::apply(
+        decision,
+        tool_call.command.as_deref(),
+        hook_input.cwd.as_deref(),
+    );
+
     if canary {
         // doctor's liveness probe: surface the would-be decision, skip the
         // audit trail. Block -> the nested deny JSON (even in audit mode);
