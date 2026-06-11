@@ -17,6 +17,7 @@ sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls b
 | async runtime | tokio | 1.x |
 | pattern matching | aho-corasick | 1.x |
 | regex | regex | 1.x |
+| text normalization | unicode-normalization, html-escape | 0.1 / 0.2 |
 | context persistence | bincode | 1.x |
 | terminal output | colored | 2.x |
 | error handling | thiserror, anyhow | 2.x / 1.x |
@@ -35,6 +36,7 @@ sentinel/
 │   ├── cli.rs              clap arg definitions
 │   ├── common/
 │   │   ├── mod.rs
+│   │   ├── normalize.rs    encoded-text normalization (HTML-entity decode, zero-width/bidi strip, NFKC)
 │   │   └── types.rs        shared types (AttackSequence, AuditReport, etc.)
 │   ├── corpus/
 │   │   ├── mod.rs          corpus loader (embedded + filesystem override)
@@ -109,7 +111,10 @@ Tool call arrives (via PreToolUse hook)
              and recursive directory coverage
            - deny commands: regex over the raw + a normalized form (rm-flag
              canonicalization), covering pipe-to-shell / fetch-exec variants
-           - deny secrets: regex over the request payload
+           - deny secrets: regex over the raw request payload AND a normalized
+             form (HTML-entity decode, zero-width/bidi strip, NFKC fold), so an
+             entity-encoded / zero-width-injected / fullwidth-spelled token
+             can't dodge the rule. additive: raw is checked first, never replaced
          un-inspectable input (empty / unparseable stdin) fails per on_failure
          ("closed" by default → deny). zero false positives by design.
 
@@ -238,4 +243,4 @@ CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test
 
 ---
 
-last updated: 2026-06-11 by StressTestor (red-team hardening: glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-11 by StressTestor (encoded-secret normalization: matcher now tests a normalized form — zero-width/bidi strip, HTML-entity decode, NFKC — alongside the raw payload for secret matching; prior pass: red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
