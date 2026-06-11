@@ -43,8 +43,10 @@ you type a prompt
      │
      policy says: ~/.aws/* → BLOCK (credential access)
      │
-     tool call denied. credentials safe.
+     tool call denied. that read never happens.
 ```
+
+the deterministic path layer is the part you can lean on: a deny on `~/.aws/*` holds no matter how the path is spelled (absolute, `$HOME`, symlink, case, glob). the command rules (exfil, `rm -rf`, fetch-exec) raise the cost of the obvious attacks, but a shell has infinite spellings and a PreToolUse hook never sees a child process. treat those as cost, not a wall. more in [supply-chain hardening](#supply-chain-hardening-and-what-it-cant-do).
 
 ## install
 
@@ -56,7 +58,7 @@ sentinel install --enforce  # enforcement mode (blocks violations)
 
 (the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
 
-that's it. sentinel writes a PreToolUse hook into `~/.claude/settings.json` and a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, secret patterns).
+that's it. sentinel writes a PreToolUse hook into `~/.claude/settings.json` and a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and self-protection of its own policy, binary, and hook entry).
 
 ## audit mode (default)
 
@@ -114,7 +116,7 @@ Enforcement today is the Tier-1 policy engine. It's the deterministic, zero-fals
 
 the self-propagating npm/pypi worms in the shai-hulud / Miasma family inject persistence and steal credentials through package lifecycle scripts. the default policy now covers the part of that an agent runtime can actually see:
 
-- **self-protect.** the agent can't write `~/.sentinel/policy.toml`. a guard that lets an injected agent flip itself to audit mode is not a guard. blocked at the tool-call layer (your own editor, and `sentinel install`, are unaffected since they don't go through the hook).
+- **self-protect.** the agent can't write `~/.sentinel/policy.toml`, can't overwrite the `sentinel` binary at the common install paths, and can't rewrite `~/.claude/settings.json` to drop sentinel's own hook entry (that last one is content-aware: ordinary settings edits stay warn, a write that removes the `sentinel evaluate` hook escalates to block). a guard that lets an injected agent flip itself to audit mode, delete the cop, or unhook itself is not a guard. all blocked at the tool-call layer (your own editor, and `sentinel install`, are unaffected since they don't go through the hook).
 - **credential coverage.** more credential files and secret formats: `~/.npmrc`, `~/.kube/config`, `~/.config/gcloud/`, `~/.azure/` (block), plus GCP / Azure / Vault / kubeconfig secret content in writes.
 - **warn-level tripwires** for the agent-driven version of the TTPs: writes to other agents' hook configs (`.claude/settings.json`, `~/.codex`, `~/.gemini`, `.vscode/tasks.json`), LaunchAgent / systemd-user persistence units, and `npm publish` / `npm token` / `gh repo create --public`. these are warn, not block, because developers do all of them legitimately.
 
@@ -124,7 +126,7 @@ now the part nobody else says out loud:
 
 two more honest caveats:
 
-- the self-protect block is porous, and it only covers `policy.toml`. the more complete disable vector is removing sentinel's own PreToolUse hook entry from `~/.claude/settings.json`. that path is `warn`, not block: you can't path-isolate one entry inside a dual-use file without false-blocking every legit settings edit, so a hook-removal is surfaced but allowed. a path assembled from a shell variable, or a write from a subprocess, also gets through. this raises the cost of disarming sentinel; it is not tamper-proof. content-aware protection of the hook entry is a follow-up.
+- self-protect now covers the three obvious disarm vectors (policy file, binary, hook entry), but it is not tamper-proof. it only sees the agent's own tool calls: a write from a subprocess (`sed -i`, `python -c "open(...).write(...)"`), a path assembled from a shell variable, or a settings rewrite that keeps the `sentinel evaluate` marker while repointing it at a different binary all get through. the binary tamper-by-name rules (`rm "$(command -v sentinel)"`) are command-regex, so they're evadable by var-assembly; the literal-path binary rules are the stronger half. this raises the cost of disarming sentinel. it does not make it impossible.
 - `sentinel install` does **not** overwrite an existing `~/.sentinel/policy.toml`, and the default is audit mode. if you already have a policy, these new rules won't appear until you regenerate it, and nothing blocks until you switch to `--enforce`.
 
 ## commands
@@ -137,7 +139,7 @@ sentinel uninstall        remove hooks
 sentinel evaluate         evaluate a tool call (called by the hook)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
 sentinel verify           replay pinned attacks through the policy, assert each is caught
-sentinel doctor [--strict] validate the install chain + probe liveness (detects a disarmed guard)
+sentinel doctor [--strict] validate the install chain + probe liveness. the canary spawns the hooked binary itself and asserts its own deny, so a no-op shim can't fake healthy
 sentinel policy-diff      show which bundled-default rules your policy is missing (read-only)
 sentinel policy-lint      static-check a policy for dead rules, bad regexes, broad allows
 sentinel status           show config, hooks, policy summary

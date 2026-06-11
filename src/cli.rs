@@ -21,7 +21,7 @@ pub enum Command {
     Uninstall,
 
     /// evaluate a tool call against the policy (called by the PreToolUse hook)
-    Evaluate,
+    Evaluate(EvaluateArgs),
 
     /// wrap an agent process in a pty proxy (generic adapter)
     Wrap(WrapArgs),
@@ -49,6 +49,15 @@ pub enum Command {
     /// static-check a policy for dead rules, invalid regexes, and over-broad allows
     #[command(name = "policy-lint")]
     PolicyLint(LintArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EvaluateArgs {
+    /// canary/dry-run for `sentinel doctor`: run the full decision path and report
+    /// the would-be decision (deny JSON even in audit mode) WITHOUT writing to the
+    /// audit trail. not for use as the live hook command.
+    #[arg(long, default_value_t = false)]
+    pub canary: bool,
 }
 
 #[derive(clap::Args, Debug)]

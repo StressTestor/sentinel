@@ -41,10 +41,162 @@ fn matches_path_resolved(
     if regexes.is_empty() {
         return false;
     }
-    let candidates = candidate_forms(path, home, user);
+    let mut candidates = candidate_forms(path, home, user);
+    // Fail-safe for a glob-bearing CANDIDATE (the demo bypass): a candidate that
+    // itself carries shell glob metacharacters (`*`, `?`, `[`) dodges the anchored
+    // rule regex (`.s*h` != `.ssh`) and can't be canonicalized (no file literally
+    // named `.s*h`), yet the user's shell expands it onto the protected target at
+    // runtime. When (and ONLY when) a candidate is globbed, project it onto the
+    // rule's literal protected prefix segment-by-segment: wherever a candidate
+    // glob segment could expand to the rule's literal segment, substitute the
+    // literal. The resulting witness is then tested by the SAME rule regexes
+    // (reusing the deny subtree/anchor semantics). Non-globbed candidates never
+    // enter this branch, so the normal path keeps EXACT current behavior.
+    if candidates.iter().any(|c| has_glob_meta(c)) {
+        let rule_literal = rule_literal_prefix(&expanded_pattern);
+        if !rule_literal.is_empty() {
+            let mut witnesses = Vec::new();
+            for c in &candidates {
+                if has_glob_meta(c) {
+                    if let Some(w) = deglob_candidate_against(c, &rule_literal) {
+                        witnesses.push(w);
+                    }
+                }
+            }
+            candidates.extend(witnesses);
+        }
+    }
     regexes
         .iter()
         .any(|re| candidates.iter().any(|c| re.is_match(c)))
+}
+
+/// Does this path carry a shell glob metacharacter (`*`, `?`, `[`)?
+fn has_glob_meta(p: &str) -> bool {
+    p.contains(['*', '?', '['])
+}
+
+/// The literal protected prefix of an (already home-expanded) rule pattern: the
+/// portion before the first glob metacharacter, with a trailing `/` trimmed. For
+/// `/U/.ssh/*` this is `/U/.ssh`; for `/U/.sentinel/policy.toml` (no glob) it's
+/// the whole path. This is the file/dir the rule actually protects.
+fn rule_literal_prefix(expanded_pattern: &str) -> String {
+    let cut = expanded_pattern
+        .find(['*', '?'])
+        .map(|i| expanded_pattern[..i].rfind('/').map(|s| s + 1).unwrap_or(0))
+        .unwrap_or(expanded_pattern.len());
+    expanded_pattern[..cut].trim_end_matches('/').to_string()
+}
+
+/// Project a glob-bearing candidate onto a rule's literal protected prefix.
+/// Walk both segment by segment; for each position covered by the rule literal,
+/// if the candidate segment is a glob whose (case-insensitive, anchored) regex
+/// matches the rule's literal segment, substitute the literal segment — otherwise
+/// keep the candidate segment. Candidate segments beyond the rule literal stay as
+/// written (the deny subtree). Returns the reconstructed witness path, or None if
+/// no glob segment actually aligned with the rule literal (so we never invent a
+/// witness for a candidate that can't reach the protected prefix). A `[...]`
+/// class in a CANDIDATE segment is a real shell class the user's shell WILL
+/// expand (`.ss[h]` → `.ssh`), so it is translated to a regex char class here —
+/// unlike RULE patterns, where `glob_body` keeps `[` literal.
+fn deglob_candidate_against(candidate: &str, rule_literal: &str) -> Option<String> {
+    let cand_segs: Vec<&str> = candidate.split('/').collect();
+    let rule_segs: Vec<&str> = rule_literal.split('/').collect();
+    let mut out: Vec<String> = Vec::with_capacity(cand_segs.len());
+    let mut substituted = false;
+    for (i, cseg) in cand_segs.iter().enumerate() {
+        if i < rule_segs.len() && has_glob_meta(cseg) {
+            let seg_re = format!("^{}$", candidate_glob_seg_body(cseg));
+            let matched = RegexBuilder::new(&seg_re)
+                .case_insensitive(true)
+                .build()
+                .map(|re| re.is_match(rule_segs[i]))
+                .unwrap_or(false);
+            if matched {
+                out.push(rule_segs[i].to_string());
+                substituted = true;
+                continue;
+            }
+        }
+        out.push((*cseg).to_string());
+    }
+    if substituted {
+        Some(out.join("/"))
+    } else {
+        None
+    }
+}
+
+/// Translate ONE candidate path segment's shell glob syntax to a regex fragment:
+/// `*` → `[^/]*`, `?` → `[^/]`, and a `[...]` class to a real regex char class
+/// (shell `[!...]`/`[^...]` negation → `[^...]`, ranges kept, class-internal
+/// regex metacharacters escaped). Everything else is escaped to a literal. An
+/// unterminated `[` is a literal bracket, matching shell behavior. This is the
+/// CANDIDATE-side counterpart of `glob_body`: rule patterns keep `[` literal so
+/// a rule can protect a literally-bracketed file, but a candidate's class is
+/// something the user's shell will expand at runtime, so it must be honored.
+fn candidate_glob_seg_body(seg: &str) -> String {
+    let chars: Vec<char> = seg.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                out.push_str("[^/]*");
+                i += 1;
+            }
+            '?' => {
+                out.push_str("[^/]");
+                i += 1;
+            }
+            '[' => {
+                // find the closing `]`; a `]` directly after `[` or `[!`/`[^`
+                // is a literal class member, per shell semantics
+                let mut j = i + 1;
+                if j < chars.len() && (chars[j] == '!' || chars[j] == '^') {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == ']' {
+                    j += 1;
+                }
+                while j < chars.len() && chars[j] != ']' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    out.push_str("\\["); // unterminated: a literal bracket
+                    i += 1;
+                } else {
+                    out.push('[');
+                    let mut k = i + 1;
+                    if chars[k] == '!' || chars[k] == '^' {
+                        out.push('^');
+                        k += 1;
+                    }
+                    while k < j {
+                        let c = chars[k];
+                        // escape regex class metacharacters; `-` kept for ranges
+                        if matches!(c, '\\' | '[' | ']' | '^' | '&' | '~') {
+                            out.push('\\');
+                        }
+                        out.push(c);
+                        k += 1;
+                    }
+                    out.push(']');
+                    i = j + 1;
+                }
+            }
+            c @ ('(' | ')' | ']' | '{' | '}' | '+' | '^' | '$' | '|' | '\\' | '.') => {
+                out.push('\\');
+                out.push(c);
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Build the case-insensitive regex(es) for an (already home-expanded) pattern.
@@ -497,5 +649,98 @@ mod tests {
         let hit = matches_path_resolved(&rule, &attack, "/home/x", "x", true);
         std::fs::remove_dir_all(&base).ok();
         assert!(hit, "a rule on a symlinked dir must match the resolved real path");
+    }
+
+    // ── glob-bearing CANDIDATE bypass (the demo bypass) ────────────────────
+    // A candidate path that itself carries shell glob metacharacters dodges the
+    // anchored rule regex (the literal `.s*h` != `.ssh`) and fs::canonicalize
+    // fails (no file literally named `.s*h`), so the old impl returns NO match —
+    // yet the shell expands `~/.s*h/` to `~/.ssh/` at runtime. Fail-safe: if a
+    // glob candidate COULD expand onto a protected deny target, treat it as a hit.
+    #[test]
+    fn glob_candidate_star_hits_ssh_rule() {
+        assert!(matches_path_resolved("~/.ssh/*", "~/.s*h/id_rsa", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_disarms_self_protect() {
+        assert!(matches_path_resolved(
+            "~/.sentinel/policy.toml",
+            "~/.s*ntinel/po*cy.toml",
+            TH,
+            TU,
+            true
+        ));
+    }
+
+    #[test]
+    fn glob_candidate_question_mark_hits_ssh_rule() {
+        assert!(matches_path_resolved("~/.ssh/*", "~/.ss?/id_rsa", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bare_dir_hits_aws_rule() {
+        // bare-dir glob: `~/.a*s` could expand to `~/.aws`, the protected dir
+        assert!(matches_path_resolved("~/.aws/*", "~/.a*s", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_hits_ssh_rule() {
+        // marko fix #2: the shell expands `[h]`→`h`, so `~/.ss[h]/id_rsa` IS
+        // `~/.ssh/id_rsa` at runtime - escaping `[` to a literal let a bracket
+        // class dodge the deny rule, the exact bug class the deglob fix closes.
+        assert!(matches_path_resolved("~/.ssh/*", "~/.ss[h]/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.ssh/*", "~/.s[s]h/id_rsa", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_bare_dir_hits_aws_rule() {
+        assert!(matches_path_resolved("~/.aws/*", "~/.a[w]s", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_negation_and_range() {
+        // shell `[!x]` / `[r-t]` classes can also expand onto the protected dir
+        assert!(matches_path_resolved("~/.ssh/*", "~/.ss[!x]/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.ssh/*", "~/.s[r-t]h/id_rsa", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_false_positives_stay_allowed() {
+        // a class that cannot expand onto the protected segment is no match
+        assert!(!matches_path_resolved("~/.ssh/*", "~/.ss[xyz]/id_rsa", TH, TU, true));
+        assert!(!matches_path_resolved("~/.aws/*", "~/notes/[a]/x.md", TH, TU, true));
+        // an unterminated `[` is a literal bracket in the shell, not a class
+        assert!(!matches_path_resolved("~/.ssh/*", "~/.ss[h/id_rsa", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_does_not_break_exact_rule_match() {
+        // existing exact behavior must remain: no-glob candidates unchanged
+        assert!(matches_path_resolved("~/.ssh/*", "~/.ssh/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.ssh/*", "/Users/testuser/.ssh/id_rsa", TH, TU, true));
+    }
+
+    // FP cases: glob candidates that provably cannot intersect any shipped
+    // credential deny rule must stay ALLOWED (no false match).
+    #[test]
+    fn glob_candidate_false_positives_stay_allowed() {
+        // `cat ./src/*.rs` — source files, not a credential dir
+        assert!(!matches_path_resolved("~/.ssh/*", "./src/*.rs", TH, TU, true));
+        assert!(!matches_path_resolved("~/.aws/*", "./src/*.rs", TH, TU, true));
+        assert!(!matches_path_resolved("~/.sentinel/policy.toml", "./src/*.rs", TH, TU, true));
+        // `ls ~/projects/*` — a project dir, not a credential dir
+        assert!(!matches_path_resolved("~/.ssh/*", "~/projects/*", TH, TU, true));
+        assert!(!matches_path_resolved("~/.aws/*", "~/projects/*", TH, TU, true));
+        // `~/Documents/*/notes.md` — middle-segment glob, cannot reach a cred dir
+        assert!(!matches_path_resolved("~/.ssh/*", "~/Documents/*/notes.md", TH, TU, true));
+        assert!(!matches_path_resolved("~/.aws/*", "~/Documents/*/notes.md", TH, TU, true));
+        assert!(!matches_path_resolved(
+            "~/.sentinel/policy.toml",
+            "~/Documents/*/notes.md",
+            TH,
+            TU,
+            true
+        ));
     }
 }
