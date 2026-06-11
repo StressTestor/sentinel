@@ -95,9 +95,10 @@ fn rule_literal_prefix(expanded_pattern: &str) -> String {
 /// keep the candidate segment. Candidate segments beyond the rule literal stay as
 /// written (the deny subtree). Returns the reconstructed witness path, or None if
 /// no glob segment actually aligned with the rule literal (so we never invent a
-/// witness for a candidate that can't reach the protected prefix). A `[`-class
-/// segment is escaped to a literal by `glob_body`, so it only matches itself —
-/// conservatively neither over-blocking nor expanding bracket classes.
+/// witness for a candidate that can't reach the protected prefix). A `[...]`
+/// class in a CANDIDATE segment is a real shell class the user's shell WILL
+/// expand (`.ss[h]` → `.ssh`), so it is translated to a regex char class here —
+/// unlike RULE patterns, where `glob_body` keeps `[` literal.
 fn deglob_candidate_against(candidate: &str, rule_literal: &str) -> Option<String> {
     let cand_segs: Vec<&str> = candidate.split('/').collect();
     let rule_segs: Vec<&str> = rule_literal.split('/').collect();
@@ -105,7 +106,7 @@ fn deglob_candidate_against(candidate: &str, rule_literal: &str) -> Option<Strin
     let mut substituted = false;
     for (i, cseg) in cand_segs.iter().enumerate() {
         if i < rule_segs.len() && has_glob_meta(cseg) {
-            let seg_re = format!("^{}$", glob_body(cseg));
+            let seg_re = format!("^{}$", candidate_glob_seg_body(cseg));
             let matched = RegexBuilder::new(&seg_re)
                 .case_insensitive(true)
                 .build()
@@ -124,6 +125,78 @@ fn deglob_candidate_against(candidate: &str, rule_literal: &str) -> Option<Strin
     } else {
         None
     }
+}
+
+/// Translate ONE candidate path segment's shell glob syntax to a regex fragment:
+/// `*` → `[^/]*`, `?` → `[^/]`, and a `[...]` class to a real regex char class
+/// (shell `[!...]`/`[^...]` negation → `[^...]`, ranges kept, class-internal
+/// regex metacharacters escaped). Everything else is escaped to a literal. An
+/// unterminated `[` is a literal bracket, matching shell behavior. This is the
+/// CANDIDATE-side counterpart of `glob_body`: rule patterns keep `[` literal so
+/// a rule can protect a literally-bracketed file, but a candidate's class is
+/// something the user's shell will expand at runtime, so it must be honored.
+fn candidate_glob_seg_body(seg: &str) -> String {
+    let chars: Vec<char> = seg.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                out.push_str("[^/]*");
+                i += 1;
+            }
+            '?' => {
+                out.push_str("[^/]");
+                i += 1;
+            }
+            '[' => {
+                // find the closing `]`; a `]` directly after `[` or `[!`/`[^`
+                // is a literal class member, per shell semantics
+                let mut j = i + 1;
+                if j < chars.len() && (chars[j] == '!' || chars[j] == '^') {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == ']' {
+                    j += 1;
+                }
+                while j < chars.len() && chars[j] != ']' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    out.push_str("\\["); // unterminated: a literal bracket
+                    i += 1;
+                } else {
+                    out.push('[');
+                    let mut k = i + 1;
+                    if chars[k] == '!' || chars[k] == '^' {
+                        out.push('^');
+                        k += 1;
+                    }
+                    while k < j {
+                        let c = chars[k];
+                        // escape regex class metacharacters; `-` kept for ranges
+                        if matches!(c, '\\' | '[' | ']' | '^' | '&' | '~') {
+                            out.push('\\');
+                        }
+                        out.push(c);
+                        k += 1;
+                    }
+                    out.push(']');
+                    i = j + 1;
+                }
+            }
+            c @ ('(' | ')' | ']' | '{' | '}' | '+' | '^' | '$' | '|' | '\\' | '.') => {
+                out.push('\\');
+                out.push(c);
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Build the case-insensitive regex(es) for an (already home-expanded) pattern.
@@ -609,6 +682,36 @@ mod tests {
     fn glob_candidate_bare_dir_hits_aws_rule() {
         // bare-dir glob: `~/.a*s` could expand to `~/.aws`, the protected dir
         assert!(matches_path_resolved("~/.aws/*", "~/.a*s", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_hits_ssh_rule() {
+        // marko fix #2: the shell expands `[h]`→`h`, so `~/.ss[h]/id_rsa` IS
+        // `~/.ssh/id_rsa` at runtime - escaping `[` to a literal let a bracket
+        // class dodge the deny rule, the exact bug class the deglob fix closes.
+        assert!(matches_path_resolved("~/.ssh/*", "~/.ss[h]/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.ssh/*", "~/.s[s]h/id_rsa", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_bare_dir_hits_aws_rule() {
+        assert!(matches_path_resolved("~/.aws/*", "~/.a[w]s", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_negation_and_range() {
+        // shell `[!x]` / `[r-t]` classes can also expand onto the protected dir
+        assert!(matches_path_resolved("~/.ssh/*", "~/.ss[!x]/id_rsa", TH, TU, true));
+        assert!(matches_path_resolved("~/.ssh/*", "~/.s[r-t]h/id_rsa", TH, TU, true));
+    }
+
+    #[test]
+    fn glob_candidate_bracket_class_false_positives_stay_allowed() {
+        // a class that cannot expand onto the protected segment is no match
+        assert!(!matches_path_resolved("~/.ssh/*", "~/.ss[xyz]/id_rsa", TH, TU, true));
+        assert!(!matches_path_resolved("~/.aws/*", "~/notes/[a]/x.md", TH, TU, true));
+        // an unterminated `[` is a literal bracket in the shell, not a class
+        assert!(!matches_path_resolved("~/.ssh/*", "~/.ss[h/id_rsa", TH, TU, true));
     }
 
     #[test]
