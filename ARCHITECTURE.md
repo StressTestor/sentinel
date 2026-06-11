@@ -157,9 +157,10 @@ shai-hulud / Miasma supply-chain hardening pack, organized by honesty tier:
   `--post-file`), plus `>/dev/tcp` and `nc <file`.
 - **warn (dual-use tripwires):** plain `curl/wget --data`/`-d` (common in API
   testing); writes to other agents' hook configs (`.claude/settings*.json`,
-  `~/.codex`, `~/.gemini`, `.vscode/tasks.json`), LaunchAgent / systemd-user
-  persistence units, project-local `kubeconfig`, and `npm/pnpm/yarn/bun publish` /
-  `npm token` / `gh repo create --public`.
+  `~/.codex`, `~/.gemini`, `.vscode/tasks.json`), CI workflows
+  (`.github/workflows/*` - auto-run-on-push + secrets/OIDC surface), LaunchAgent /
+  systemd-user persistence units, project-local `kubeconfig`, and
+  `npm/pnpm/yarn/bun publish` / `npm token` / `gh repo create --public`.
 
 The matcher also fail-safes a **glob-bearing candidate path**: a path that itself
 carries shell glob metacharacters (`~/.s*h/id_rsa`, `~/.ss[h]/id_rsa`) is projected
@@ -250,4 +251,4 @@ CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test
 
 ---
 
-last updated: 2026-06-11 by StressTestor (encoded-secret normalization, review pass: format-char strip broadened from 11 hardcoded chars to the full Unicode Cf set + TAG block; normalization computed once per evaluate instead of per secret rule; whitespace collapse dropped as no-value; documented that command/path matching is NOT normalized — secret path only, follow-up tracked. prior pass: red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-11 by StressTestor (encoded-secret normalization: full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; prior pass: red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
