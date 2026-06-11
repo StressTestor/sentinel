@@ -51,7 +51,17 @@ impl HookOutput {
 
 /// run the evaluate pipeline: read stdin JSON, evaluate policy, write stdout JSON.
 /// this is the hot path called by Claude Code's PreToolUse hook on every tool call.
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `canary` is the dry-run mode used by `sentinel doctor`'s liveness probe: it
+/// runs the FULL decision path (load policy, parse input, match rules) but
+/// (a) never writes to the audit trail (the synthetic known-bad must not
+///     pollute it), and
+/// (b) reports the would-be decision as the nested deny JSON whenever the
+///     matched rule's action is Block, REGARDLESS of audit/enforce mode —
+///     the live hook in audit mode emits `{}` (it never blocks), which would
+///     leave the probe blind to whether the decision path works at all.
+/// With `canary == false` the behavior is exactly the live hook's.
+pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Load the policy FIRST, so a degraded input (empty / unparseable stdin) can
     // honor the policy's on_failure posture instead of a hard-coded allow.
     let policy_path = resolve_policy_path();
@@ -93,6 +103,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // evaluate
     let decision = engine.evaluate(&tool_call);
+
+    if canary {
+        // doctor's liveness probe: surface the would-be decision, skip the
+        // audit trail. Block -> the nested deny JSON (even in audit mode);
+        // anything else -> defer, same empty object as the live allow path.
+        if decision.action == Action::Block {
+            print_output(&HookOutput::deny(
+                decision
+                    .reason
+                    .unwrap_or_else(|| "blocked by sentinel policy".into()),
+            ));
+        } else {
+            print_output(&HookOutput::allow());
+        }
+        return Ok(());
+    }
 
     // log to audit trail
     let _ = audit_trail::log_event(&audit_trail::AuditEvent {

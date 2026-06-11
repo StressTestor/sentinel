@@ -39,7 +39,7 @@ async fn main() {
             install::run_uninstall()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
-        Command::Evaluate => evaluate::run(),
+        Command::Evaluate(args) => evaluate::run(args.canary),
         Command::Wrap(args) => wrap::run_wrap(&args.agent_command),
         Command::CorpusUpdate => {
             println!("sentinel corpus update — not yet implemented");
