@@ -1,18 +1,21 @@
 //! `sentinel doctor` - validate the full install chain and probe liveness.
 //!
 //! Honesty contract (the repo shipped a tier-honesty change; do not regress it):
-//! doctor verifies ON-DISK CONFIGURATION plus a point-in-time liveness probe. It
-//! reports "hook entry present / binary path resolves / policy loads / the binary
-//! denies a known-bad input" - NEVER "active and defending". A chmod-x'd or
-//! deleted binary fails OPEN silently mid-session (Claude Code only blocks on the
-//! hook's exit code 2 / deny JSON; a missing binary exits 127 and the tool runs);
-//! the canary detects that at check-time but cannot PREVENT an in-session tamper.
+//! doctor verifies ON-DISK CONFIGURATION plus a point-in-time liveness probe. The
+//! canary spawns the HOOKED BINARY ITSELF with `evaluate --canary` and a known-bad
+//! payload, and asserts THAT process's own output is a deny (nested deny JSON or
+//! exit code 2) - it does NOT evaluate the policy in-process, so a shim that merely
+//! prints "sentinel x.y" on --version cannot pass. It still reports "hook entry
+//! present / binary path resolves / policy loads / the hooked binary denies a
+//! known-bad input" - NEVER "active and defending". A chmod-x'd or deleted binary
+//! fails OPEN silently mid-session (Claude Code only blocks on the hook's exit
+//! code 2 / deny JSON; a missing binary exits 127 and the tool runs); the canary
+//! detects that at check-time but cannot PREVENT an in-session tamper.
 
 use crate::audit_trail::{self, AuditEvent};
 use crate::cli::DoctorArgs;
-use crate::evaluate::hook_schema::HookInput;
 use crate::evaluate::resolve_policy_path;
-use crate::policy::{Action, PolicyEngine};
+use crate::policy::PolicyEngine;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -39,11 +42,14 @@ impl Level {
 /// outcome of spawning the hooked binary against a synthetic known-bad call
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanaryRaw {
-    /// the binary ran and returned a deny decision on stdout
+    /// the binary itself ran `evaluate --canary` and denied (nested deny JSON
+    /// on ITS stdout, or the exit-2 block convention)
     Denied,
-    /// the binary ran but returned no deny (allow / would-log)
+    /// the binary ran `evaluate --canary` to completion but produced no deny -
+    /// its decision path is not blocking the known-bad (e.g. a no-op shim)
     NoDecision,
-    /// the binary could not be spawned (missing / not executable) - the tamper signal
+    /// the binary could not be spawned, does not identify as sentinel, or
+    /// errored out before producing a decision - the tamper signal
     NotRunnable,
     /// there is no installed hook to probe
     NoHook,
@@ -83,9 +89,11 @@ fn binary_from_command(cmd: &str) -> &str {
     cmd.strip_suffix(" evaluate").unwrap_or(cmd).trim()
 }
 
-/// Interpret the canary against the active mode. Returns (level, message). In audit
-/// mode "no decision" is the EXPECTED healthy state (audit logs, never blocks), so
-/// it must not be an error.
+/// Interpret the canary against the active mode. Returns (level, message). Because
+/// the probe runs `evaluate --canary` (which reports the would-be decision even in
+/// audit mode), NoDecision always means the decision path is broken - it is an
+/// error in BOTH modes. Audit mode only downgrades a Denied to Warn ("would deny,
+/// but audit only logs").
 fn interpret_canary(is_audit: bool, raw: CanaryRaw) -> (Level, String) {
     match raw {
         CanaryRaw::NoHook => (Level::Err, "liveness: no sentinel hook installed to probe".into()),
@@ -93,18 +101,19 @@ fn interpret_canary(is_audit: bool, raw: CanaryRaw) -> (Level, String) {
             Level::Err,
             "liveness: the hooked binary is missing, not executable, or does not identify as sentinel - the guard appears disarmed".into(),
         ),
-        // the policy itself doesn't deny a known-bad call - broken regardless of mode
+        // the hooked binary ran its decision path and did not deny - broken
+        // regardless of mode (a no-op shim or a gutted policy lands here)
         CanaryRaw::NoDecision => (
             Level::Err,
-            "liveness: the policy does not deny a known-bad call (ssh key read) - the policy is not protecting".into(),
+            "liveness: the hooked binary does not deny a known-bad call (ssh key read) - enforcement is not protecting".into(),
         ),
         CanaryRaw::Denied if is_audit => (
             Level::Warn,
-            "liveness: the policy would deny a known-bad call, but audit mode only logs (run 'sentinel install --enforce' to enforce)".into(),
+            "liveness: the hooked binary would deny a known-bad call, but audit mode only logs (run 'sentinel install --enforce' to enforce)".into(),
         ),
         CanaryRaw::Denied => (
             Level::Ok,
-            "liveness: hooked binary identifies as sentinel and the policy denies a known-bad call".into(),
+            "liveness: the hooked binary identifies as sentinel and itself denies a known-bad call".into(),
         ),
     }
 }
@@ -193,14 +202,72 @@ pub fn build_report(
     DoctorReport { lines, trust_ramp, healthy }
 }
 
-/// Probe liveness in two non-polluting, version-safe steps:
-///   1. does the hooked binary actually RUN? (`--version`, present in every
-///      version, never logs) - this catches the deleted/`chmod -x`'d binary that
-///      would otherwise exit 127 and fail open silently;
-///   2. would the policy DENY a known-bad call? - evaluated IN-PROCESS against the
-///      loaded engine (no subprocess, so no synthetic event pollutes the audit
-///      trail, and no version-specific subcommand is required of the hooked binary).
-fn probe_canary(binary: &str, engine: Option<&PolicyEngine>) -> CanaryRaw {
+/// the synthetic known-bad payload the canary feeds the hooked binary. An SSH
+/// private-key read is denied by every shipped default policy.
+const CANARY_INPUT: &str = r#"{"tool_name":"Read","tool_input":{"file_path":"~/.ssh/id_rsa"}}"#;
+
+/// Pure interpretation of one spawn of `<hooked binary> evaluate --canary` fed
+/// the known-bad payload. Takes the raw observables (exit code, stdout, stderr)
+/// so unit tests can drive every branch without a subprocess.
+///
+/// A deny is recognized through EITHER signal Claude Code itself honors:
+///   - stdout parses as JSON with nested `hookSpecificOutput.permissionDecision
+///     == "deny"`, or
+///   - the process exits with code 2 (forward-compat for the exit-2 block
+///     convention).
+///
+/// Caveat, handled conservatively: an OLDER hooked binary that predates
+/// `--canary` makes clap reject the flag - and clap's usage errors ALSO exit
+/// with code 2, which would otherwise be misread as a deny. Those errors are
+/// recognizable ("unexpected argument" / usage text on stderr, never a real
+/// block reason) and mapped to NotRunnable: we could not prove that binary's
+/// decision path, so the canary flags "appears disarmed" rather than silently
+/// passing. Re-running `sentinel install` (or pointing the hook at the current
+/// binary) clears it. Better a false alarm than a spoofable HEALTHY.
+fn classify_evaluate_probe(exit_code: Option<i32>, stdout: &str, stderr: &str) -> CanaryRaw {
+    // primary signal: the binary's OWN stdout carries the nested deny contract
+    if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
+        let decision = v
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("permissionDecision"))
+            .and_then(|d| d.as_str());
+        if decision == Some("deny") {
+            return CanaryRaw::Denied;
+        }
+    }
+    // secondary signal: the exit-2 block convention - minus clap usage errors
+    // (older binary without --canary; see the caveat above)
+    if exit_code == Some(2) {
+        let err = stderr.to_ascii_lowercase();
+        if err.contains("unexpected argument") || err.contains("usage") {
+            return CanaryRaw::NotRunnable;
+        }
+        return CanaryRaw::Denied;
+    }
+    if exit_code == Some(0) {
+        // ran the decision path to completion and chose not to deny: the
+        // known-bad is NOT being blocked (a no-op shim lands here)
+        return CanaryRaw::NoDecision;
+    }
+    // crashed, was killed, or errored before producing a decision - the
+    // decision path could not be proven, treat as the tamper signal
+    CanaryRaw::NotRunnable
+}
+
+/// Probe liveness by exercising the hooked binary's OWN enforcement:
+///   1. does it RUN and identify as sentinel? (`--version`) - catches the
+///      deleted/`chmod -x`'d binary that would otherwise exit 127 and fail open
+///      silently, and the hook repointed at some unrelated executable;
+///   2. does THAT binary deny a known-bad call? - spawned as
+///      `<binary> evaluate --canary` with the known-bad payload on stdin, and
+///      the deny is asserted on the SPAWNED PROCESS's own output. `--canary`
+///      runs the full decision path but skips the audit trail (no synthetic
+///      event pollutes it) and reports the would-be deny even in audit mode.
+///
+/// Step 2 is what makes the canary authoritative: a shim that fakes `--version`
+/// but no-ops `evaluate` reads NoDecision, never Denied. Evaluating the policy
+/// in-process here (the old behavior) proved nothing about the hooked binary.
+fn probe_canary(binary: &str) -> CanaryRaw {
     // The hooked binary must run AND identify as sentinel. Checking only the exit
     // code would green-light a hook repointed at a no-op (a script named
     // `sentinel` that exits 0) - the quiet disarm. clap prints "sentinel <ver>"
@@ -214,19 +281,30 @@ fn probe_canary(binary: &str, engine: Option<&PolicyEngine>) -> CanaryRaw {
     if !identifies {
         return CanaryRaw::NotRunnable;
     }
-    let input = r#"{"tool_name":"Read","tool_input":{"file_path":"~/.ssh/id_rsa"}}"#;
-    let denies = engine
-        .and_then(|e| {
-            serde_json::from_str::<HookInput>(input)
-                .ok()
-                .map(|hi| e.evaluate(&hi.to_tool_call()).action)
-        })
-        .map(|action| action == Action::Block)
-        .unwrap_or(false);
-    if denies {
-        CanaryRaw::Denied
-    } else {
-        CanaryRaw::NoDecision
+
+    let child = Command::new(binary)
+        .args(["evaluate", "--canary"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => return CanaryRaw::NotRunnable,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        // a child that exits without reading stdin (old binary, clap error)
+        // yields EPIPE here - that is classified below, not a spawn failure
+        let _ = stdin.write_all(CANARY_INPUT.as_bytes());
+    }
+    match child.wait_with_output() {
+        Ok(out) => classify_evaluate_probe(
+            out.status.code(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        ),
+        Err(_) => CanaryRaw::NotRunnable,
     }
 }
 
@@ -258,9 +336,11 @@ pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
         count_blocks_within_days(&audit_trail::read_events(), now, 7, mode_filter.as_deref());
 
     // canary: probe the binary the hook actually points at (that's the tamper
-    // surface), evaluating the policy in-process. NoHook if nothing is installed.
+    // surface) by spawning ITS `evaluate --canary` against a known-bad payload
+    // and asserting its own deny. --canary skips the audit trail, so the
+    // synthetic probe leaves no events behind. NoHook if nothing is installed.
     let canary = match settings.as_ref().and_then(hooked_command) {
-        Some(cmd) => probe_canary(binary_from_command(&cmd), engine.as_ref().ok()),
+        Some(cmd) => probe_canary(binary_from_command(&cmd)),
         None => CanaryRaw::NoHook,
     };
 
@@ -346,9 +426,83 @@ mod tests {
         // THE repoint disarm: a hook pointing at a live binary that exits 0 but
         // does not identify as sentinel (e.g. a no-op named `sentinel`) must read
         // as NotRunnable - never a healthy OK. /bin/sh stands in for any non-sentinel.
-        assert_eq!(probe_canary("/bin/sh", None), CanaryRaw::NotRunnable);
+        assert_eq!(probe_canary("/bin/sh"), CanaryRaw::NotRunnable);
         // a deleted/missing binary likewise
-        assert_eq!(probe_canary("/nonexistent/sentinel", None), CanaryRaw::NotRunnable);
+        assert_eq!(probe_canary("/nonexistent/sentinel"), CanaryRaw::NotRunnable);
+    }
+
+    /// THE regression test for the spoofable canary (finding #6), in pure form:
+    /// a binary that runs `evaluate --canary` to completion (exit 0) but emits
+    /// no deny - the no-op shim - must NOT read Denied. The old canary never
+    /// looked at the binary's evaluate output at all, so this was unreachable.
+    #[test]
+    fn classify_noop_shim_output_is_no_decision_never_denied() {
+        // shim prints nothing
+        assert_eq!(classify_evaluate_probe(Some(0), "", ""), CanaryRaw::NoDecision);
+        // shim parrots the allow shape
+        assert_eq!(classify_evaluate_probe(Some(0), "{}", ""), CanaryRaw::NoDecision);
+        // shim prints non-JSON noise
+        assert_eq!(
+            classify_evaluate_probe(Some(0), "sentinel 0.2.1", ""),
+            CanaryRaw::NoDecision
+        );
+    }
+
+    #[test]
+    fn classify_nested_deny_json_is_denied() {
+        let deny = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"SSH key access"}}"#;
+        assert_eq!(classify_evaluate_probe(Some(0), deny, ""), CanaryRaw::Denied);
+    }
+
+    #[test]
+    fn classify_flat_or_non_deny_decision_is_not_denied() {
+        // the dead flat form Claude Code ignores must not count as a deny
+        assert_eq!(
+            classify_evaluate_probe(Some(0), r#"{"permissionDecision":"deny"}"#, ""),
+            CanaryRaw::NoDecision
+        );
+        // an explicit non-deny decision is not a deny
+        assert_eq!(
+            classify_evaluate_probe(
+                Some(0),
+                r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#,
+                ""
+            ),
+            CanaryRaw::NoDecision
+        );
+    }
+
+    #[test]
+    fn classify_exit_2_block_convention_is_denied() {
+        // forward-compat: a future binary may block via exit code 2 + stderr reason
+        assert_eq!(
+            classify_evaluate_probe(Some(2), "", "sentinel: blocked: SSH key access"),
+            CanaryRaw::Denied
+        );
+    }
+
+    #[test]
+    fn classify_old_binary_clap_error_is_not_runnable_not_denied() {
+        // an OLDER hooked binary without --canary: clap rejects the flag and
+        // exits 2 - same code as the block convention. It must read NotRunnable
+        // (conservative "appears disarmed"), never a spoof-friendly Denied.
+        let clap_err = "error: unexpected argument '--canary' found\n\nUsage: sentinel evaluate\n\nFor more information, try '--help'.\n";
+        assert_eq!(classify_evaluate_probe(Some(2), "", clap_err), CanaryRaw::NotRunnable);
+    }
+
+    #[test]
+    fn classify_crash_or_signal_is_not_runnable() {
+        // non-zero non-2 exit with no deny: decision path unproven
+        assert_eq!(classify_evaluate_probe(Some(1), "", "panic"), CanaryRaw::NotRunnable);
+        // killed by signal (no exit code)
+        assert_eq!(classify_evaluate_probe(None, "", ""), CanaryRaw::NotRunnable);
+    }
+
+    #[test]
+    fn classify_deny_json_wins_even_with_exit_2() {
+        // both signals at once is still a deny
+        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny"}}"#;
+        assert_eq!(classify_evaluate_probe(Some(2), deny, "blocked"), CanaryRaw::Denied);
     }
 
     #[test]
