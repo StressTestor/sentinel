@@ -11,6 +11,13 @@ pub struct HookInput {
     #[serde(default)]
     pub tool_input: serde_json::Value,
 
+    /// Claude Code's PreToolUse payload includes the session `cwd` — the working
+    /// directory the tool call runs in. install-preflight reads
+    /// `<cwd>/package.json`. modeled explicitly (it previously only landed in
+    /// `_extra`); absent → `None`, and preflight then does nothing.
+    #[serde(default)]
+    pub cwd: Option<String>,
+
     // capture everything else for forward compatibility
     #[serde(flatten)]
     pub _extra: serde_json::Map<String, serde_json::Value>,
@@ -245,6 +252,19 @@ mod tests {
         let tc = input.to_tool_call();
         assert_eq!(tc.tool_name, "Edit");
         assert!(tc.paths.contains(&"./src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn cwd_is_modeled_explicitly() {
+        // Claude Code sends `cwd` at the top level; it must land on the field,
+        // not just `_extra`, so preflight can read <cwd>/package.json.
+        let json = r#"{"tool_name":"Bash","tool_input":{"command":"npm install"},"cwd":"/srv/app"}"#;
+        let input: HookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.cwd.as_deref(), Some("/srv/app"));
+        // absent cwd → None (preflight no-ops)
+        let no_cwd: HookInput =
+            serde_json::from_str(r#"{"tool_name":"Bash","tool_input":{}}"#).unwrap();
+        assert_eq!(no_cwd.cwd, None);
     }
 
     #[test]
