@@ -1,0 +1,417 @@
+//! self-protect: content-aware escalation for writes that would disarm the
+//! sentinel PreToolUse hook (finding #5).
+//!
+//! the shipped default policy treats `**/.claude/settings.json` as a WARN-tier
+//! deny.path, and warn = allowed through. that leaves one precise gap: a
+//! Write/Edit/MultiEdit that rewrites `.claude/settings.json` to DROP the
+//! `sentinel evaluate` hook entry disarms the guard entirely, with only a
+//! warning. this module inspects the *content* of such writes AFTER policy
+//! evaluation and escalates exactly the hook-removing ones to Block, while
+//! leaving ordinary settings edits (which preserve the hook) at their
+//! policy-assigned action.
+//!
+//! honest limits (see tests + module docs at call site):
+//! - PreToolUse only sees the agent's own tool calls. a child-process write
+//!   under Bash (`sed -i`, `python -c "open(...).write(...)"`) never reaches
+//!   this content check; deny.commands may or may not catch it.
+//! - the check verifies only that *a* PreToolUse entry whose command contains
+//!   the `sentinel evaluate` marker survives. a rewrite that keeps the marker
+//!   but points the command at a different binary, or narrows the matcher,
+//!   slips past.
+//! - suffix matching on the target path is deliberately conservative: a full
+//!   Write to a *project-level* `.claude/settings.json` that carries no
+//!   sentinel hook is also escalated even though the live hook lives in the
+//!   user-level file. over-blocking here beats under-blocking.
+
+use crate::policy::{Action, PolicyDecision};
+use serde_json::Value;
+
+/// the marker identifying sentinel's own hook entry. must stay in sync with
+/// `src/install/hooks.rs::SENTINEL_HOOK_MARKER`.
+pub const SENTINEL_HOOK_MARKER: &str = "sentinel evaluate";
+
+/// pure core: given the policy's decision, the raw `tool_input` JSON, and
+/// whether a sentinel hook is currently installed in the live settings file,
+/// return the (possibly escalated) decision.
+///
+/// escalates to Block iff ALL of:
+/// - the incoming decision is not already Block (an existing Block keeps its
+///   own reason),
+/// - a sentinel hook is currently installed (nothing to protect otherwise —
+///   a fresh `sentinel install` writing the hook IN must not be blocked),
+/// - the tool call targets a `.claude/settings.json` /
+///   `.claude/settings.local.json` file, and
+/// - the new content would remove the hook entry (or destroy the file's JSON,
+///   which drops all hooks).
+pub fn escalate(
+    decision: PolicyDecision,
+    tool_input: &Value,
+    hook_installed: bool,
+) -> PolicyDecision {
+    if decision.action == Action::Block {
+        return decision; // a real block keeps its own reason
+    }
+    if !hook_installed {
+        return decision; // nothing installed → nothing to protect
+    }
+    if !is_hook_removal_write(tool_input) {
+        return decision;
+    }
+    PolicyDecision {
+        action: Action::Block,
+        reason: Some(
+            "write to .claude/settings.json would remove the sentinel PreToolUse hook (self-protect)"
+                .into(),
+        ),
+        matched_rule: Some("selfprotect: hook-removal".into()),
+    }
+}
+
+/// entry point for the evaluate pipeline. same as [`escalate`] but reads the
+/// live `~/.claude/settings.json` to learn whether a sentinel hook is
+/// currently installed. ordered so the filesystem read happens ONLY when the
+/// tool call already looks like a hook-removing settings write — the hot path
+/// (every other tool call) stays free of extra I/O.
+pub fn apply(decision: PolicyDecision, tool_input: &Value) -> PolicyDecision {
+    if decision.action == Action::Block || !is_hook_removal_write(tool_input) {
+        return decision;
+    }
+    escalate(decision, tool_input, live_hook_installed())
+}
+
+/// pure detection: does this tool_input describe a write that targets a
+/// `.claude/settings(.local).json` file AND would remove the sentinel hook?
+fn is_hook_removal_write(tool_input: &Value) -> bool {
+    if !targets_claude_settings(tool_input) {
+        return false;
+    }
+    // Write: full content replacement
+    if let Some(content) = tool_input.get("content").and_then(|v| v.as_str()) {
+        return match serde_json::from_str::<Value>(content) {
+            // valid JSON: hook must survive in the shape Claude Code honors
+            Ok(new_settings) => !settings_contains_sentinel_hook(&new_settings),
+            // malformed JSON destroys the settings file → drops ALL hooks
+            Err(_) => true,
+        };
+    }
+    // MultiEdit: array of {old_string, new_string}
+    if let Some(edits) = tool_input.get("edits").and_then(|v| v.as_array()) {
+        return edits.iter().any(edit_strips_marker);
+    }
+    // Edit: single old_string/new_string pair
+    if tool_input.get("new_string").is_some() {
+        return edit_strips_marker(tool_input);
+    }
+    // no new content carried (Read, Glob, …) → nothing to assess
+    false
+}
+
+/// one old_string→new_string replacement that takes the marker OUT.
+fn edit_strips_marker(edit: &Value) -> bool {
+    let old = edit.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    let new = edit.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    old.contains(SENTINEL_HOOK_MARKER) && !new.contains(SENTINEL_HOOK_MARKER)
+}
+
+/// fields that can carry the target path across Write/Edit/MultiEdit variants.
+const TARGET_PATH_FIELDS: &[&str] = &["file_path", "path", "filePath"];
+
+fn targets_claude_settings(tool_input: &Value) -> bool {
+    TARGET_PATH_FIELDS.iter().any(|key| {
+        tool_input
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .is_some_and(is_claude_settings_path)
+    })
+}
+
+/// suffix match on the settings files, requiring `.claude` to be a real path
+/// component (so `/x/foo.claude/settings.json` does not match). `~`-prefixed
+/// paths need no expansion — the suffix check covers them.
+fn is_claude_settings_path(path: &str) -> bool {
+    let p = path.trim();
+    for suffix in [".claude/settings.json", ".claude/settings.local.json"] {
+        if p == suffix {
+            return true; // bare relative form
+        }
+        if let Some(prefix) = p.strip_suffix(suffix) {
+            if prefix.ends_with('/') {
+                return true; // ~/..., /abs/..., rel/... forms
+            }
+        }
+    }
+    false
+}
+
+/// does a parsed settings document still contain a sentinel PreToolUse hook in
+/// the nested shape Claude Code actually honors? the marker appearing anywhere
+/// else in the file does NOT count — only `hooks.PreToolUse[].hooks[].command`.
+fn settings_contains_sentinel_hook(settings: &Value) -> bool {
+    settings
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains(SENTINEL_HOOK_MARKER))
+                        })
+                    })
+            })
+        })
+}
+
+/// thin filesystem wrapper: is a sentinel hook currently installed in the live
+/// `~/.claude/settings.json`? unreadable/absent file → not installed (nothing
+/// to protect). readable but unparseable → fall back to a substring scan and
+/// err toward "installed" (protect rather than wave through).
+fn live_hook_installed() -> bool {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let path = std::path::PathBuf::from(home)
+        .join(".claude")
+        .join("settings.json");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<Value>(&content) {
+            Ok(settings) => settings_contains_sentinel_hook(&settings),
+            Err(_) => content.contains(SENTINEL_HOOK_MARKER),
+        },
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const SETTINGS: &str = "/Users/u/.claude/settings.json";
+
+    fn warn_decision() -> PolicyDecision {
+        PolicyDecision {
+            action: Action::Warn,
+            reason: Some("agent config write".into()),
+            matched_rule: Some("deny.paths: **/.claude/settings.json".into()),
+        }
+    }
+
+    fn allow_decision() -> PolicyDecision {
+        PolicyDecision {
+            action: Action::Allow,
+            reason: None,
+            matched_rule: None,
+        }
+    }
+
+    /// a settings.json body that still carries the sentinel PreToolUse hook.
+    fn settings_with_hook() -> String {
+        json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": ".*", "hooks": [
+                        {"type": "command", "command": "/usr/local/bin/sentinel evaluate"}
+                    ]}
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    /// a settings.json body with the sentinel hook entry dropped.
+    fn settings_without_hook() -> String {
+        json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": ".*", "hooks": [
+                        {"type": "command", "command": "/bin/true"}
+                    ]}
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    // (a) Write that drops the hook → escalate to Block
+    #[test]
+    fn write_dropping_hook_escalates_to_block() {
+        let input = json!({"file_path": SETTINGS, "content": settings_without_hook()});
+        let d = escalate(warn_decision(), &input, true);
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.matched_rule.as_deref(), Some("selfprotect: hook-removal"));
+        assert!(
+            d.reason.as_deref().unwrap_or("").contains("self-protect"),
+            "reason should name self-protect: {:?}",
+            d.reason
+        );
+    }
+
+    // (b) Write that preserves the hook → decision unchanged (warn stays warn)
+    #[test]
+    fn write_preserving_hook_is_not_escalated() {
+        let input = json!({"file_path": SETTINGS, "content": settings_with_hook()});
+        assert_eq!(escalate(warn_decision(), &input, true), warn_decision());
+    }
+
+    // (c) Write of malformed JSON → escalate (a broken settings.json drops all hooks)
+    #[test]
+    fn write_of_malformed_json_escalates() {
+        let input = json!({"file_path": SETTINGS, "content": "{ this is not json"});
+        assert_eq!(escalate(warn_decision(), &input, true).action, Action::Block);
+        // empty content truncates the file → same outcome
+        let empty = json!({"file_path": SETTINGS, "content": ""});
+        assert_eq!(escalate(warn_decision(), &empty, true).action, Action::Block);
+    }
+
+    // (d) Edit whose old_string carries the marker and new_string doesn't → escalate
+    #[test]
+    fn edit_removing_marker_escalates() {
+        let input = json!({
+            "file_path": SETTINGS,
+            "old_string": "{\"type\": \"command\", \"command\": \"/usr/local/bin/sentinel evaluate\"}",
+            "new_string": "{\"type\": \"command\", \"command\": \"/bin/true\"}"
+        });
+        let d = escalate(warn_decision(), &input, true);
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.matched_rule.as_deref(), Some("selfprotect: hook-removal"));
+    }
+
+    // (e) Edit not touching the marker → decision unchanged
+    #[test]
+    fn edit_not_touching_marker_is_not_escalated() {
+        let input = json!({
+            "file_path": SETTINGS,
+            "old_string": "\"model\": \"opus\"",
+            "new_string": "\"model\": \"sonnet\""
+        });
+        assert_eq!(escalate(warn_decision(), &input, true), warn_decision());
+        // an edit that keeps the marker in BOTH sides is also fine
+        let keeps = json!({
+            "file_path": SETTINGS,
+            "old_string": "/usr/local/bin/sentinel evaluate",
+            "new_string": "/usr/local/bin/sentinel evaluate"
+        });
+        assert_eq!(escalate(warn_decision(), &keeps, true), warn_decision());
+    }
+
+    // (f) no hook currently installed → never escalate (fresh install must not be blocked)
+    #[test]
+    fn no_installed_hook_means_no_escalation() {
+        let dropping = json!({"file_path": SETTINGS, "content": settings_without_hook()});
+        assert_eq!(escalate(allow_decision(), &dropping, false), allow_decision());
+        // a fresh install writing the hook IN
+        let installing = json!({"file_path": SETTINGS, "content": settings_with_hook()});
+        assert_eq!(escalate(allow_decision(), &installing, false), allow_decision());
+        // even malformed content is not ours to block when nothing is installed
+        let malformed = json!({"file_path": SETTINGS, "content": "not json"});
+        assert_eq!(escalate(allow_decision(), &malformed, false), allow_decision());
+    }
+
+    // (g) a non-settings.json write → never escalate
+    #[test]
+    fn non_settings_write_is_not_escalated() {
+        let input = json!({"file_path": "/Users/u/project/src/main.rs", "content": "fn main() {}"});
+        assert_eq!(escalate(allow_decision(), &input, true), allow_decision());
+        // even one that mentions the marker in a removal-shaped edit
+        let edit = json!({
+            "file_path": "/Users/u/project/notes.md",
+            "old_string": "sentinel evaluate",
+            "new_string": "gone"
+        });
+        assert_eq!(escalate(warn_decision(), &edit, true), warn_decision());
+    }
+
+    // MultiEdit: any single edit that strips the marker → escalate
+    #[test]
+    fn multiedit_removing_marker_escalates() {
+        let input = json!({
+            "file_path": SETTINGS,
+            "edits": [
+                {"old_string": "\"model\": \"opus\"", "new_string": "\"model\": \"sonnet\""},
+                {"old_string": "/usr/local/bin/sentinel evaluate", "new_string": ""}
+            ]
+        });
+        assert_eq!(escalate(warn_decision(), &input, true).action, Action::Block);
+    }
+
+    // MultiEdit that never touches the marker → decision unchanged
+    #[test]
+    fn multiedit_not_touching_marker_is_not_escalated() {
+        let input = json!({
+            "file_path": SETTINGS,
+            "edits": [
+                {"old_string": "\"model\": \"opus\"", "new_string": "\"model\": \"sonnet\""}
+            ]
+        });
+        assert_eq!(escalate(warn_decision(), &input, true), warn_decision());
+    }
+
+    // settings.local.json is protected with the same rules
+    #[test]
+    fn settings_local_json_is_protected_too() {
+        let input = json!({
+            "file_path": "/Users/u/proj/.claude/settings.local.json",
+            "content": "{ not json"
+        });
+        assert_eq!(escalate(warn_decision(), &input, true).action, Action::Block);
+    }
+
+    // path recognition: tilde, bare-relative, and absolute all match;
+    // a directory merely *named* like `foo.claude` does not
+    #[test]
+    fn settings_path_suffix_matching() {
+        for p in [
+            ".claude/settings.json",
+            "~/.claude/settings.json",
+            "/home/u/.claude/settings.local.json",
+        ] {
+            let input = json!({"file_path": p, "content": "not json"});
+            assert_eq!(
+                escalate(allow_decision(), &input, true).action,
+                Action::Block,
+                "should protect: {p}"
+            );
+        }
+        let near_miss = json!({"file_path": "/x/foo.claude/settings.json", "content": "not json"});
+        assert_eq!(escalate(allow_decision(), &near_miss, true), allow_decision());
+    }
+
+    // an existing Block keeps its own reason — we don't clobber a real block
+    #[test]
+    fn existing_block_is_left_alone() {
+        let block = PolicyDecision {
+            action: Action::Block,
+            reason: Some("real policy block".into()),
+            matched_rule: Some("deny.paths: something".into()),
+        };
+        let input = json!({"file_path": SETTINGS, "content": settings_without_hook()});
+        let d = escalate(block.clone(), &input, true);
+        assert_eq!(d, block);
+    }
+
+    // a Read of settings.json carries no new content → nothing to escalate
+    #[test]
+    fn read_of_settings_is_not_escalated() {
+        let input = json!({"file_path": SETTINGS});
+        assert_eq!(escalate(allow_decision(), &input, true), allow_decision());
+    }
+
+    // hook present but in a shape Claude Code does not honor (no nested hooks
+    // array) counts as REMOVED — the marker alone is not enough
+    #[test]
+    fn marker_outside_honored_hook_shape_counts_as_removed() {
+        let body = json!({
+            "comment": "sentinel evaluate used to live here",
+            "hooks": {"PreToolUse": []}
+        })
+        .to_string();
+        let input = json!({"file_path": SETTINGS, "content": body});
+        assert_eq!(escalate(warn_decision(), &input, true).action, Action::Block);
+    }
+}

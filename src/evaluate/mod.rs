@@ -104,6 +104,15 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     // evaluate
     let decision = engine.evaluate(&tool_call);
 
+    // self-protect (finding #5): the default policy keeps `.claude/settings.json`
+    // at WARN tier, and warn = allowed — so a Write/Edit/MultiEdit that rewrites
+    // the file to DROP the installed `sentinel evaluate` PreToolUse hook would
+    // disarm the guard with only a warning. inspect the write's CONTENT and
+    // escalate exactly the hook-removing ones to Block; ordinary settings edits
+    // that preserve the hook keep their policy-assigned action. applied before
+    // the canary/audit/enforce branches so all three see the escalated decision.
+    let decision = crate::selfprotect::apply(decision, &hook_input.tool_input);
+
     if canary {
         // doctor's liveness probe: surface the would-be decision, skip the
         // audit trail. Block -> the nested deny JSON (even in audit mode);

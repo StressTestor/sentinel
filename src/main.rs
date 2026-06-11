@@ -14,6 +14,7 @@ mod install;
 mod lint;
 mod policy;
 mod policy_diff;
+mod selfprotect;
 mod verify;
 mod wrap;
 
