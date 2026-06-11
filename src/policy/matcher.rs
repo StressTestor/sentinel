@@ -400,19 +400,23 @@ fn normalize_command(cmd: &str) -> String {
     out.join(" ")
 }
 
-/// Match raw params against a secret regex pattern. Tested against BOTH the
-/// raw string and its normalized form (HTML-entity decode, zero-width/bidi
-/// strip, NFKC fold) so an entity-encoded, zero-width-injected, or fullwidth
-/// spelling of a token can't dodge the rule. Additive only: the raw check runs
-/// first and is never replaced, so anything that matched before still matches.
-pub fn matches_secret(pattern: &str, raw: &str) -> bool {
+/// Match raw params against a secret regex pattern, testing BOTH the raw
+/// string and a PRE-COMPUTED normalized form (HTML-entity decode, Unicode
+/// format-char strip, NFKC fold) so an entity-encoded, format-char-injected,
+/// or fullwidth spelling of a token can't dodge the rule. Additive only: the
+/// raw check runs first and is never replaced.
+///
+/// The caller supplies `normalized` so the normalization runs ONCE per
+/// payload — `PolicyEngine::evaluate` loops this over every deny.secrets rule
+/// on the every-tool-call path, and the entity-decode + NFKC work is
+/// per-payload, not per-rule. For one-off checks use `matches_secret`.
+pub fn matches_secret_normalized(pattern: &str, raw: &str, normalized: &str) -> bool {
     match Regex::new(pattern) {
         Ok(re) => {
             if re.is_match(raw) {
                 return true;
             }
-            let normalized = crate::common::normalize::normalize_for_secret_match(raw);
-            normalized != raw && re.is_match(&normalized)
+            normalized != raw && re.is_match(normalized)
         }
         Err(_) => {
             tracing::warn!("invalid secret pattern: {pattern}");
@@ -420,6 +424,7 @@ pub fn matches_secret(pattern: &str, raw: &str) -> bool {
         }
     }
 }
+
 
 /// convert a glob pattern to an anchored regex string.
 /// - `*` matches anything except `/`, `**` matches anything including `/`,
@@ -492,6 +497,13 @@ fn glob_body(pattern: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// test-only single-shot form: normalize and delegate, exactly what
+    /// `PolicyEngine::evaluate` does once per payload before its rule loop
+    fn matches_secret(pattern: &str, raw: &str) -> bool {
+        let normalized = crate::common::normalize::normalize_for_secret_match(raw);
+        matches_secret_normalized(pattern, raw, &normalized)
+    }
 
     #[test]
     fn glob_star_matches_filename() {
