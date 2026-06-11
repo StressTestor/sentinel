@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-06-01
+last updated: 2026-06-11
 
 ## overview
 
@@ -49,8 +49,10 @@ sentinel/
 │   │   ├── schema.rs       TOML policy schema + parsing
 │   │   └── matcher.rs      glob path matching, regex command/secret matching
 │   ├── evaluate/
-│   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> stdout JSON)
-│   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema
+│   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> selfprotect -> stdout JSON); --canary dry-run for doctor
+│   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema; command extraction incl. exec-named MCP tools
+│   ├── selfprotect/
+│   │   └── mod.rs          content-aware escalation: block writes that remove sentinel's own hook entry
 │   ├── check/
 │   │   └── mod.rs          sentinel check: dry-run/explain a tool call (read-only)
 │   ├── verify/
@@ -133,13 +135,27 @@ Tool call arrives (via PreToolUse hook)
 (credential paths, recursive deletion, pipe-to-shell, secret patterns) it ships a
 shai-hulud / Miasma supply-chain hardening pack, organized by honesty tier:
 
-- **block (zero-FP):** self-protect of `~/.sentinel/policy.toml`; expanded
-  credential paths (`~/.npmrc`, `~/.kube/config`, `~/.config/gcloud/`, `~/.azure/`)
-  and secret content (GCP service-account, Azure storage/SAS, Vault, kubeconfig key).
-- **warn (dual-use tripwires):** writes to other agents' hook configs
-  (`.claude/settings*.json`, `~/.codex`, `~/.gemini`, `.vscode/tasks.json`),
-  LaunchAgent / systemd-user persistence units, project-local `kubeconfig`, and
-  `npm/pnpm/yarn/bun publish` / `npm token` / `gh repo create --public`.
+- **block (zero-FP):** self-protect of `~/.sentinel/policy.toml` and the `sentinel`
+  binary install paths (`~/.cargo/bin`, `~/.local/bin`, `/usr/local/bin`,
+  `/opt/homebrew/bin`); binary tamper-by-name (`rm "$(command -v sentinel)"`);
+  expanded credential paths (`~/.npmrc`, `~/.kube/config`, `~/.config/gcloud/`,
+  `~/.azure/`) and secret content (GCP service-account, Azure storage/SAS, Vault,
+  kubeconfig key); curl/wget data-exfil whose payload is a command substitution,
+  an `@file`, a secret-looking env var, or an upload flag (`-T`/`--upload-file`/
+  `--post-file`), plus `>/dev/tcp` and `nc <file`.
+- **warn (dual-use tripwires):** plain `curl/wget --data`/`-d` (common in API
+  testing); writes to other agents' hook configs (`.claude/settings*.json`,
+  `~/.codex`, `~/.gemini`, `.vscode/tasks.json`), LaunchAgent / systemd-user
+  persistence units, project-local `kubeconfig`, and `npm/pnpm/yarn/bun publish` /
+  `npm token` / `gh repo create --public`.
+
+The matcher also fail-safes a **glob-bearing candidate path**: a path that itself
+carries shell glob metacharacters (`~/.s*h/id_rsa`, `~/.ss[h]/id_rsa`) is projected
+onto a deny rule's literal prefix and matched, so a candidate the shell would expand
+onto a protected target can't dodge the anchored rule. Hook-removal protection
+(`src/selfprotect/`) runs after policy evaluation: a Write/Edit/MultiEdit to
+`.claude/settings(.local).json` that drops the `sentinel evaluate` hook escalates
+warn → block; hook-preserving edits keep their policy action.
 
 Structural limit, by design: the PreToolUse hook only sees the agent's own tool
 calls. The worm's real payload runs in npm/pip lifecycle-script child processes,
@@ -206,7 +222,7 @@ idempotent: running install twice doesn't duplicate hooks.
 | `sentinel uninstall` | remove hooks |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
 | `sentinel verify [--policy <file>]` | replay a pinned attack set through the policy, assert each is caught; non-zero exit on miss (CI gate) |
-| `sentinel doctor [--strict] [--json]` | validate the install chain (hook entry, binary runs, policy loads, self-protect rule) + probe liveness; detects a disarmed guard; `--strict` exits non-zero on any failure |
+| `sentinel doctor [--strict] [--json]` | validate the install chain (hook entry, binary runs, policy loads, self-protect rule) + probe liveness; the canary spawns the hooked binary as `evaluate --canary` and asserts its own deny (catches a no-op shim that fakes `--version`), without polluting the audit trail; `--strict` exits non-zero on any failure |
 | `sentinel policy-diff [--policy <file>]` | print bundled-default rules missing from an installed policy, for manual paste (read-only; reaches users who installed before a hardening update) |
 | `sentinel policy-lint [--policy <file>]` | static-check a policy: invalid regexes (dead rules), exact-duplicate/unreachable patterns, over-broad allow entries; non-zero exit on an error-level finding |
 | `sentinel status` | show config + hooks |
@@ -222,4 +238,4 @@ CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test
 
 ---
 
-last updated: 2026-06-09 by StressTestor (v0.2.1: fix silently-ignored blocks — emit nested hookSpecificOutput contract)
+last updated: 2026-06-11 by StressTestor (red-team hardening: glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
