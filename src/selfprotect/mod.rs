@@ -127,9 +127,11 @@ fn targets_claude_settings(tool_input: &Value) -> bool {
 
 /// suffix match on the settings files, requiring `.claude` to be a real path
 /// component (so `/x/foo.claude/settings.json` does not match). `~`-prefixed
-/// paths need no expansion — the suffix check covers them.
+/// paths need no expansion — the suffix check covers them. compared lowercased:
+/// macOS's default FS is case-insensitive, so `~/.claude/Settings.json` IS the
+/// live settings file and a cased spelling must not skip the escalation.
 fn is_claude_settings_path(path: &str) -> bool {
-    let p = path.trim();
+    let p = path.trim().to_ascii_lowercase();
     for suffix in [".claude/settings.json", ".claude/settings.local.json"] {
         if p == suffix {
             return true; // bare relative form
@@ -379,6 +381,30 @@ mod tests {
             );
         }
         let near_miss = json!({"file_path": "/x/foo.claude/settings.json", "content": "not json"});
+        assert_eq!(escalate(allow_decision(), &near_miss, true), allow_decision());
+    }
+
+    // marko fix #3: macOS's default FS is case-insensitive, so
+    // ~/.claude/Settings.json IS the live settings file — the suffix match must
+    // be case-insensitive or a cased spelling skips the escalation entirely.
+    #[test]
+    fn settings_path_matching_is_case_insensitive() {
+        let input = json!({
+            "file_path": "/Users/u/.claude/Settings.json",
+            "content": settings_without_hook()
+        });
+        assert_eq!(escalate(warn_decision(), &input, true).action, Action::Block);
+        // a cased `.Claude` directory component resolves to the same dir too
+        let upper_dir = json!({
+            "file_path": "/Users/u/.Claude/settings.json",
+            "content": "{ not json"
+        });
+        assert_eq!(escalate(warn_decision(), &upper_dir, true).action, Action::Block);
+        // the `.claude must be a real path component` guard still holds
+        let near_miss = json!({
+            "file_path": "/x/foo.Claude/Settings.json",
+            "content": "not json"
+        });
         assert_eq!(escalate(allow_decision(), &near_miss, true), allow_decision());
     }
 
