@@ -48,7 +48,12 @@ const DEP_FIELDS: [&str; 3] = ["dependencies", "devDependencies", "optionalDepen
 /// `yarn install|add`, `bun install|add`. does NOT trigger on `npm run`,
 /// `npm test`, `npm publish`, `npm ls`, `npx`, etc.
 pub fn is_install_like(command: &str) -> bool {
-    let tokens: Vec<&str> = command.split_whitespace().collect();
+    // a newline ends a command exactly like `;` does, but `split_whitespace()`
+    // would silently discard it — and with it the command boundary — letting a
+    // multi-line `do_setup\nnpm install` evade the command-position check.
+    // normalize newlines to an explicit `;` boundary token before splitting.
+    let normalized = command.replace(['\n', '\r'], " ; ");
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
     for (i, tok) in tokens.iter().enumerate() {
         let pm = match *tok {
             "npm" | "pnpm" | "yarn" | "bun" => *tok,
@@ -84,7 +89,9 @@ pub fn is_install_like(command: &str) -> bool {
 
 /// is the token at `idx` in a command position — i.e. the program being run,
 /// not an argument to another program? true when it is the first token or the
-/// preceding token is a shell separator or a command-wrapper word.
+/// preceding token is a shell separator or a command-wrapper word. newlines
+/// count as separators too: [`is_install_like`] normalizes them to `;` tokens
+/// before splitting, so the start of a new line is a command position.
 fn at_command_position(tokens: &[&str], idx: usize) -> bool {
     if idx == 0 {
         return true;
@@ -290,6 +297,33 @@ mod tests {
             "sudo npm ci",
         ] {
             assert!(is_install_like(cmd), "should trigger: {cmd}");
+        }
+    }
+
+    /// marko #1: `split_whitespace()` discarded newlines, so a multi-line
+    /// command like `do_setup\nnpm install` never saw `npm` at a command
+    /// position and evaded preflight entirely. a newline is a command
+    /// separator, exactly like `&&` / `;` / `|`.
+    #[test]
+    fn triggers_on_newline_separated_install() {
+        for cmd in [
+            "echo hi\nnpm install",
+            "do_setup\nnpm install",
+            "set -e\ncd /srv/app\nyarn add foo",
+            "echo hi\r\npnpm i",
+            "\nnpm install", // leading newline: npm starts the (first real) line
+        ] {
+            assert!(is_install_like(cmd), "should trigger: {cmd:?}");
+        }
+    }
+
+    #[test]
+    fn newline_separated_non_install_still_does_not_trigger() {
+        for cmd in [
+            "echo hi\nnpm run build",
+            "echo install\nnpm test",
+        ] {
+            assert!(!is_install_like(cmd), "should NOT trigger: {cmd:?}");
         }
     }
 
