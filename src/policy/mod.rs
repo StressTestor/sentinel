@@ -1,7 +1,8 @@
 pub mod matcher;
 pub mod schema;
 
-use matcher::{matches_allow_path, matches_command, matches_path, matches_secret};
+use crate::common::normalize::normalize_for_secret_match;
+use matcher::{matches_allow_path, matches_command, matches_path, matches_secret_normalized};
 use schema::PolicyConfig;
 use std::path::Path;
 use thiserror::Error;
@@ -159,14 +160,20 @@ impl PolicyEngine {
             }
         }
 
-        // check deny.secrets against raw params
-        for rule in &self.config.deny_secrets {
-            if matches_secret(&rule.pattern, &tool_call.raw_params) {
-                return PolicyDecision {
-                    action: parse_action(&rule.action),
-                    reason: Some(rule.reason.clone()),
-                    matched_rule: Some(format!("deny.secrets: {}", rule.pattern)),
-                };
+        // check deny.secrets against raw params. normalization (entity decode,
+        // format-char strip, NFKC) is per-payload work — compute it ONCE here
+        // and reuse it across the whole rule loop instead of per rule. skipped
+        // entirely when no secret rules exist.
+        if !self.config.deny_secrets.is_empty() {
+            let normalized = normalize_for_secret_match(&tool_call.raw_params);
+            for rule in &self.config.deny_secrets {
+                if matches_secret_normalized(&rule.pattern, &tool_call.raw_params, &normalized) {
+                    return PolicyDecision {
+                        action: parse_action(&rule.action),
+                        reason: Some(rule.reason.clone()),
+                        matched_rule: Some(format!("deny.secrets: {}", rule.pattern)),
+                    };
+                }
             }
         }
 
@@ -318,6 +325,49 @@ mod tests {
         let decision = engine.evaluate(&call);
         assert_eq!(decision.action, Action::Block);
         assert!(decision.reason.unwrap().contains("AWS"));
+    }
+
+    #[test]
+    fn deny_secret_normalized_match_on_later_rule() {
+        // Two secret rules; the payload evades the SECOND rule's raw regex with
+        // an injected format char (U+2069) and only matches via the normalized
+        // form. Pins the compute-once restructure: the normalized form is
+        // produced once per evaluate and must be correctly reused by every
+        // rule in the loop, not just the first.
+        let engine = PolicyEngine::from_config(PolicyConfig::new(
+            PolicySettings {
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "warn".into(),
+            },
+            vec![],
+            vec![],
+            vec![
+                DenySecretRule {
+                    pattern: r"AKIA[0-9A-Z]{16}".into(),
+                    action: "block".into(),
+                    reason: "AWS access key".into(),
+                },
+                DenySecretRule {
+                    pattern: r"ghp_[A-Za-z0-9]{36}".into(),
+                    action: "block".into(),
+                    reason: "GitHub token".into(),
+                },
+            ],
+            vec![],
+        ));
+        // token built at runtime, format char injected programmatically
+        let token = format!("ghp_{}", "c".repeat(36));
+        let evaded = format!("{}\u{2069}{}", &token[..10], &token[10..]);
+        let call = ToolCall {
+            tool_name: "Bash".into(),
+            command: None,
+            paths: vec![],
+            raw_params: format!(r#"{{"command": "echo {evaded}"}}"#),
+        };
+        let decision = engine.evaluate(&call);
+        assert_eq!(decision.action, Action::Block);
+        assert!(decision.reason.unwrap().contains("GitHub"));
     }
 
     #[test]

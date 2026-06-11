@@ -17,6 +17,7 @@ sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls b
 | async runtime | tokio | 1.x |
 | pattern matching | aho-corasick | 1.x |
 | regex | regex | 1.x |
+| text normalization | unicode-normalization, html-escape | 0.1 / 0.2 |
 | context persistence | bincode | 1.x |
 | terminal output | colored | 2.x |
 | error handling | thiserror, anyhow | 2.x / 1.x |
@@ -35,6 +36,7 @@ sentinel/
 │   ├── cli.rs              clap arg definitions
 │   ├── common/
 │   │   ├── mod.rs
+│   │   ├── normalize.rs    encoded-text normalization (HTML-entity decode, Unicode format-char strip, NFKC) — secret path only
 │   │   └── types.rs        shared types (AttackSequence, AuditReport, etc.)
 │   ├── corpus/
 │   │   ├── mod.rs          corpus loader (embedded + filesystem override)
@@ -109,7 +111,17 @@ Tool call arrives (via PreToolUse hook)
              and recursive directory coverage
            - deny commands: regex over the raw + a normalized form (rm-flag
              canonicalization), covering pipe-to-shell / fetch-exec variants
-           - deny secrets: regex over the request payload
+           - deny secrets: regex over the raw request payload AND a normalized
+             form (HTML-entity decode, Unicode format-char strip — the full Cf
+             set incl. bidi isolates/ALM plus the whole TAG block — NFKC fold),
+             so an entity-encoded / format-char-injected / fullwidth-spelled
+             token can't dodge the rule. additive: raw is checked first, never
+             replaced. normalized once per evaluate, reused across all rules.
+             LIMIT: this normalization covers the SECRET-CONTENT path only.
+             deny commands and deny paths match WITHOUT it — an entity-encoded
+             or format-char-injected command/path still evades those families.
+             wiring them is a deliberate follow-up (separate change, needs its
+             own false-positive analysis), not an oversight.
          un-inspectable input (empty / unparseable stdin) fails per on_failure
          ("closed" by default → deny). zero false positives by design.
 
@@ -238,4 +250,4 @@ CI runs `cargo run -- verify` as an attack-regression gate alongside `cargo test
 
 ---
 
-last updated: 2026-06-11 by StressTestor (red-team hardening: glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-11 by StressTestor (encoded-secret normalization, review pass: format-char strip broadened from 11 hardcoded chars to the full Unicode Cf set + TAG block; normalization computed once per evaluate instead of per secret rule; whitespace collapse dropped as no-value; documented that command/path matching is NOT normalized — secret path only, follow-up tracked. prior pass: red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
