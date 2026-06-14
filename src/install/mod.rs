@@ -14,7 +14,7 @@ pub enum InstallError {
     BinaryNotFound,
 }
 
-pub fn run_install(enforce: bool) -> Result<(), InstallError> {
+pub fn run_install(audit: bool) -> Result<(), InstallError> {
     // verify sentinel binary is in PATH
     let sentinel_path = which_sentinel()?;
     println!("sentinel binary: {}", sentinel_path.display());
@@ -24,18 +24,31 @@ pub fn run_install(enforce: bool) -> Result<(), InstallError> {
     hooks::install_hook(&settings_path, &sentinel_path)?;
     println!("installed PreToolUse hook in {}", settings_path.display());
 
-    // write default policy
+    // write default policy. ENFORCE is the default: a security tool that ships in
+    // log-only mode protects nobody, and the most direct attack on a guard you
+    // can disable is to just leave it disabled. `--audit` opts back into log-only.
     let policy_path = sentinel_dir().join("policy.toml");
-    let mode = if enforce { "enforce" } else { "audit" };
-    defaults::write_default_policy(&policy_path, mode)?;
-    println!("wrote default policy to {}", policy_path.display());
-    println!("mode: {mode}");
+    let mode = if audit { "audit" } else { "enforce" };
+    let wrote = defaults::write_default_policy(&policy_path, mode)?;
 
-    if !enforce {
+    if wrote {
+        println!("wrote default policy to {}", policy_path.display());
+        println!("mode: {mode}");
         println!();
-        println!("sentinel is in AUDIT mode — logging what would be blocked but not blocking.");
-        println!("to enable enforcement: sentinel install --enforce");
-        println!("or edit ~/.sentinel/policy.toml and set mode = \"enforce\"");
+        if audit {
+            println!("sentinel is in AUDIT mode - logging what WOULD be blocked, but NOT blocking.");
+            println!("to enforce: re-run `sentinel install` (enforce is the default),");
+            println!("or set mode = \"enforce\" in ~/.sentinel/policy.toml");
+        } else {
+            println!("sentinel is ENFORCING - tool calls that match a block rule are denied.");
+            println!("if a rule is too strict, set mode = \"audit\" in ~/.sentinel/policy.toml");
+            println!("(or reinstall with --audit) and tune it.");
+        }
+    } else {
+        // write_default_policy skips an existing file: do NOT claim a mode we did
+        // not set. An existing audit-mode user upgrading is NOT silently flipped.
+        println!("existing policy preserved at {} (mode unchanged).", policy_path.display());
+        println!("run `sentinel status` to see the active mode; edit the policy to change it.");
     }
 
     println!();

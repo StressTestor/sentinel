@@ -109,7 +109,7 @@ fn interpret_canary(is_audit: bool, raw: CanaryRaw) -> (Level, String) {
         ),
         CanaryRaw::Denied if is_audit => (
             Level::Warn,
-            "liveness: the hooked binary would deny a known-bad call, but audit mode only logs (run 'sentinel install --enforce' to enforce)".into(),
+            "liveness: the hooked binary would deny a known-bad call, but audit mode only logs (set mode = \"enforce\" in ~/.sentinel/policy.toml to enforce)".into(),
         ),
         CanaryRaw::Denied => (
             Level::Ok,
@@ -192,7 +192,7 @@ pub fn build_report(
     // trust ramp (audit mode only, and only if there's something to point at)
     let trust_ramp = if is_audit && block_count_7d > 0 {
         Some(format!(
-            "{block_count_7d} call(s) in the last 7 days would have been blocked, but you're in audit mode. Run 'sentinel install --enforce' to start blocking."
+            "{block_count_7d} call(s) in the last 7 days would have been blocked, but you're in audit mode. Set mode = \"enforce\" in ~/.sentinel/policy.toml to start blocking."
         ))
     } else {
         None
@@ -548,7 +548,7 @@ mod tests {
             CanaryRaw::Denied,
             5,
         );
-        assert!(report.trust_ramp.unwrap().contains("--enforce"));
+        assert!(report.trust_ramp.unwrap().contains("mode = \"enforce\""));
         // audit mode is healthy (it's a valid configured state), canary is warn not err
         assert!(report.healthy);
     }

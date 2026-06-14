@@ -44,6 +44,12 @@ impl HookInput {
             .or_else(|| self.tool_input.as_str().map(str::to_string));
         if let Some(cmd) = &command {
             paths.extend(extract_paths_from_command(cmd));
+            // ALSO mine the shell-de-obfuscated form, so a path hidden behind an
+            // ANSI-C `$'\x2f...'` quote or `${IFS}` word-split is still seen.
+            // Additive: the original tokens are kept; this only adds candidates.
+            if let Some(decoded) = crate::common::shell::decode_obfuscation(cmd) {
+                paths.extend(extract_paths_from_command(&decoded));
+            }
         }
 
         // 2. Known path-bearing fields (Read/Write/Edit/Glob/Grep/Notebook + variants).

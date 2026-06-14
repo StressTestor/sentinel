@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-06-11
+last updated: 2026-06-14
 
 ## overview
 
@@ -36,6 +36,7 @@ sentinel/
 │   ├── common/
 │   │   ├── mod.rs
 │   │   ├── normalize.rs    encoded-text normalization (HTML-entity decode, Unicode format-char strip, NFKC) — secret path only
+│   │   ├── shell.rs        shell de-obfuscation (ANSI-C $'\xHH' escapes, ${IFS} desugar, brace expansion) — path/command path
 │   │   └── types.rs        shared types (AttackSequence, AuditReport, etc.)
 │   ├── corpus/
 │   │   ├── mod.rs          corpus loader (embedded + filesystem override)
@@ -110,22 +111,30 @@ Tool call arrives (via PreToolUse hook)
      │
      └── Tier 1: Policy Engine  [ACTIVE — runs on every call]
          tool input -> ToolCall (command + canonicalized paths, extracted for
-         every tool type, not just "Bash"). deny-first evaluation:
-           - deny paths: glob, with ~ / $HOME / symlink / case canonicalization
-             and recursive directory coverage
-           - deny commands: regex over the raw + a normalized form (rm-flag
-             canonicalization), covering pipe-to-shell / fetch-exec variants
+         every tool type, not just "Bash"; paths are ALSO mined from the
+         shell-de-obfuscated command). deny-first evaluation:
+           - deny paths: glob, with ~ / $HOME / symlink / case canonicalization,
+             recursive directory coverage, glob-candidate de-globbing, and brace
+             expansion ({a,b} -> both real files)
+           - deny commands: regex over the raw + an rm-flag-canonicalized form +
+             a shell-de-obfuscated form (ANSI-C $'\xHH' escapes, ${IFS} desugar),
+             covering pipe-to-shell / fetch-exec / exfil variants
            - deny secrets: regex over the raw request payload AND a normalized
              form (HTML-entity decode, Unicode format-char strip — the full Cf
              set incl. bidi isolates/ALM plus the whole TAG block — NFKC fold),
              so an entity-encoded / format-char-injected / fullwidth-spelled
              token can't dodge the rule. additive: raw is checked first, never
              replaced. normalized once per evaluate, reused across all rules.
-             LIMIT: this normalization covers the SECRET-CONTENT path only.
-             deny commands and deny paths match WITHOUT it — an entity-encoded
-             or format-char-injected command/path still evades those families.
-             wiring them is a deliberate follow-up (separate change, needs its
-             own false-positive analysis), not an oversight.
+         ORDERING: a deny.paths WARN is held, not returned immediately, so a
+         deny.commands BLOCK overrides it (rm of settings.json, curl of .env).
+         deny.secrets is consulted only when nothing else matched, preserving
+         "a secret in a warn-tier path stays warn" (the .env case).
+         SCOPE: `common/shell` de-obfuscation handles transforms the shell
+         actually resolves (ANSI-C/IFS/brace). Unicode homoglyph/fullwidth
+         folding is deliberately NOT applied to commands/paths — the shell never
+         resolves `ｃat` or `/ｅtc/passwd` to a real target, so folding them would
+         only add false positives. `common/normalize` (Unicode/entity) stays
+         scoped to the secret-content path, where the consumer DOES decode it.
          un-inspectable input (empty / unparseable stdin) fails per on_failure
          ("closed" by default → deny). zero false positives by design.
 
@@ -166,13 +175,31 @@ shai-hulud / Miasma supply-chain hardening pack, organized by honesty tier:
   systemd-user persistence units, project-local `kubeconfig`, and
   `npm/pnpm/yarn/bun publish` / `npm token` / `gh repo create --public`.
 
+Round-two attacker-audit additions (block unless noted): broadened credential
+stores (docker/podman auth, git-credentials, HF/crates tokens, pgpass/my.cnf,
+rclone/oci/doctl/fly/databricks/terraform, macOS user+system Keychains, all major
+browser profile data, 1Password/Bitwarden/pass/KeePass, crypto wallets, editor
+`state.vscdb`); exfil with no network pipe (`gpg --export-secret-keys`, `security
+dump-keychain`/`find-*-password -w`, `dscl -read … Password`; env-to-file /
+secret-`printenv` / `git credential fill` / `defaults read` secret-name = warn);
+guard-disarm via `chmod`/`chflags`/`strip`/`truncate`/`install`/redirect on the
+binary, `sentinel uninstall`, `rm ~/.claude`|`~/.sentinel`, and shell rewrites of
+`settings.json` (`sed -i`/redirect/`tee`); egress channels (DNS command-sub query
+block + TXT/ANY warn, git credential-in-URL block + literal-URL push warn,
+scp/rsync/rclone/cloud-upload warn, curl glued-flag exfil block, secret-in-URL/
+header warn); interpreter runtime-path credential reads.
+
 The matcher also fail-safes a **glob-bearing candidate path**: a path that itself
 carries shell glob metacharacters (`~/.s*h/id_rsa`, `~/.ss[h]/id_rsa`) is projected
 onto a deny rule's literal prefix and matched, so a candidate the shell would expand
 onto a protected target can't dodge the anchored rule. Hook-removal protection
 (`src/selfprotect/`) runs after policy evaluation: a Write/Edit/MultiEdit to
 `.claude/settings(.local).json` that drops the `sentinel evaluate` hook escalates
-warn → block; hook-preserving edits keep their policy action.
+warn → block; hook-preserving edits keep their policy action. The Bash-child form
+of the same disarm (`sed -i`/redirect/`tee` rewriting settings.json) — which
+selfprotect's content check cannot see — is covered by deny.commands rules
+instead. `sentinel check` applies the same `selfprotect` + `preflight` escalations
+as the live `evaluate` path, so its dry-run can't under-report the live hook.
 
 ### install-preflight (worm TTP)
 
@@ -265,8 +292,14 @@ idempotent: running install twice doesn't duplicate hooks.
 
 ### audit mode vs enforce mode
 
-- **audit** (default): log what WOULD be blocked, don't actually block. builds trust.
-- **enforce**: actively block tool calls that match deny rules.
+- **enforce** (default): actively block tool calls that match deny rules. a
+  security tool that ships in log-only mode protects nobody.
+- **audit** (`--audit`): log what WOULD be blocked, don't actually block. for
+  watching first. `status` prints a warning whenever enforcement is off.
+
+`sentinel install` never overwrites an existing `~/.sentinel/policy.toml`
+(`write_default_policy` returns wrote/skipped), so upgrading an audit-mode user
+never silently flips them to enforce.
 
 ### failure modes
 
@@ -287,8 +320,8 @@ idempotent: running install twice doesn't duplicate hooks.
 | `cargo clippy` | lint |
 | `bash scripts/ad5-network-lint.sh` | AD-5 lint: fail if outbound-network imports appear in src/ outside the allowlist (src/audit) |
 | `sentinel audit --corpus ./tests/fixtures/corpus --sandbox degraded` | test audit with fixture corpus |
-| `sentinel install` | install PreToolUse hook (audit mode) |
-| `sentinel install --enforce` | install with enforcement |
+| `sentinel install` | install PreToolUse hook (enforce mode, the default) |
+| `sentinel install --audit` | install in audit mode (log only) |
 | `sentinel uninstall` | remove hooks |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
 | `sentinel verify [--policy <file>]` | replay a pinned attack set through the policy, assert each is caught; non-zero exit on miss (CI gate) |
@@ -308,4 +341,4 @@ CI runs the AD-5 network-call lint (`scripts/ad5-network-lint.sh` — enforces t
 
 ---
 
-last updated: 2026-06-11 by StressTestor (install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-14 by StressTestor (round-two attacker-audit hardening: enforce-by-default install with --audit opt-out + non-overwrite blast-radius guard; held-warn engine ordering so a deny.commands BLOCK overrides a deny.paths WARN; shell de-obfuscation (ANSI-C/IFS/brace) wired into path extraction + command matching; broadened credential stores, no-network-pipe exfil, guard-disarm (binary tamper verbs, sentinel uninstall, config-dir deletion, shell settings-strip), DNS/git/egress channels, interpreter runtime-path cred reads; sentinel check now mirrors selfprotect+preflight; verify gate 20 -> 41 cases. prior: install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)

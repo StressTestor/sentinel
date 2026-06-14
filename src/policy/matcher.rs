@@ -41,7 +41,12 @@ fn matches_path_resolved(
     if regexes.is_empty() {
         return false;
     }
-    let mut candidates = candidate_forms(path, home, user);
+    // brace-expand the candidate first (`/etc/{passwd,master.passwd}` reads both
+    // real files), then build the equivalent spellings of each expansion.
+    let mut candidates = Vec::new();
+    for p in crate::common::shell::brace_expand(path, 64) {
+        candidates.extend(candidate_forms(&p, home, user));
+    }
     // Fail-safe for a glob-bearing CANDIDATE (the demo bypass): a candidate that
     // itself carries shell glob metacharacters (`*`, `?`, `[`) dodges the anchored
     // rule regex (`.s*h` != `.ssh`) and can't be canonicalized (no file literally
@@ -346,11 +351,19 @@ fn lexical_normalize(p: &str) -> String {
     }
 }
 
-/// match a command string against a regex pattern
+/// match a command string against a regex pattern. Tests the raw command, the
+/// rm-flag-canonicalized form, AND the shell-de-obfuscated form (ANSI-C `$'...'`
+/// escapes + `${IFS}` desugaring), so `$'\x72\x6d' -rf /` and `cat${IFS}/etc/...`
+/// can't dodge a rule. Additive: the raw check runs first and is never replaced.
 pub fn matches_command(pattern: &str, command: &str) -> bool {
     let normalized = normalize_command(command);
+    let decoded = crate::common::shell::decode_obfuscation(command);
     match Regex::new(pattern) {
-        Ok(re) => re.is_match(command) || (normalized != command && re.is_match(&normalized)),
+        Ok(re) => {
+            re.is_match(command)
+                || (normalized != command && re.is_match(&normalized))
+                || decoded.as_deref().is_some_and(|d| re.is_match(d))
+        }
         Err(_) => {
             tracing::warn!("invalid command pattern: {pattern}");
             false
