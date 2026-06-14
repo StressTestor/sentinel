@@ -614,6 +614,25 @@ pattern = '\bsentinel(-guard)?\b\s+(-\S+\s+)*uninstall\b'
 action = "block"
 reason = "agent invoked `sentinel uninstall` - removes the guard's hook (reconfigure outside the agent)"
 
+# deleting/moving the agent's config dir is a TOTAL disarm: the PreToolUse hook
+# registration lives in ~/.claude/settings.json, so `rm -rf ~/.claude` (or moving
+# the settings file) drops the guard for every future session. Anchored to the
+# user-home `.claude` and only the dir itself or its settings file - a subdir
+# cleanup (`rm -rf ~/.claude/projects/old`) does NOT match (it can't disarm).
+[[deny.commands]]
+pattern = '\b(rm|mv)\b.*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/settings(\.local)?\.json)?(["\x27\s;|&]|$)'
+action = "block"
+reason = "deleting/moving ~/.claude or its settings.json removes the PreToolUse hook (guard-disarm)"
+
+# deleting/moving ~/.sentinel removes the policy file the hook loads. A missing
+# policy currently fails closed (deny), but it pairs with a HOME-repoint/race into
+# a real disarm and erases the audit trail - block it. (READING ~/.sentinel/*,
+# e.g. the audit log, is untouched: this is a command rule on rm/mv only.)
+[[deny.commands]]
+pattern = '\b(rm|mv)\b.*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.sentinel(/|["\x27\s;|&]|$)'
+action = "block"
+reason = "deleting/moving ~/.sentinel removes the guard's policy + audit trail (guard-disarm)"
+
 # --- FIX C: data-exfil via curl/wget/fetch carrying DATA/UPLOAD flags ---
 # Existing curl rules only catch pipe-to-shell, $(curl, backtick-curl, staged
 # -o+run, and @credfile. A bare data POST/upload (`curl --data "$(env)"`,
@@ -1198,6 +1217,31 @@ mod tests {
         assert_eq!(action_of(&cmd_call("sentinel-guard uninstall")), Action::Block);
         // install/doctor remain allowed
         assert_eq!(action_of(&cmd_call("sentinel install")), Action::Allow);
+    }
+
+    #[test]
+    fn config_dir_deletion_disarm_blocks() {
+        // deleting/moving ~/.claude (or its settings.json) drops the hook registration
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.claude")), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm -rf \"$HOME/.claude\"")), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm ~/.claude/settings.json")), Action::Block);
+        assert_eq!(action_of(&cmd_call("mv ~/.claude/settings.json /tmp/x")), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm -rf /Users/joe/.claude")), Action::Block);
+        // deleting/moving ~/.sentinel drops the policy + audit trail
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.sentinel")), Action::Block);
+        assert_eq!(action_of(&cmd_call("mv ~/.sentinel ~/.sentinel.bak")), Action::Block);
+    }
+
+    #[test]
+    fn config_dir_disarm_does_not_overmatch() {
+        // a subdir cleanup under ~/.claude can't disarm (hook is in settings.json) -> allowed
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.claude/projects/old")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("rm ~/.claude/todos/x.json")), Action::Allow);
+        // sibling dirs/files that merely share a prefix
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.claudette")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("rm ~/.sentinelrc")), Action::Allow);
+        // a PROJECT-local .claude is not the hook host
+        assert_eq!(action_of(&cmd_call("rm -rf ./vendor/.claude")), Action::Allow);
     }
 
     #[test]

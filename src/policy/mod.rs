@@ -134,15 +134,32 @@ impl PolicyEngine {
     /// if no deny matches and an allow list exists, paths outside
     /// the allow list get the default action.
     pub fn evaluate(&self, tool_call: &ToolCall) -> PolicyDecision {
+        // A deny.paths WARN no longer short-circuits: hold it and keep looking, so
+        // a higher-severity deny.commands BLOCK can override a warn-tier path match
+        // (e.g. `rm ~/.claude/settings.json` mines the settings.json warn path, but
+        // the command is an unambiguous guard-disarm; `curl -d @.env` mines the
+        // .env warn path, but the command is an exfil block). A deny.paths BLOCK or
+        // an explicit allow-action still returns immediately. deny.secrets keeps its
+        // first-match posture and is consulted ONLY when nothing else matched, so
+        // the documented "secret written into a warn-tier path stays warn" behavior
+        // (the .env / settings.json case) is preserved unchanged.
+        let mut held: Option<PolicyDecision> = None;
+
         // check deny.paths
         for rule in &self.config.deny_paths {
             for path in &tool_call.paths {
                 if matches_path(&rule.pattern, path) {
-                    return PolicyDecision {
-                        action: parse_action(&rule.action),
+                    let action = parse_action(&rule.action);
+                    let decision = PolicyDecision {
+                        action: action.clone(),
                         reason: Some(rule.reason.clone()),
                         matched_rule: Some(format!("deny.paths: {}", rule.pattern)),
                     };
+                    if action == Action::Warn {
+                        held.get_or_insert(decision);
+                    } else {
+                        return decision; // Block or explicit Allow short-circuits
+                    }
                 }
             }
         }
@@ -151,13 +168,28 @@ impl PolicyEngine {
         if let Some(cmd) = &tool_call.command {
             for rule in &self.config.deny_commands {
                 if matches_command(&rule.pattern, cmd) {
-                    return PolicyDecision {
-                        action: parse_action(&rule.action),
+                    let action = parse_action(&rule.action);
+                    let decision = PolicyDecision {
+                        action: action.clone(),
                         reason: Some(rule.reason.clone()),
                         matched_rule: Some(format!("deny.commands: {}", rule.pattern)),
                     };
+                    match action {
+                        // a command BLOCK wins over a held warn-tier path match
+                        Action::Block => return decision,
+                        Action::Warn => {
+                            held.get_or_insert(decision);
+                        }
+                        Action::Allow => return decision,
+                    }
                 }
             }
+        }
+
+        // a held warn (from paths or commands) wins over deny.secrets, preserving
+        // the documented "warn-tier path shadows a secret in its content" behavior.
+        if let Some(h) = held {
+            return h;
         }
 
         // check deny.secrets against raw params. normalization (entity decode,
@@ -408,6 +440,53 @@ mod tests {
         };
         let decision = engine.evaluate(&call);
         assert_eq!(decision.action, Action::Block);
+    }
+
+    #[test]
+    fn command_block_overrides_warn_tier_path() {
+        // round-two: a deny.paths WARN must NOT shadow a deny.commands BLOCK. The
+        // motivating case is `rm ~/.claude/settings.json` (settings.json is a warn
+        // path, the rm is a disarm) and `curl -d @.env` (the .env path warns, the
+        // command exfiltrates).
+        let engine = PolicyEngine::from_config(PolicyConfig::new(
+            PolicySettings { mode: "enforce".into(), on_failure: "closed".into(), default: "warn".into() },
+            vec![DenyPathRule { pattern: "**/.env".into(), action: "warn".into(), reason: "env file".into() }],
+            vec![DenyCommandRule { pattern: r"\brm\b.*\.env".into(), action: "block".into(), reason: "delete env".into() }],
+            vec![],
+            vec![],
+        ));
+        let call = ToolCall {
+            tool_name: "Bash".into(),
+            command: Some("rm ./config/.env".into()),
+            paths: vec!["./config/.env".into()],
+            raw_params: "{}".into(),
+        };
+        let d = engine.evaluate(&call);
+        assert_eq!(d.action, Action::Block, "command block must override the warn-tier path match");
+        assert!(d.matched_rule.unwrap().starts_with("deny.commands"));
+    }
+
+    #[test]
+    fn warn_path_still_shadows_a_secret_in_its_content() {
+        // regression: the held-warn change must NOT alter the intended behavior
+        // that a secret written INTO a warn-tier path stays warn (the .env case).
+        // deny.secrets is consulted only when nothing else matched.
+        let engine = PolicyEngine::from_config(PolicyConfig::new(
+            PolicySettings { mode: "enforce".into(), on_failure: "closed".into(), default: "warn".into() },
+            vec![DenyPathRule { pattern: "**/.env".into(), action: "warn".into(), reason: "env file".into() }],
+            vec![],
+            vec![DenySecretRule { pattern: r"AKIA[0-9A-Z]{16}".into(), action: "block".into(), reason: "AWS key".into() }],
+            vec![],
+        ));
+        // token built at runtime so no literal AWS key appears in this source file
+        let key = format!("AKIA{}", "A".repeat(16));
+        let call = ToolCall {
+            tool_name: "Write".into(),
+            command: None,
+            paths: vec!["./config/.env".into()],
+            raw_params: format!(r#"{{"content":"{key}"}}"#),
+        };
+        assert_eq!(engine.evaluate(&call).action, Action::Warn, "warn-tier path must still shadow the secret");
     }
 
     #[test]
