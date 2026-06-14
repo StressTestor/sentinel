@@ -134,6 +134,221 @@ pattern = "~/.azure/*"
 action = "block"
 reason = "Azure CLI tokens (accessTokens.json / msal cache)"
 
+# --- broadened credential-store coverage (round-two hardening) ---
+# High-value credential/token files and stores that a naive `~/.aws` /`~/.ssh`
+# rule set leaves open. All block-tier: an agent has essentially no legitimate
+# reason to READ another tool's saved-credential store, so the false-positive
+# cost is low and the exfil value is high. Reading is blocked regardless of the
+# tool used (Read/cat/curl/a path mined from a command) - same engine path as
+# the existing credential rules above.
+
+# container / registry auth
+[[deny.paths]]
+pattern = "~/.docker/config.json"
+action = "block"
+reason = "Docker registry auth tokens (base64 auths / credsStore)"
+
+[[deny.paths]]
+pattern = "~/.dockercfg"
+action = "block"
+reason = "legacy Docker registry auth tokens"
+
+[[deny.paths]]
+pattern = "~/.config/containers/auth.json"
+action = "block"
+reason = "Podman/Buildah registry auth tokens"
+
+# git stored credentials (plaintext)
+[[deny.paths]]
+pattern = "~/.git-credentials"
+action = "block"
+reason = "git credential store (plaintext username:password@host)"
+
+[[deny.paths]]
+pattern = "~/.config/git/credentials"
+action = "block"
+reason = "git credential store (XDG location)"
+
+# package-registry / model-hub tokens
+[[deny.paths]]
+pattern = "~/.cache/huggingface/token"
+action = "block"
+reason = "Hugging Face Hub access token"
+
+[[deny.paths]]
+pattern = "~/.huggingface/token"
+action = "block"
+reason = "Hugging Face Hub access token (legacy location)"
+
+[[deny.paths]]
+pattern = "~/.cargo/credentials.toml"
+action = "block"
+reason = "crates.io registry token"
+
+[[deny.paths]]
+pattern = "~/.cargo/credentials"
+action = "block"
+reason = "crates.io registry token (legacy filename)"
+
+# database credentials
+[[deny.paths]]
+pattern = "~/.pgpass"
+action = "block"
+reason = "PostgreSQL password file"
+
+[[deny.paths]]
+pattern = "~/.pg_service.conf"
+action = "block"
+reason = "PostgreSQL service definitions (may carry passwords)"
+
+[[deny.paths]]
+pattern = "~/.my.cnf"
+action = "block"
+reason = "MySQL client config (commonly carries a [client] password)"
+
+[[deny.paths]]
+pattern = "~/.mylogin.cnf"
+action = "block"
+reason = "MySQL obfuscated login path"
+
+# cloud-CLI credential stores not already named (aws/gcloud/azure/kube/gh covered above)
+[[deny.paths]]
+pattern = "~/.config/rclone/rclone.conf"
+action = "block"
+reason = "rclone remote tokens/passwords for cloud storage"
+
+[[deny.paths]]
+pattern = "~/.oci/*"
+action = "block"
+reason = "Oracle Cloud API signing keys / config"
+
+[[deny.paths]]
+pattern = "~/.config/doctl/*"
+action = "block"
+reason = "DigitalOcean CLI access token"
+
+[[deny.paths]]
+pattern = "~/.config/fly/*"
+action = "block"
+reason = "Fly.io API token"
+
+[[deny.paths]]
+pattern = "~/.databrickscfg"
+action = "block"
+reason = "Databricks workspace token"
+
+[[deny.paths]]
+pattern = "~/.terraform.d/credentials.tfrc.json"
+action = "block"
+reason = "Terraform Cloud / registry API token"
+
+# macOS Keychains (the system credential store)
+[[deny.paths]]
+pattern = "~/Library/Keychains/*"
+action = "block"
+reason = "macOS Keychain database (every saved password/token/cert)"
+
+# browser cookie + saved-login + key stores: reading another browser profile's
+# data dir is a credential-theft signal, never a normal dev action -> block the
+# whole user-data tree (Cookies / Login Data / Web Data / Local State all live
+# under it). macOS + Linux locations.
+[[deny.paths]]
+pattern = "~/Library/Cookies/*"
+action = "block"
+reason = "Safari binary cookie store"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Google/Chrome/**"
+action = "block"
+reason = "Chrome profile data (Cookies, Login Data, Local State decryption key)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Chromium/**"
+action = "block"
+reason = "Chromium profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/BraveSoftware/**"
+action = "block"
+reason = "Brave profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Microsoft Edge/**"
+action = "block"
+reason = "Edge profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Firefox/**"
+action = "block"
+reason = "Firefox profile data (logins.json / key4.db / cookies.sqlite)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Arc/User Data/**"
+action = "block"
+reason = "Arc browser profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/.config/google-chrome/**"
+action = "block"
+reason = "Chrome profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.config/chromium/**"
+action = "block"
+reason = "Chromium profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.config/BraveSoftware/**"
+action = "block"
+reason = "Brave profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.mozilla/firefox/**"
+action = "block"
+reason = "Firefox profile data (Linux: logins.json / key4.db)"
+
+# password managers / secret vaults
+[[deny.paths]]
+pattern = "~/Library/Application Support/1Password/**"
+action = "block"
+reason = "1Password local vault data"
+
+[[deny.paths]]
+pattern = "~/Library/Group Containers/*1password*/**"
+action = "block"
+reason = "1Password group-container vault data"
+
+[[deny.paths]]
+pattern = "~/.config/op/**"
+action = "block"
+reason = "1Password CLI session/config"
+
+[[deny.paths]]
+pattern = "~/.password-store/**"
+action = "block"
+reason = "pass(1) GPG password store"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Bitwarden/**"
+action = "block"
+reason = "Bitwarden local vault data"
+
+[[deny.paths]]
+pattern = "**/*.kdbx"
+action = "block"
+reason = "KeePass password database"
+
+# crypto wallets / key material
+[[deny.paths]]
+pattern = "~/.ethereum/keystore/**"
+action = "block"
+reason = "Ethereum keystore (encrypted private keys)"
+
+[[deny.paths]]
+pattern = "**/wallet.dat"
+action = "block"
+reason = "cryptocurrency wallet file"
+
 # `**/` so an absolute, deep path (/Users/me/app/config/.env) matches, not just a
 # single-segment `dir/.env`. This broadens the WARN surface to any path ending in
 # `.env` (vars.env, production.env, *.env.bak); acceptable because it's warn-tier
@@ -653,6 +868,90 @@ mod tests {
         assert_eq!(action_of(&path_call("~/.kube/config")), Action::Block);
         assert_eq!(action_of(&path_call("~/.config/gcloud/application_default_credentials.json")), Action::Block);
         assert_eq!(action_of(&path_call("~/.azure/accessTokens.json")), Action::Block);
+    }
+
+    #[test]
+    fn broadened_credential_stores_block() {
+        // round-two hardening: high-value stores a naive ssh/aws ruleset misses.
+        for p in [
+            "~/.docker/config.json",
+            "~/.dockercfg",
+            "~/.config/containers/auth.json",
+            "~/.git-credentials",
+            "~/.config/git/credentials",
+            "~/.cache/huggingface/token",
+            "~/.huggingface/token",
+            "~/.cargo/credentials.toml",
+            "~/.pgpass",
+            "~/.pg_service.conf",
+            "~/.my.cnf",
+            "~/.mylogin.cnf",
+            "~/.config/rclone/rclone.conf",
+            "~/.oci/config",
+            "~/.config/doctl/config.yaml",
+            "~/.config/fly/config.yml",
+            "~/.databrickscfg",
+            "~/.terraform.d/credentials.tfrc.json",
+            "~/Library/Keychains/login.keychain-db",
+            "~/Library/Cookies/Cookies.binarycookies",
+            "~/.config/op/config",
+            "~/.password-store/github/token.gpg",
+            "~/secrets/vault.kdbx",
+            "~/.ethereum/keystore/UTC--2024--abc",
+            "~/wallets/wallet.dat",
+        ] {
+            assert_eq!(action_of(&path_call(p)), Action::Block, "must block: {p}");
+        }
+    }
+
+    #[test]
+    fn browser_profile_data_blocks_macos_and_linux() {
+        for p in [
+            "~/Library/Application Support/Google/Chrome/Default/Cookies",
+            "~/Library/Application Support/Google/Chrome/Default/Login Data",
+            "~/Library/Application Support/Google/Chrome/Local State",
+            "~/Library/Application Support/Chromium/Default/Cookies",
+            "~/Library/Application Support/BraveSoftware/Brave-Browser/Default/Login Data",
+            "~/Library/Application Support/Microsoft Edge/Default/Cookies",
+            "~/Library/Application Support/Firefox/Profiles/abc.default/logins.json",
+            "~/Library/Application Support/Firefox/Profiles/abc.default/key4.db",
+            "~/Library/Application Support/Arc/User Data/Default/Cookies",
+            "~/.config/google-chrome/Default/Cookies",
+            "~/.config/chromium/Default/Login Data",
+            "~/.config/BraveSoftware/Brave-Browser/Default/Cookies",
+            "~/.mozilla/firefox/abc.default/logins.json",
+        ] {
+            assert_eq!(action_of(&path_call(p)), Action::Block, "must block: {p}");
+        }
+    }
+
+    #[test]
+    fn onepassword_group_container_blocks() {
+        // the team-id prefix varies; the *1password* glob must still catch it.
+        assert_eq!(
+            action_of(&path_call(
+                "~/Library/Group Containers/2BUA8C4S2C.com.1password/Library/Data/B5.sqlite"
+            )),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&path_call("~/Library/Application Support/1Password/Data/onepassword.sqlite")),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn broadened_credential_rules_do_not_overmatch() {
+        // FP guards: ordinary project files that merely resemble a cred path must
+        // stay allowed. A project-local docker/config.json or my.cnf, a source
+        // file under a dir named like a browser, a non-secret Library file.
+        assert_eq!(action_of(&path_call("./docker/config.json")), Action::Allow);
+        assert_eq!(action_of(&path_call("./config/git/credentials.md")), Action::Allow);
+        assert_eq!(action_of(&path_call("./src/wallet.rs")), Action::Allow);
+        assert_eq!(action_of(&path_call("~/Library/Application Support/MyApp/state.json")), Action::Allow);
+        assert_eq!(action_of(&path_call("~/Documents/chrome-notes.md")), Action::Allow);
+        // a file literally named config.json that is NOT ~/.docker/config.json
+        assert_eq!(action_of(&path_call("~/projects/app/config.json")), Action::Allow);
     }
 
     #[test]
