@@ -132,8 +132,13 @@ pub struct AuditArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct InstallArgs {
-    /// start in enforce mode instead of audit mode
+    /// install in AUDIT mode (log only, never block). The default is ENFORCE -
+    /// a security tool that ships disabled protects nobody.
     #[arg(long, default_value_t = false)]
+    pub audit: bool,
+
+    /// deprecated: enforce is now the default. Accepted for back-compat, no effect.
+    #[arg(long, default_value_t = false, hide = true)]
     pub enforce: bool,
 }
 

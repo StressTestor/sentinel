@@ -3,14 +3,17 @@ use std::path::Path;
 
 /// write the default policy.toml with sane deny rules.
 /// does NOT overwrite if the file already exists.
-pub fn write_default_policy(path: &Path, mode: &str) -> Result<(), InstallError> {
+/// Returns `Ok(true)` when it wrote a fresh policy, `Ok(false)` when an existing
+/// one was preserved - so the caller can avoid claiming a mode it didn't set.
+pub fn write_default_policy(path: &Path, mode: &str) -> Result<bool, InstallError> {
     if path.exists() {
         println!("policy file already exists at {}, skipping", path.display());
-        return Ok(());
+        return Ok(false);
     }
 
     let content = default_policy_content(mode);
-    super::hooks::atomic_write(path, &content)
+    super::hooks::atomic_write(path, &content)?;
+    Ok(true)
 }
 
 pub(crate) fn default_policy_content(mode: &str) -> String {
@@ -1191,6 +1194,22 @@ mod tests {
         assert_eq!(action_of(&path_call("~/Documents/chrome-notes.md")), Action::Allow);
         // a file literally named config.json that is NOT ~/.docker/config.json
         assert_eq!(action_of(&path_call("~/projects/app/config.json")), Action::Allow);
+    }
+
+    #[test]
+    fn install_writes_enforce_by_default_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("sentinel_wdp_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("policy.toml");
+        // a fresh install writes enforce mode and reports that it wrote
+        assert!(write_default_policy(&p, "enforce").unwrap(), "fresh write returns true");
+        let content = std::fs::read_to_string(&p).unwrap();
+        assert!(content.contains("mode = \"enforce\""), "default install is enforce");
+        // a second call must NOT overwrite - an existing user's mode is preserved,
+        // so upgrading never silently flips audit -> enforce (blast-radius guard)
+        assert!(!write_default_policy(&p, "audit").unwrap(), "existing file returns false");
+        assert_eq!(content, std::fs::read_to_string(&p).unwrap(), "existing policy preserved");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

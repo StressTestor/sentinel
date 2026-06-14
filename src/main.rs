@@ -34,7 +34,7 @@ async fn main() {
     let result = match cli.command {
         Command::Audit(args) => audit::run(args).await,
         Command::Install(args) => {
-            install::run_install(args.enforce)
+            install::run_install(args.audit)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
         Command::Uninstall => {
@@ -88,7 +88,9 @@ fn run_status() -> Result<(), Box<dyn std::error::Error>> {
         if content.contains("mode = \"enforce\"") {
             println!("policy:  {} (enforce mode)", policy_path);
         } else {
-            println!("policy:  {} (audit mode)", policy_path);
+            println!("policy:  {} (AUDIT mode)", policy_path);
+            println!("         WARNING: enforcement is OFF - sentinel is logging only, not blocking.");
+            println!("         set mode = \"enforce\" in the policy (or reinstall) to actually block.");
         }
     } else {
         println!("policy:  not configured (run 'sentinel install')");
