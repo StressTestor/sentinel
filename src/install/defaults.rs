@@ -492,6 +492,19 @@ pattern = '\b(python3?|perl|ruby|node|php|osascript)\b\s+-\w*[ce]\b.*(urllib|req
 action = "block"
 reason = "interpreter fetch-exec / inline remote code execution"
 
+# interpreter inline-code that READS a credential file via a RUNTIME-ASSEMBLED
+# path. A literal `~/.aws/credentials` in `-c`/`-e` is already mined into
+# deny.paths; the gap is the concatenated/expanded form
+# (`readFileSync(process.env.HOME+'/.ssh/id_rsa')`,
+# `open(os.path.expanduser('~/.aws/credentials'))`), where the token carries no
+# `~`/`$HOME` prefix so path-mining's anchored rule can't see it. Require BOTH a
+# file-read/expand primitive AND a credential path fragment, so a plain
+# `readFileSync('./pkg.json')` does not match (low FP).
+[[deny.commands]]
+pattern = '\b(node|deno|bun|python3?|ruby|perl|php)\b\s+(-\w*[ce]\b|--eval\b).*(readFileSync|readFile|read_text|File\.read|IO\.read|open\(|expanduser|fs\.read|Pathname).*(/\.ssh/|\.ssh/id_|/\.aws/|\.aws/cred|/\.gnupg/|/\.netrc|/\.config/gh|credentials|id_rsa|id_ed25519|id_ecdsa|keychain|/\.docker/|/\.npmrc|/\.kube/)'
+action = "block"
+reason = "interpreter inline-code reading a credential file via a runtime-assembled path (exfiltration)"
+
 [[deny.commands]]
 pattern = '`\s*(curl|wget|fetch)\b'
 action = "block"
@@ -1613,5 +1626,34 @@ mod tests {
         // ordinary git is untouched
         assert_eq!(action_of(&cmd_call("git commit -m wip")), Action::Allow);
         assert_eq!(action_of(&cmd_call("git credential approve")), Action::Allow);
+    }
+
+    #[test]
+    fn interpreter_runtime_credential_read_blocks() {
+        // the concat/expand form: the path carries no ~/$HOME prefix, so path-mining
+        // can't anchor it - only the interpreter rule catches it.
+        assert_eq!(
+            action_of(&cmd_call("node -e 'require(\"fs\").readFileSync(process.env.HOME+\"/.ssh/id_rsa\")'")),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call("python3 -c \"open(os.path.expanduser('~/.aws/credentials')).read()\"")),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call("ruby -e 'File.read(Dir.home + \"/.ssh/id_ed25519\")'")),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn interpreter_read_of_non_credential_file_allowed() {
+        // FP guard: a file-read with no credential token must NOT block
+        assert_eq!(
+            action_of(&cmd_call("node -e \"require('fs').readFileSync('./package.json')\"")),
+            Action::Allow
+        );
+        assert_eq!(action_of(&cmd_call("python3 -c \"print(open('data.csv').read())\"")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("node -e \"console.log(process.env.NODE_ENV)\"")), Action::Allow);
     }
 }
