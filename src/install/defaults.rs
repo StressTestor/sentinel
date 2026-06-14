@@ -671,6 +671,28 @@ pattern = '\b(rm|mv)\b.*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.sentinel(/|["\x2
 action = "block"
 reason = "deleting/moving ~/.sentinel removes the guard's policy + audit trail (guard-disarm)"
 
+# rewriting .claude/settings.json from a SHELL child process (sed -i / perl -i /
+# awk -i / a truncating redirect / tee / sponge) is the disarm that selfprotect
+# CANNOT see: its content-check only inspects Write/Edit/MultiEdit tool calls,
+# not a Bash subprocess. The settings.json path mines to a WARN; the engine now
+# lets these BLOCK rules override it. Precise: a mutating verb + the settings
+# target (a plain `cat`/`grep`/`sed -n` read is NOT matched). Edit it outside the
+# guarded session.
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.claude/settings(\.local)?\.json'
+action = "block"
+reason = "in-place shell rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
+
+[[deny.commands]]
+pattern = '>\s*"?\S*\.claude/settings(\.local)?\.json'
+action = "block"
+reason = "truncating/overwriting .claude/settings.json via redirect - can strip the PreToolUse hook (guard-disarm)"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b.*\.claude/settings(\.local)?\.json'
+action = "block"
+reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreToolUse hook (guard-disarm)"
+
 # --- FIX C: data-exfil via curl/wget/fetch carrying DATA/UPLOAD flags ---
 # Existing curl rules only catch pipe-to-shell, $(curl, backtick-curl, staged
 # -o+run, and @credfile. A bare data POST/upload (`curl --data "$(env)"`,
@@ -1357,6 +1379,32 @@ mod tests {
         // deleting/moving ~/.sentinel drops the policy + audit trail
         assert_eq!(action_of(&cmd_call("rm -rf ~/.sentinel")), Action::Block);
         assert_eq!(action_of(&cmd_call("mv ~/.sentinel ~/.sentinel.bak")), Action::Block);
+    }
+
+    #[test]
+    fn settings_json_shell_strip_blocks() {
+        // a shell child rewriting settings.json (selfprotect can't see Bash children)
+        assert_eq!(
+            action_of(&cmd_call("sed -i '' '/sentinel evaluate/d' ~/.claude/settings.json")),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call("perl -i -pe 's/sentinel//' ~/.claude/settings.json")),
+            Action::Block
+        );
+        assert_eq!(action_of(&cmd_call("echo '{}' > ~/.claude/settings.json")), Action::Block);
+        assert_eq!(
+            action_of(&cmd_call("jq 'del(.hooks)' a.json | sponge ~/.claude/settings.local.json")),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn settings_json_read_is_not_blocked() {
+        // reading / printing settings.json is the warn-tier path rule, not a block
+        assert_eq!(action_of(&cmd_call("cat ~/.claude/settings.json")), Action::Warn);
+        assert_eq!(action_of(&cmd_call("sed -n '/model/p' ~/.claude/settings.json")), Action::Warn);
+        assert_eq!(action_of(&cmd_call("grep sentinel ~/.claude/settings.json")), Action::Warn);
     }
 
     #[test]
