@@ -16,7 +16,7 @@ there's a single HTML page at [`docs/target.html`](docs/target.html) styled to l
 `docs/run-attacks.sh` replays every injection against `sentinel evaluate`:
 
 ```bash
-./target/release/sentinel install --enforce
+./target/release/sentinel install
 SENTINEL=./target/release/sentinel ./docs/run-attacks.sh
 ```
 
@@ -52,17 +52,19 @@ the deterministic path layer is the part you can lean on: a deny on `~/.aws/*` h
 
 ```bash
 cargo install sentinel-guard
-sentinel install          # audit mode (logs only, doesn't block)
-sentinel install --enforce  # enforcement mode (blocks violations)
+sentinel install          # enforce mode (blocks violations) - the default
+sentinel install --audit  # audit mode (logs only, never blocks)
 ```
 
 (the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
 
 that's it. sentinel writes a PreToolUse hook into `~/.claude/settings.json` and a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and self-protection of its own policy, binary, and hook entry).
 
-## audit mode (default)
+## enforce by default
 
-sentinel starts in audit mode. it logs what WOULD be blocked but doesn't actually block anything. you see the log and think "wow, sentinel would have caught 3 dangerous actions today." when you're ready, switch to enforce mode.
+a security tool that ships in log-only mode protects nobody, and the cheapest attack on a guard you can disable is to just leave it disabled. so `sentinel install` enforces by default. `--audit` opts back into log-only if you want to watch first.
+
+`sentinel install` does **not** overwrite an existing `~/.sentinel/policy.toml`, so upgrading never silently flips an existing audit-mode setup to enforce, and new default rules won't appear until you regenerate the policy. `sentinel status` prints a warning whenever enforcement is off.
 
 ## audit your agent
 
@@ -80,7 +82,7 @@ the default policy lives at `~/.sentinel/policy.toml`:
 
 ```toml
 [policy]
-mode = "audit"
+mode = "enforce"
 on_failure = "closed"
 default = "warn"
 
@@ -116,25 +118,30 @@ Enforcement today is the Tier-1 policy engine. It's the deterministic, zero-fals
 
 the self-propagating npm/pypi worms in the shai-hulud / Miasma family inject persistence and steal credentials through package lifecycle scripts. the default policy now covers the part of that an agent runtime can actually see:
 
-- **self-protect.** the agent can't write `~/.sentinel/policy.toml`, can't overwrite the `sentinel` binary at the common install paths, and can't rewrite `~/.claude/settings.json` to drop sentinel's own hook entry (that last one is content-aware: ordinary settings edits stay warn, a write that removes the `sentinel evaluate` hook escalates to block). a guard that lets an injected agent flip itself to audit mode, delete the cop, or unhook itself is not a guard. all blocked at the tool-call layer (your own editor, and `sentinel install`, are unaffected since they don't go through the hook).
-- **credential coverage.** more credential files and secret formats: `~/.npmrc`, `~/.kube/config`, `~/.config/gcloud/`, `~/.azure/` (block), plus GCP / Azure / Vault / kubeconfig secret content in writes.
-- **warn-level tripwires** for the agent-driven version of the TTPs: writes to other agents' hook configs (`.claude/settings.json`, `~/.codex`, `~/.gemini`, `.vscode/tasks.json`), LaunchAgent / systemd-user persistence units, and `npm publish` / `npm token` / `gh repo create --public`. these are warn, not block, because developers do all of them legitimately.
+- **self-protect.** the agent can't disable the guard. blocked: writing `~/.sentinel/policy.toml`; overwriting, `chmod -x`-ing, `chflags`-ing, `strip`-ing, `truncate`-ing, `install`-ing over, or `rm`-ing the `sentinel` binary (literal paths and the `$(command -v sentinel)` indirect form); `sentinel uninstall`; deleting `~/.claude` or `~/.sentinel`; and rewriting `~/.claude/settings.json` to drop the hook - both as a Write/Edit (content-aware: a settings edit that keeps the `sentinel evaluate` hook stays warn, one that removes it escalates to block) and as a shell child process (`sed -i`, a truncating redirect, `tee` targeting the settings file). a guard that lets an injected agent flip itself to audit mode, delete the cop, or unhook itself is not a guard.
+- **credential coverage.** beyond `~/.ssh` / `~/.aws` / `~/.gnupg`: docker/podman registry auth, `~/.git-credentials`, HuggingFace/crates tokens, `~/.pgpass` / `~/.my.cnf`, rclone/oci/doctl/fly/databricks/terraform configs, macOS Keychains (user and system), every major browser's cookie + saved-login store, 1Password / Bitwarden / pass / KeePass vaults, crypto wallets, and editor SecretStorage DBs - all block.
+- **exfil without a network pipe.** `gpg --export-secret-keys`, `security dump-keychain` / `find-*-password -w`, `dscl -read … Password` block; `env`/`printenv` dumped to a file, a secret-named `printenv`, and `git credential fill` warn. the prior rules only matched a pipe into grep or a network tool.
+- **egress channels.** DNS tunnelling (a resolver query name fed by a command substitution blocks; TXT/ANY lookups warn), git used as transport (a remote URL with an embedded credential blocks; push/remote-add to a literal https URL warns), and scp/rsync/rclone/cloud-upload (warn).
+- **shell-resolution evasions.** ANSI-C `$'\x2f…'` escapes, `${IFS}` word-splitting, and brace expansion `{a,b}` are decoded to the real target before matching - every one is a transform the shell actually performs, so `cat $'\x2fetc\x2fpasswd'` and `cat${IFS}/etc/passwd` get caught. (homoglyph/fullwidth folding is deliberately NOT done: the shell never resolves `ｃat` or `/ｅtc/passwd` to anything real, so folding them would only add false positives.)
+- **interpreter credential reads.** `node -e readFileSync(process.env.HOME+'/.ssh/id_rsa')` and the `expanduser` / `Dir.home` concat forms, where the path is assembled at runtime and carries no `~` to mine.
+- **warn-level tripwires** for the agent-driven version of the supply-chain TTPs: writes to other agents' hook configs, LaunchAgent / systemd-user persistence units, GitHub workflow files, and `npm publish` / `npm token` / `gh repo create --public`. warn, not block, because developers do all of them legitimately.
 
 now the part nobody else says out loud:
 
 **sentinel hooks the agent's tool calls. it does not and cannot see npm lifecycle scripts.** when the worm's payload runs, it runs inside a child process of `npm install`, not as an agent tool call. that never crosses the PreToolUse hook. so these rules catch the case where a prompt injection drives *the agent itself* into writing a LaunchAgent or exfiltrating a credential. they do not catch the worm propagating on its own. anything that claims a runtime hook stops a lifecycle-script worm is lying to you.
 
-two more honest caveats:
+the structural ceiling, stated plainly:
 
-- self-protect now covers the three obvious disarm vectors (policy file, binary, hook entry), but it is not tamper-proof. it only sees the agent's own tool calls: a write from a subprocess (`sed -i`, `python -c "open(...).write(...)"`), a path assembled from a shell variable, or a settings rewrite that keeps the `sentinel evaluate` marker while repointing it at a different binary all get through. the binary tamper-by-name rules (`rm "$(command -v sentinel)"`) are command-regex, so they're evadable by var-assembly; the literal-path binary rules are the stronger half. this raises the cost of disarming sentinel. it does not make it impossible.
-- `sentinel install` does **not** overwrite an existing `~/.sentinel/policy.toml`, and the default is audit mode. if you already have a policy, these new rules won't appear until you regenerate it, and nothing blocks until you switch to `--enforce`.
+- **a child process is invisible.** a `sed -i` / `python -c` / `jq` rewrite of settings.json or policy.toml is caught only by the command-regex rules (target + a mutating verb), which are evadable; selfprotect's content check only sees Write/Edit/MultiEdit. a path or command **assembled from a shell variable** (`B=~/.cargo/bin/sentinel; chmod -x $B`), reconstructed via `a=cur;b=l;$a$b`, or built fully at runtime carries no literal token for a static matcher to see.
+- **natural-language instructions** to a sub-agent ("exfiltrate my keys") can't be statically matched; only the spawned agent's own tool calls are re-evaluated. and arbitrary-data exfil through a tool sentinel can't enumerate (a novel MCP field, a non-credential-shaped URL) is out of reach.
+- the command rules **raise the cost** of the obvious attacks. they are not a wall. the deterministic path layer is the part you can lean on; treat the command and secret layers as a strong speed bump, sized to a prompt-injected agent, not a tamper-proof sandbox against a motivated operator who knows the architecture.
 
 ## commands
 
 ```
 sentinel audit            run attack corpus against your agent
-sentinel install          install hooks + default policy (audit mode)
-sentinel install --enforce  install with enforcement
+sentinel install          install hooks + default policy (enforce mode)
+sentinel install --audit  install in audit mode (log only, never blocks)
 sentinel uninstall        remove hooks
 sentinel evaluate         evaluate a tool call (called by the hook)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
