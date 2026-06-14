@@ -248,6 +248,18 @@ pattern = "~/Library/Keychains/*"
 action = "block"
 reason = "macOS Keychain database (every saved password/token/cert)"
 
+[[deny.paths]]
+pattern = "/Library/Keychains/*"
+action = "block"
+reason = "macOS system Keychain (System.keychain - absolute, not under HOME)"
+
+# editor SecretStorage DBs (VS Code / Cursor / VSCodium / Windsurf) hold OAuth
+# tokens and PATs saved by extensions.
+[[deny.paths]]
+pattern = "**/globalStorage/state.vscdb"
+action = "block"
+reason = "editor SecretStorage database (VS Code/Cursor state.vscdb - OAuth tokens/PATs)"
+
 # browser cookie + saved-login + key stores: reading another browser profile's
 # data dir is a credential-theft signal, never a normal dev action -> block the
 # whole user-data tree (Cookies / Login Data / Web Data / Local State all live
@@ -558,6 +570,19 @@ reason = "printenv of a secret-looking variable - review for credential exfil"
 pattern = '\bgit\s+credential(-[a-z]+)?\s+(fill|get)\b'
 action = "warn"
 reason = "git credential helper invoked to print stored credentials - review"
+
+# macOS Directory Service password/hash extraction - no benign agent use.
+[[deny.commands]]
+pattern = '\bdscl\b.*-read.*(?i:password|shadowhash|authenticationauthority)'
+action = "block"
+reason = "dscl directory-service password/hash extraction"
+
+# reading a preferences plist that names a secret (defaults read ... apiToken).
+# WARN: devs read plists legitimately, so surface only the secret-named reads.
+[[deny.commands]]
+pattern = '\bdefaults\s+read\b.*(?i:keychain|credential|password|token|secret|api_?key|auth)'
+action = "warn"
+reason = "defaults read of a secret-named preference - review for credential exfil"
 
 # --- FIX A2: tamper-by-name against the Sentinel binary (guard-disarm) ---
 # These catch the indirect form that carries no literal install path
@@ -1525,6 +1550,31 @@ mod tests {
         assert_eq!(action_of(&cmd_call("security find-internet-password -s github.com -w")), Action::Block);
         assert_eq!(action_of(&cmd_call("gpg --export-secret-keys --armor")), Action::Block);
         assert_eq!(action_of(&cmd_call("gpg2 -a --export-secret-subkeys ABCD")), Action::Block);
+    }
+
+    #[test]
+    fn credential_store_deltas_block() {
+        // absolute system keychain (not under HOME) + editor SecretStorage DBs
+        assert_eq!(action_of(&path_call("/Library/Keychains/System.keychain")), Action::Block);
+        assert_eq!(
+            action_of(&path_call("~/Library/Application Support/Code/User/globalStorage/state.vscdb")),
+            Action::Block
+        );
+        assert_eq!(action_of(&path_call("~/.config/Code/User/globalStorage/state.vscdb")), Action::Block);
+        assert_eq!(
+            action_of(&path_call("~/Library/Application Support/Cursor/User/globalStorage/state.vscdb")),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn dscl_and_defaults_secret_reads() {
+        assert_eq!(action_of(&cmd_call("dscl . -read /Users/joe Password")), Action::Block);
+        assert_eq!(action_of(&cmd_call("dscl . -read /Users/joe AuthenticationAuthority")), Action::Block);
+        assert_eq!(action_of(&cmd_call("defaults read com.foo.app apiToken")), Action::Warn);
+        // a plain plist read with no secret-named key is allowed
+        assert_eq!(action_of(&cmd_call("defaults read com.apple.dock")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("dscl . -list /Users")), Action::Allow);
     }
 
     #[test]
