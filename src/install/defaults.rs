@@ -567,25 +567,52 @@ reason = "git credential helper invoked to print stored credentials - review"
 # BLOCK rules; placed before the plain-curl WARN rules so first-match-wins keeps
 # them at block tier. Legit `which sentinel` / `command -v sentinel` /
 # `sentinel install` / `cargo install sentinel-guard` / `sentinel doctor` do NOT
-# match - each requires a destructive verb (rm/mv/ln/cp) plus a sentinel target.
+# match - each requires a destructive/disarming verb plus a sentinel target.
+# Verb set widened beyond rm/mv/ln/cp to chmod/chflags/strip/truncate/dd: making
+# the binary non-executable, immutable, or zero-length disarms the guard just as
+# deleting it does (doctor documents a missing/broken binary fails open).
 [[deny.commands]]
-pattern = '\b(rm|mv|ln|cp)\b.*\bsentinel-guard\b'
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b.*\bsentinel-guard\b'
 action = "block"
-reason = "destructive operation against the Sentinel crate binary (sentinel-guard) - guard-disarm tamper"
+reason = "destructive/disarming operation against the Sentinel crate binary (sentinel-guard) - guard-disarm tamper"
 
 # the `/sentinel` must END the token (whitespace, quote, end-of-string, redirect,
 # or separator) so a dev checkout DIRECTORY named sentinel (`rm -rf
 # ~/projects/sentinel/target`) or a sentinel-prefixed file (`/tmp/sentinel-build`)
 # is NOT a false positive - only a path whose final component is the binary itself.
 [[deny.commands]]
-pattern = '\b(rm|mv|ln)\b.*/sentinel(["\x27\s<>;|&]|$)'
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate)\b.*/sentinel(["\x27\s<>;|&]|$)'
 action = "block"
-reason = "destructive operation against a path ending in /sentinel - guard-disarm tamper"
+reason = "destructive/disarming operation against a path ending in /sentinel - guard-disarm tamper"
 
 [[deny.commands]]
-pattern = '\b(rm|mv|ln|cp)\b.*\$\((command -v|which)\s+sentinel\)'
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b.*\$\((command -v|which)\s+sentinel\)'
 action = "block"
-reason = "destructive operation against $(command -v sentinel) / $(which sentinel) - guard-disarm tamper by indirect path"
+reason = "destructive/disarming operation against $(command -v sentinel) / $(which sentinel) - guard-disarm tamper by indirect path"
+
+# overwrite/truncate the binary via a redirect or dd `of=` onto the resolved
+# path (`: > $(command -v sentinel)`, `dd of=$(which sentinel)`). No rm/mv/ln/cp
+# verb is present, so the rules above miss it.
+[[deny.commands]]
+pattern = '(>>?|\bof=)\s*"?\$\((command -v|which)\s+sentinel\)'
+action = "block"
+reason = "overwrite/truncate the Sentinel binary via $(command -v sentinel) redirect - guard-disarm tamper"
+
+# coreutils `install` over the binary. Anchored to a command boundary so
+# `cargo install sentinel-guard` (install preceded by `cargo`) does NOT match -
+# only a bare `install SRC <sentinel-path>` does.
+[[deny.commands]]
+pattern = '(^|[;&|]\s*)install\s+.*(/sentinel(["\x27\s<>;|&]|$)|\$\((command -v|which)\s+sentinel\))'
+action = "block"
+reason = "install(1) overwriting the Sentinel binary - guard-disarm tamper"
+
+# the agent invoking `sentinel uninstall` removes the PreToolUse hook outright.
+# Reconfiguring/uninstalling is a human action to take OUTSIDE the guarded
+# session, not something an injected agent should be able to do mid-run.
+[[deny.commands]]
+pattern = '\bsentinel(-guard)?\b\s+(-\S+\s+)*uninstall\b'
+action = "block"
+reason = "agent invoked `sentinel uninstall` - removes the guard's hook (reconfigure outside the agent)"
 
 # --- FIX C: data-exfil via curl/wget/fetch carrying DATA/UPLOAD flags ---
 # Existing curl rules only catch pipe-to-shell, $(curl, backtick-curl, staged
@@ -1136,6 +1163,49 @@ mod tests {
         assert_eq!(action_of(&cmd_call("sentinel install")), Action::Allow);
         assert_eq!(action_of(&cmd_call("cargo install sentinel-guard")), Action::Allow);
         assert_eq!(action_of(&cmd_call("sentinel doctor")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("sentinel check")), Action::Allow);
+    }
+
+    #[test]
+    fn sentinel_disarm_verbs_block() {
+        // round-two: making the binary non-executable / immutable / zero-length
+        // disarms the guard as surely as deleting it. The indirect $(command -v)
+        // form carries no literal install path, so only a command rule sees it.
+        assert_eq!(action_of(&cmd_call("chmod -x $(command -v sentinel)")), Action::Block);
+        assert_eq!(action_of(&cmd_call("chmod 000 $(which sentinel)")), Action::Block);
+        assert_eq!(action_of(&cmd_call("chflags uchg $(command -v sentinel)")), Action::Block);
+        assert_eq!(action_of(&cmd_call("truncate -s0 $(which sentinel)")), Action::Block);
+        // overwrite via redirect / dd onto the resolved path
+        assert_eq!(action_of(&cmd_call(": > $(command -v sentinel)")), Action::Block);
+        assert_eq!(action_of(&cmd_call("dd if=/tmp/x of=$(command -v sentinel)")), Action::Block);
+        // disarm a non-standard install location only the command rule knows about
+        assert_eq!(action_of(&cmd_call("chmod -x /opt/tools/sentinel")), Action::Block);
+        assert_eq!(action_of(&cmd_call("strip /opt/tools/sentinel")), Action::Block);
+    }
+
+    #[test]
+    fn sentinel_install_over_binary_blocks() {
+        assert_eq!(action_of(&cmd_call("install -m755 /tmp/fake /usr/local/bin/sentinel")), Action::Block);
+        assert_eq!(action_of(&cmd_call("install /tmp/fake $(command -v sentinel)")), Action::Block);
+        // cargo install of the crate must NOT be caught by the install rule
+        assert_eq!(action_of(&cmd_call("cargo install sentinel-guard")), Action::Allow);
+    }
+
+    #[test]
+    fn sentinel_uninstall_blocks() {
+        assert_eq!(action_of(&cmd_call("sentinel uninstall")), Action::Block);
+        assert_eq!(action_of(&cmd_call("/usr/local/bin/sentinel uninstall")), Action::Block);
+        assert_eq!(action_of(&cmd_call("sentinel-guard uninstall")), Action::Block);
+        // install/doctor remain allowed
+        assert_eq!(action_of(&cmd_call("sentinel install")), Action::Allow);
+    }
+
+    #[test]
+    fn sentinel_disarm_does_not_overmatch_dev_work() {
+        // chmod/cp on a dev checkout DIRECTORY named sentinel must stay allowed
+        assert_eq!(action_of(&cmd_call("chmod +x ~/projects/sentinel/build.sh")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("cp dist/app ~/projects/sentinel/target/app")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("truncate -s0 ~/logs/sentinel.log")), Action::Allow);
     }
 
     #[test]
