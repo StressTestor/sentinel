@@ -1647,6 +1647,28 @@ mod tests {
     }
 
     #[test]
+    fn shell_obfuscation_evasions_block() {
+        // every form here RESOLVES to a real protected file/command at runtime
+        // brace expansion -> /etc/passwd
+        assert_eq!(action_of(&cmd_call("cat /etc/{passwd,master.passwd}")), Action::Block);
+        // ${IFS} word-split glues cat to the path; desugar -> /etc/passwd
+        assert_eq!(action_of(&cmd_call("cat${IFS}/etc/passwd")), Action::Block);
+        assert_eq!(action_of(&cmd_call("cat$IFS/etc/passwd")), Action::Block);
+        // ANSI-C $'...' hex escape -> /etc/passwd
+        assert_eq!(action_of(&cmd_call("cat $'\\x2fetc\\x2fpasswd'")), Action::Block);
+        // ANSI-C decode of the COMMAND word: $'\x72\x6d' is rm
+        assert_eq!(action_of(&cmd_call("$'\\x72\\x6d' -rf /")), Action::Block);
+    }
+
+    #[test]
+    fn shell_obfuscation_does_not_overmatch() {
+        // benign brace/IFS usage that does not resolve onto a protected target
+        assert_eq!(action_of(&cmd_call("cp src/{a,b}.rs dest/")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("echo${IFS}hello")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("cat $'\\x68\\x69'")), Action::Allow); // "hi"
+    }
+
+    #[test]
     fn interpreter_read_of_non_credential_file_allowed() {
         // FP guard: a file-read with no credential token must NOT block
         assert_eq!(
