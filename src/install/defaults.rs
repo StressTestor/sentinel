@@ -596,7 +596,7 @@ reason = "dscl directory-service password/hash extraction"
 # reading a preferences plist that names a secret (defaults read ... apiToken).
 # WARN: devs read plists legitimately, so surface only the secret-named reads.
 [[deny.commands]]
-pattern = '\bdefaults\s+read\b.*(?i:keychain|credential|password|token|secret|api_?key|auth)'
+pattern = '\bdefaults\s+read\b.*(?i:keychain|credential|password|token|secret|api_?key|oauth)'
 action = "warn"
 reason = "defaults read of a secret-named preference - review for credential exfil"
 
@@ -681,18 +681,21 @@ reason = "deleting/moving ~/.sentinel removes the guard's policy + audit trail (
 # lets these BLOCK rules override it. Precise: a mutating verb + the settings
 # target (a plain `cat`/`grep`/`sed -n` read is NOT matched). Edit it outside the
 # guarded session.
+# the settings(.local).json target must END at a path terminator (quote / space
+# / separator / redirect / end), so a benign backup like `> settings.json.bak`
+# (final component is NOT the live settings file) does not false-block.
 [[deny.commands]]
-pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.claude/settings(\.local)?\.json'
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.claude/settings(\.local)?\.json(["\x27\s;|&>]|$)'
 action = "block"
 reason = "in-place shell rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
 
 [[deny.commands]]
-pattern = '>\s*"?\S*\.claude/settings(\.local)?\.json'
+pattern = '>\s*"?\S*\.claude/settings(\.local)?\.json(["\x27\s;|&]|$)'
 action = "block"
 reason = "truncating/overwriting .claude/settings.json via redirect - can strip the PreToolUse hook (guard-disarm)"
 
 [[deny.commands]]
-pattern = '\b(tee|sponge)\b.*\.claude/settings(\.local)?\.json'
+pattern = '\b(tee|sponge)\b.*\.claude/settings(\.local)?\.json(["\x27\s;|&]|$)'
 action = "block"
 reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreToolUse hook (guard-disarm)"
 
@@ -1424,6 +1427,10 @@ mod tests {
         assert_eq!(action_of(&cmd_call("cat ~/.claude/settings.json")), Action::Warn);
         assert_eq!(action_of(&cmd_call("sed -n '/model/p' ~/.claude/settings.json")), Action::Warn);
         assert_eq!(action_of(&cmd_call("grep sentinel ~/.claude/settings.json")), Action::Warn);
+        // marko fix: a backup target whose final component is NOT the live
+        // settings file must not block (the suffix end-anchor)
+        assert_eq!(action_of(&cmd_call("echo x > ~/.claude/settings.json.bak")), Action::Allow);
+        assert_eq!(action_of(&cmd_call("cp ~/.claude/settings.json ~/backups/s.json")), Action::Warn);
     }
 
     #[test]
@@ -1655,6 +1662,8 @@ mod tests {
         // a plain plist read with no secret-named key is allowed
         assert_eq!(action_of(&cmd_call("defaults read com.apple.dock")), Action::Allow);
         assert_eq!(action_of(&cmd_call("dscl . -list /Users")), Action::Allow);
+        // marko fix: bare "auth" must not match "author"
+        assert_eq!(action_of(&cmd_call("defaults read com.app.authorMode")), Action::Allow);
     }
 
     #[test]
