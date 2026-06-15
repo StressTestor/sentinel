@@ -15,12 +15,13 @@
 //! - So it catches: the agent writing/installing a manifest whose OWN lifecycle
 //!   script is malicious, or a direct dep added from a suspicious non-registry
 //!   source. It does NOT catch the worm arriving via a poisoned transitive dep.
-//! - Preflight inspects the SESSION-cwd manifest — the `cwd` the hook hands us —
-//!   not necessarily the one the install actually uses. A command that changes
-//!   the install directory (`cd subdir && npm install`, `npm install --prefix
-//!   <dir>`, `npm i -C <dir>`) installs from a manifest preflight did NOT
-//!   inspect, or none at all. The hook only gives us the session cwd; we do not
-//!   follow `cd` or `--prefix`, so this evasion is inherent.
+//! - Preflight resolves the directory the install ACTUALLY runs in: it follows a
+//!   single literal `cd <dir>` and the cwd flags (`--prefix`/`-C`/`--cwd`/`--dir`)
+//!   before reading the manifest, closing the monorepo/subdir evasion (`cd
+//!   packages/foo && npm install`). What it still CANNOT resolve — and so skips
+//!   rather than inspect the wrong manifest — is a dynamically-built install dir
+//!   (a shell variable `cd $D`, glob, command-substitution) or more than one
+//!   directory change in the same command (ambiguous).
 //! - Like every PreToolUse check, it sees only the agent's own tool calls. A
 //!   child-process install kicked off some other way is invisible here.
 //!
@@ -30,7 +31,7 @@
 
 use crate::policy::{Action, PolicyDecision};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// the npm-family lifecycle script keys. these run automatically during an
@@ -250,12 +251,14 @@ pub fn apply(decision: PolicyDecision, command: Option<&str>, cwd: Option<&str>)
     if !is_install_like(command) {
         return decision;
     }
-    // cwd missing, manifest missing, or manifest unparseable → do nothing. we
-    // cannot block a normal install over a manifest we can't read.
-    let Some(cwd) = cwd else {
+    // resolve the directory the install ACTUALLY runs in (following a literal
+    // `cd`/`--prefix`), not just the session cwd. None → the install dir can't be
+    // proven (dynamic/ambiguous) → skip rather than inspect the wrong manifest.
+    // missing/unparseable manifest → do nothing; we can't block over what we can't read.
+    let Some(install_dir) = effective_install_dir(command, cwd) else {
         return decision;
     };
-    let Ok(content) = std::fs::read_to_string(Path::new(cwd).join("package.json")) else {
+    let Ok(content) = std::fs::read_to_string(install_dir.join("package.json")) else {
         return decision;
     };
     let Ok(manifest) = serde_json::from_str::<Value>(&content) else {
@@ -264,6 +267,78 @@ pub fn apply(decision: PolicyDecision, command: Option<&str>, cwd: Option<&str>)
     match inspect(&manifest) {
         Some(found) if severity(&found.action) > severity(&decision.action) => found,
         _ => decision,
+    }
+}
+
+/// Resolve the directory the install will actually run in, so preflight reads the
+/// RIGHT `package.json`. Follows a single literal `cd <dir>` and the
+/// package-manager cwd flags (`--prefix`/`-C`/`--cwd`/`--dir`). Returns:
+/// - the session cwd when the command changes no directory (the common case);
+/// - the resolved literal directory when it changes to one we can prove;
+/// - `None` when it changes to something we CANNOT prove literal (a variable,
+///   glob, command-substitution, quote) OR more than once (ambiguous) —
+///   inspecting the session root then would be the WRONG manifest, so we skip.
+fn effective_install_dir(command: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    match dir_change_targets(command).as_slice() {
+        [] => cwd.map(PathBuf::from),
+        [one] => resolve_dir(one, cwd),
+        _ => None, // multiple/ambiguous directory changes — cannot prove
+    }
+}
+
+/// The directory-change targets in a command: a `cd <dir>` at a command position
+/// and the package-manager cwd flags. Literalness is judged later in
+/// [`resolve_dir`]; the COUNT is what gates the ambiguous (>1) case.
+fn dir_change_targets(command: &str) -> Vec<String> {
+    let normalized = command.replace(['\n', '\r'], " ; ");
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if tok == "cd" && at_command_position(&tokens, i) {
+            if let Some(dir) = tokens.get(i + 1) {
+                out.push((*dir).to_string());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(val) = tok
+            .strip_prefix("--prefix=")
+            .or_else(|| tok.strip_prefix("--cwd="))
+            .or_else(|| tok.strip_prefix("--dir="))
+        {
+            out.push(val.to_string());
+        } else if matches!(tok, "--prefix" | "-C" | "--cwd" | "--dir") {
+            if let Some(v) = tokens.get(i + 1) {
+                out.push((*v).to_string());
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Resolve a directory-change target to a path ONLY if it is a literal we can
+/// prove. A token carrying a shell variable, glob, command-substitution, or quote
+/// is NOT literal → `None`. `~` expands to `$HOME`; a relative path joins the
+/// session cwd (`None` if there is no cwd to anchor it).
+fn resolve_dir(target: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    if target.is_empty() || target.contains(['$', '*', '?', '[', '`', '(', '"', '\'']) {
+        return None;
+    }
+    if target == "~" || target.starts_with("~/") {
+        let home = std::env::var("HOME").ok()?;
+        let rest = target.trim_start_matches('~').trim_start_matches('/');
+        return Some(PathBuf::from(home).join(rest));
+    }
+    let p = Path::new(target);
+    if p.is_absolute() {
+        Some(p.to_path_buf())
+    } else {
+        cwd.map(|c| Path::new(c).join(target))
     }
 }
 
@@ -503,6 +578,49 @@ mod tests {
         write_manifest(dir.path(), &body);
         let d = apply(allow(), Some("npm install"), dir.path().to_str());
         assert_eq!(d.action, Action::Block);
+    }
+
+    #[test]
+    fn apply_follows_cd_into_subdir_for_the_real_manifest() {
+        // the monorepo/subdir evasion: root manifest is clean, the malicious one
+        // lives in a subdir the install cd's into. preflight must inspect THAT one.
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), &json!({ "name": "root" }).to_string());
+        let sub = dir.path().join("packages").join("foo");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("package.json"),
+            json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string(),
+        )
+        .unwrap();
+        let d = apply(allow(), Some("cd packages/foo && npm install"), dir.path().to_str());
+        assert_eq!(d.action, Action::Block, "must inspect the cd'd-into manifest");
+    }
+
+    #[test]
+    fn apply_follows_prefix_flag_for_the_real_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), &json!({ "name": "root" }).to_string());
+        let sub = dir.path().join("svc");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("package.json"),
+            json!({ "scripts": { "preinstall": curl_pipe_sh() } }).to_string(),
+        )
+        .unwrap();
+        let d = apply(allow(), Some("npm install --prefix svc"), dir.path().to_str());
+        assert_eq!(d.action, Action::Block, "must inspect the --prefix manifest");
+    }
+
+    #[test]
+    fn apply_skips_when_install_dir_is_not_literal() {
+        // a dynamically-built install dir cannot be proven; rather than inspect
+        // the (wrong) session root, preflight skips — no false escalation either way.
+        let dir = tempfile::tempdir().unwrap();
+        // a malicious manifest at the ROOT must NOT be used to block a `cd $DIR` install
+        write_manifest(dir.path(), &json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string());
+        let d = apply(allow(), Some("cd $TARGET && npm install"), dir.path().to_str());
+        assert_eq!(d.action, Action::Allow, "non-literal cd must skip, not inspect the root");
     }
 
     #[test]
