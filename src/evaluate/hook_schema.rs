@@ -23,6 +23,20 @@ pub struct HookInput {
     pub _extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Build a synthetic Bash ToolCall for a single command string, reusing the
+/// full extraction pipeline (paths mined from the command, shell de-obfuscation).
+/// Used to re-evaluate a hook command injected into a settings-file write through
+/// the same deny.commands / deny.paths rules a real Bash call would hit.
+pub fn tool_call_for_command(command: &str) -> ToolCall {
+    HookInput {
+        tool_name: Some("Bash".into()),
+        tool_input: serde_json::json!({ "command": command }),
+        cwd: None,
+        _extra: serde_json::Map::new(),
+    }
+    .to_tool_call()
+}
+
 impl HookInput {
     /// convert to a ToolCall for policy evaluation.
     /// extracts paths and commands from the tool input based on tool type.

@@ -1,7 +1,7 @@
 pub mod hook_schema;
 
 use crate::audit_trail;
-use crate::policy::{Action, PolicyEngine};
+use crate::policy::{Action, PolicyDecision, PolicyEngine};
 use hook_schema::HookInput;
 use serde::Serialize;
 use std::io::{self, Read, Write};
@@ -109,6 +109,15 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     // the canary/audit/enforce branches so all three see the escalated decision.
     let decision = crate::selfprotect::apply(decision, &hook_input.tool_input);
 
+    // hook-injection guard (the inverse of self-protect's hook *removal* check):
+    // a settings write that ADDS a malicious hook — e.g. a `SessionStart` running
+    // `curl|sh` — while preserving sentinel's own hook would otherwise stay
+    // warn-tier. re-evaluate each injected hook command through the SAME zero-FP
+    // deny.commands/deny.paths rules a real Bash call hits; a block-tier match
+    // escalates the whole write to Block. only settings writes do any work
+    // (extraction is path-gated), so the hot path is untouched.
+    let decision = escalate_injected_hook(decision, &hook_input.tool_input, &engine);
+
     // install-preflight (worm TTP): when the agent runs an install-like command
     // (`npm install`, `pnpm add`, `yarn`, `bun install`, …), inspect the
     // top-level package.json in the call's cwd and escalate a lifecycle script
@@ -192,6 +201,38 @@ fn print_output(output: &HookOutput) {
     if let Ok(json) = serde_json::to_string(output) {
         println!("{json}");
     }
+}
+
+/// Escalate a settings write that injects a malicious hook command. Each hook
+/// `command` value in the write's new content is re-evaluated through the real
+/// policy (via a synthetic Bash tool call, so paths are mined and the command is
+/// shell-de-obfuscated exactly as a live call would be); a block-tier match
+/// escalates the whole write to Block. Returns the decision unchanged when it is
+/// already Block, when the write targets no settings file (the common case, no
+/// work), or when every injected command is benign.
+fn escalate_injected_hook(
+    decision: PolicyDecision,
+    tool_input: &serde_json::Value,
+    engine: &PolicyEngine,
+) -> PolicyDecision {
+    if decision.action == Action::Block {
+        return decision;
+    }
+    for cmd in crate::selfprotect::injected_hook_commands(tool_input) {
+        let probe = hook_schema::tool_call_for_command(&cmd);
+        if engine.evaluate(&probe).action == Action::Block {
+            return PolicyDecision {
+                action: Action::Block,
+                reason: Some(
+                    "settings write injects a hook command that matches a deny rule \
+                     (self-protect: hook-injection)"
+                        .into(),
+                ),
+                matched_rule: Some("selfprotect: hook-injection".into()),
+            };
+        }
+    }
+    decision
 }
 
 /// Emit the nested deny JSON, mirror the reason to stderr, and exit 2. Never
