@@ -139,14 +139,17 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
     // the canary/audit/enforce branches so all three see the escalated decision.
     let decision = crate::selfprotect::apply(decision, &hook_input.tool_input);
 
-    // hook-injection guard (the inverse of self-protect's hook *removal* check):
-    // a settings write that ADDS a malicious hook — e.g. a `SessionStart` running
-    // `curl|sh` — while preserving sentinel's own hook would otherwise stay
-    // warn-tier. re-evaluate each injected hook command through the SAME zero-FP
-    // deny.commands/deny.paths rules a real Bash call hits; a block-tier match
-    // escalates the whole write to Block. only settings writes do any work
-    // (extraction is path-gated), so the hot path is untouched.
-    let decision = escalate_injected_hook(decision, &hook_input.tool_input, &engine);
+    // autorun-injection guard (the inverse of self-protect's hook *removal*
+    // check): a config write that ADDS a malicious autorun command — a hook that
+    // pipes a fetch to a shell, or an MCP server with a malicious launch command
+    // — while preserving sentinel's own would otherwise stay warn-tier. covers
+    // every agent/MCP config surface sentinel adapts to (Claude/Codex/Gemini/
+    // Crush hooks + .mcp.json/.claude.json servers), closing the plant-an-autorun
+    // gap the multi-agent adapters opened. re-evaluate each extracted command
+    // through the SAME zero-FP deny.commands/deny.paths rules a real Bash call
+    // hits; a block-tier match escalates the whole write to Block. extraction is
+    // path-gated, so the hot path is untouched.
+    let decision = escalate_autorun_injection(decision, &hook_input.tool_input, &engine);
 
     // install-preflight (worm TTP): when the agent runs an install-like command
     // (`npm install`, `pnpm add`, `yarn`, `bun install`, …), inspect the
@@ -241,7 +244,7 @@ fn print_output(output: &HookOutput) {
 /// escalates the whole write to Block. Returns the decision unchanged when it is
 /// already Block, when the write targets no settings file (the common case, no
 /// work), or when every injected command is benign.
-fn escalate_injected_hook(
+fn escalate_autorun_injection(
     decision: PolicyDecision,
     tool_input: &serde_json::Value,
     engine: &PolicyEngine,
@@ -249,17 +252,17 @@ fn escalate_injected_hook(
     if decision.action == Action::Block {
         return decision;
     }
-    for cmd in crate::selfprotect::injected_hook_commands(tool_input) {
+    for cmd in crate::selfprotect::autorun_commands(tool_input) {
         let probe = hook_schema::tool_call_for_command(&cmd);
         if engine.evaluate(&probe).action == Action::Block {
             return PolicyDecision {
                 action: Action::Block,
                 reason: Some(
-                    "settings write injects a hook command that matches a deny rule \
-                     (self-protect: hook-injection)"
+                    "config write injects an autorun command (agent hook or MCP server) \
+                     that matches a deny rule (self-protect: autorun-injection)"
                         .into(),
                 ),
-                matched_rule: Some("selfprotect: hook-injection".into()),
+                matched_rule: Some("selfprotect: autorun-injection".into()),
             };
         }
     }
