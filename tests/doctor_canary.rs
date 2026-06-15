@@ -101,14 +101,18 @@ fn liveness_check(report: &serde_json::Value) -> (String, String) {
 }
 
 fn run_evaluate(home: &Path, args: &[&str], stdin: &str) -> serde_json::Value {
-    let assert = Command::cargo_bin("sentinel")
+    // NB: don't assert an exit code here. A normal-path block exits 2 (the
+    // belt-and-suspenders hard-block signal); canary/allow exit 0. The exact
+    // exit-code contract is covered in tests/hook_contract.rs; these tests
+    // assert on the decision JSON, so just capture stdout regardless of code.
+    let output = Command::cargo_bin("sentinel")
         .unwrap()
         .args(args)
         .env("HOME", home)
         .write_stdin(stdin)
-        .assert()
-        .success();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
     serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("evaluate stdout was not valid JSON: {e}\nstdout: {stdout:?}"))
 }

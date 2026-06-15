@@ -4,7 +4,7 @@ use crate::audit_trail;
 use crate::policy::{Action, PolicyEngine};
 use hook_schema::HookInput;
 use serde::Serialize;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// PreToolUse hook output. Claude Code honors a block ONLY via the nested
@@ -69,9 +69,8 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("failed to load policy: {e}");
-            // can't load policy → can't make a safe decision → deny
-            print_output(&HookOutput::deny(format!("policy load failed: {e}")));
-            return Ok(());
+            // can't load policy → can't make a safe decision → deny (and exit 2)
+            deny_and_exit(format!("policy load failed: {e}"));
         }
     };
 
@@ -79,13 +78,11 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
         // a read error is also an un-inspectable input, not a free pass
-        print_output(&degraded(&engine, "failed to read stdin"));
-        return Ok(());
+        degraded(&engine, "failed to read stdin");
     }
 
     if input.trim().is_empty() {
-        print_output(&degraded(&engine, "empty input"));
-        return Ok(());
+        degraded(&engine, "empty input");
     }
 
     // Parse the hook input. A payload sentinel can't understand is NOT a free
@@ -93,8 +90,7 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     let hook_input = match serde_json::from_str::<HookInput>(&input) {
         Ok(hi) => hi,
         Err(e) => {
-            print_output(&degraded(&engine, &format!("unparseable hook input: {e}")));
-            return Ok(());
+            degraded(&engine, &format!("unparseable hook input: {e}"));
         }
     };
 
@@ -170,13 +166,11 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     // enforce mode
     match decision.action {
-        Action::Block => {
-            print_output(&HookOutput::deny(
-                decision
-                    .reason
-                    .unwrap_or_else(|| "blocked by sentinel policy".into()),
-            ));
-        }
+        Action::Block => deny_and_exit(
+            decision
+                .reason
+                .unwrap_or_else(|| "blocked by sentinel policy".into()),
+        ),
         Action::Warn => {
             // warn = allow but log prominently
             eprintln!(
@@ -200,17 +194,31 @@ fn print_output(output: &HookOutput) {
     }
 }
 
+/// Emit the nested deny JSON, mirror the reason to stderr, and exit 2. Never
+/// returns. Exit code 2 is Claude Code's hard-block signal *independent of how
+/// it parses stdout*, so this is belt-and-suspenders against the output-contract
+/// drift that silently disarmed every block in 0.2.0 (the flat-JSON bug): even
+/// if a future Claude Code ignores the JSON shape entirely, exit 2 still blocks.
+fn deny_and_exit(reason: impl Into<String>) -> ! {
+    let reason = reason.into();
+    print_output(&HookOutput::deny(reason.clone()));
+    let _ = io::stdout().flush(); // ensure the JSON lands before we exit
+    eprintln!("sentinel: blocked — {reason}");
+    std::process::exit(2);
+}
+
 /// Decide what to do with an input sentinel cannot evaluate (empty stdin,
 /// unparseable JSON). Audit mode never blocks; otherwise the policy's
 /// `on_failure` posture governs — "closed" (the default) denies rather than
 /// waving an un-inspectable call through, "open" allows with a warning.
-fn degraded(engine: &PolicyEngine, reason: &str) -> HookOutput {
+fn degraded(engine: &PolicyEngine, reason: &str) -> ! {
     if engine.is_audit_mode() || !engine.fail_closed() {
         tracing::warn!("{reason} — allowing (audit/fail-open)");
-        HookOutput::allow()
+        print_output(&HookOutput::allow());
+        std::process::exit(0);
     } else {
         tracing::warn!("{reason} — denying (fail-closed)");
-        HookOutput::deny(format!("{reason} — failing closed"))
+        deny_and_exit(format!("{reason} — failing closed"));
     }
 }
 
