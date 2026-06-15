@@ -53,6 +53,25 @@ pub enum Command {
     /// static-check a policy for dead rules, invalid regexes, and over-broad allows
     #[command(name = "policy-lint")]
     PolicyLint(LintArgs),
+
+    /// enumerate configured MCP servers and flag new/changed ones (read-only, TOFU)
+    #[command(name = "audit-mcp")]
+    AuditMcp(AuditMcpArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AuditMcpArgs {
+    /// emit the server list + findings as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    /// re-snapshot the trusted baseline to the currently-configured server set
+    #[arg(long, default_value_t = false)]
+    pub update: bool,
+
+    /// exit non-zero if any new or changed server is found (for CI / scheduled checks)
+    #[arg(long, default_value_t = false)]
+    pub strict: bool,
 }
 
 #[derive(clap::Args, Debug)]

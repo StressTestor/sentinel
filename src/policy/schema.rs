@@ -11,6 +11,8 @@ pub struct PolicyConfig {
     pub deny_commands: Vec<DenyCommandRule>,
     #[serde(skip)]
     pub deny_secrets: Vec<DenySecretRule>,
+    #[serde(skip)]
+    pub deny_tools: Vec<DenyToolRule>,
     #[serde(default, rename = "allow")]
     allow_wrapper: Option<AllowWrapper>,
     #[serde(skip)]
@@ -28,6 +30,8 @@ struct DenyWrapper {
     commands: Vec<DenyCommandRule>,
     #[serde(default)]
     secrets: Vec<DenySecretRule>,
+    #[serde(default)]
+    tools: Vec<DenyToolRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,6 +55,7 @@ impl PolicyConfig {
             deny_paths,
             deny_commands,
             deny_secrets,
+            deny_tools: Vec::new(),
             allow_wrapper: None,
             allow_paths,
         }
@@ -62,6 +67,7 @@ impl PolicyConfig {
             self.deny_paths = deny.paths;
             self.deny_commands = deny.commands;
             self.deny_secrets = deny.secrets;
+            self.deny_tools = deny.tools;
         }
         if let Some(allow) = self.allow_wrapper.take() {
             self.allow_paths = allow.paths;
@@ -103,6 +109,18 @@ pub struct DenyCommandRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenySecretRule {
+    pub pattern: String,
+    pub action: String,
+    pub reason: String,
+}
+
+/// a rule matched against the tool NAME (e.g. `mcp__server__tool`, `Bash`).
+/// MCP tool calls traverse the PreToolUse hook like any other, so this lets a
+/// user block or warn a specific MCP server/tool by name. opt-in lockdown — no
+/// such rule ships in the default policy (a default `mcp__*` block would be a
+/// false positive for every MCP user).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DenyToolRule {
     pub pattern: String,
     pub action: String,
     pub reason: String,

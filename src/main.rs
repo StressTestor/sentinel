@@ -1,4 +1,5 @@
 mod audit;
+mod audit_mcp;
 mod audit_trail;
 mod check;
 #[allow(dead_code)]
@@ -56,6 +57,7 @@ async fn main() {
         Command::Doctor(args) => doctor::run(args),
         Command::PolicyDiff(args) => policy_diff::run(args),
         Command::PolicyLint(args) => lint::run(args),
+        Command::AuditMcp(args) => audit_mcp::run(args),
     };
 
     if let Err(e) = result {
