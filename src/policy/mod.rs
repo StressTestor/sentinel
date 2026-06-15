@@ -234,6 +234,27 @@ impl PolicyEngine {
             matched_rule: None,
         }
     }
+
+    /// Scan a tool RESULT blob for secret shapes, reusing the deny.secrets
+    /// patterns, and return the matched rules' reasons (the secret KIND, e.g.
+    /// "AWS access key ID") — never the matched value. Used by `sentinel
+    /// post-evaluate` for *detection* of a credential that landed in a tool
+    /// result; PostToolUse fires after execution, so this is detection + alert,
+    /// not prevention. Block-tier patterns only, to keep the post-hoc nudge
+    /// high-signal and avoid the lower-confidence warn-tier shapes.
+    pub fn scan_result_secrets(&self, blob: &str) -> Vec<&str> {
+        if self.config.deny_secrets.is_empty() {
+            return Vec::new();
+        }
+        let normalized = normalize_for_secret_match(blob);
+        self.config
+            .deny_secrets
+            .iter()
+            .filter(|r| parse_action(&r.action) == Action::Block)
+            .filter(|r| matches_secret_normalized(&r.pattern, blob, &normalized))
+            .map(|r| r.reason.as_str())
+            .collect()
+    }
 }
 
 fn parse_action(s: &str) -> Action {

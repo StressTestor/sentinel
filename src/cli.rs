@@ -23,6 +23,10 @@ pub enum Command {
     /// evaluate a tool call against the policy (called by the PreToolUse hook)
     Evaluate(EvaluateArgs),
 
+    /// scan a tool RESULT for secret shapes (called by the PostToolUse hook; detection only)
+    #[command(name = "post-evaluate")]
+    PostEvaluate,
+
     /// wrap an agent process in a pty proxy (generic adapter)
     Wrap(WrapArgs),
 
@@ -140,6 +144,12 @@ pub struct InstallArgs {
     /// deprecated: enforce is now the default. Accepted for back-compat, no effect.
     #[arg(long, default_value_t = false, hide = true)]
     pub enforce: bool,
+
+    /// also register the PostToolUse result-scan hook (detection-only, opt-in):
+    /// flags secret shapes that land in a tool RESULT. higher-FP than the policy
+    /// layer, so it is off by default.
+    #[arg(long = "result-scan", default_value_t = false)]
+    pub result_scan: bool,
 }
 
 #[derive(clap::Args, Debug)]

@@ -14,7 +14,7 @@ pub enum InstallError {
     BinaryNotFound,
 }
 
-pub fn run_install(audit: bool) -> Result<(), InstallError> {
+pub fn run_install(audit: bool, result_scan: bool) -> Result<(), InstallError> {
     // verify sentinel binary is in PATH
     let sentinel_path = which_sentinel()?;
     println!("sentinel binary: {}", sentinel_path.display());
@@ -23,6 +23,12 @@ pub fn run_install(audit: bool) -> Result<(), InstallError> {
     let settings_path = claude_settings_path();
     hooks::install_hook(&settings_path, &sentinel_path)?;
     println!("installed PreToolUse hook in {}", settings_path.display());
+
+    // opt-in: register the PostToolUse result-scan hook (detection only)
+    if result_scan {
+        hooks::install_post_hook(&settings_path, &sentinel_path)?;
+        println!("installed PostToolUse result-scan hook (detection only)");
+    }
 
     // write default policy. ENFORCE is the default: a security tool that ships in
     // log-only mode protects nobody, and the most direct attack on a guard you

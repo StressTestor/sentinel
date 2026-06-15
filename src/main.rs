@@ -14,6 +14,7 @@ mod install;
 mod lint;
 mod policy;
 mod policy_diff;
+mod post_evaluate;
 mod preflight;
 mod selfprotect;
 mod verify;
@@ -34,7 +35,7 @@ async fn main() {
     let result = match cli.command {
         Command::Audit(args) => audit::run(args).await,
         Command::Install(args) => {
-            install::run_install(args.audit)
+            install::run_install(args.audit, args.result_scan)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
         Command::Uninstall => {
@@ -42,6 +43,7 @@ async fn main() {
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
         Command::Evaluate(args) => evaluate::run(args.canary),
+        Command::PostEvaluate => post_evaluate::run(),
         Command::Wrap(args) => wrap::run_wrap(&args.agent_command),
         Command::CorpusUpdate => {
             println!("sentinel corpus update — not yet implemented");
