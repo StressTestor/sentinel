@@ -6,6 +6,47 @@ versioning.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-15
+
+Hardening + reach: a second enforcement channel, the injection guard generalized
+across every agent it now adapts to, result-secret detection, MCP policing, and
+multi-agent support. Two octo-debate passes (codex + opencode, CLI-only) drove
+the last two items. 260 tests; clippy clean; zero-FP-block ethos preserved.
+
+### Added
+- **Multi-agent adapters.** The engine is agent-agnostic; `evaluate --agent <name>`
+  emits the right decision shape per host: `claude-code`/`codex` (nested
+  `hookSpecificOutput`, identical contracts), `gemini`/`crush`
+  (`{"decision":"deny"}`), and `generic` (`{"decision":"block"}` + exit 2 for any
+  command-hook agent). A block always also exits 2, the universal hard-block
+  signal. `install --agent <name>` prints the host-specific hook config (Codex
+  `config.toml`, Gemini `BeforeTool`, Crush `crush.json`, opencode JS shim); Aider
+  is documented as unsupported (no scriptable pre-tool hook).
+- **`sentinel post-evaluate`** (opt-in via `install --result-scan`): a PostToolUse
+  hook that scans a tool RESULT for block-tier secret shapes and emits an
+  `additionalContext` nudge. Detection + alert only — PostToolUse fires after the
+  tool ran, so it cannot prevent the leak and never echoes the matched value.
+- **MCP policing.** `deny.tools` — a deny rule matched against the tool NAME via
+  glob, so an MCP server/tool can be blocked or warned by name (no default rule;
+  opt-in lockdown). `sentinel audit-mcp` — a read-only trust-on-first-use
+  enumerator of configured MCP servers that flags a new or changed launch command.
+- **Autorun-injection guard across every agent + MCP config** (debate pass #1):
+  a config write that ADDS a malicious hook command or MCP server launch line —
+  in Claude/Gemini/Crush settings JSON, Codex `config.toml`, or
+  `.mcp.json`/`~/.claude.json` — is re-evaluated through the zero-FP deny.commands
+  rules and blocked on a block-tier match, closing the plant-an-autorun gap the
+  adapters opened. Benign hooks/servers pass.
+
+### Changed
+- **A block now also exits 2.** Enforcement no longer rides the stdout JSON alone
+  (the 0.2.0 silent-death failure mode): every deny path also exits 2, which
+  Claude Code honors as a hard block regardless of how it parses stdout.
+- **install-preflight follows the effective install directory** (debate pass #2):
+  it resolves a literal `cd <dir>` / `--prefix`/`-C`/`--cwd`/`--dir` before reading
+  the manifest, closing the monorepo/subdir evasion (`cd packages/foo &&
+  npm install`). A dynamically-built or ambiguous install dir is skipped rather
+  than guessed, so it never inspects the wrong manifest.
+
 ## [0.3.0] - 2026-06-14
 
 Round-two attacker-audit hardening: an external agent red-teamed the enforce-mode

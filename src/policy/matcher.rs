@@ -14,6 +14,18 @@ pub fn matches_allow_path(pattern: &str, path: &str) -> bool {
     matches_path_env(pattern, path, false)
 }
 
+/// Match a tool NAME (e.g. `mcp__server__tool`, `Bash`) against a deny.tools
+/// glob pattern. Tool names carry no path separators, so plain glob semantics
+/// apply: `mcp__evil__*` blocks every tool from that server, an exact name
+/// blocks just that one. A malformed pattern matches nothing (fail-open
+/// per-rule, consistent with the command matcher).
+pub fn matches_tool(pattern: &str, tool_name: &str) -> bool {
+    match glob::Pattern::new(pattern) {
+        Ok(p) => p.matches(tool_name),
+        Err(_) => false,
+    }
+}
+
 fn matches_path_env(pattern: &str, path: &str, recursive_dir: bool) -> bool {
     let home = std::env::var("HOME").unwrap_or_default();
     let user = std::env::var("USER").unwrap_or_default();

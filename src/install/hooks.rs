@@ -23,52 +23,65 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), InstallErro
 }
 
 const SENTINEL_HOOK_MARKER: &str = "sentinel evaluate";
+/// the PostToolUse (result-scan) hook marker. NB `sentinel post-evaluate` does
+/// NOT contain `sentinel evaluate` as a substring, so both markers must be
+/// recognized or uninstall/dedup would orphan the post-evaluate entry.
+const SENTINEL_POST_HOOK_MARKER: &str = "sentinel post-evaluate";
+
+/// the hook events sentinel owns, for uninstall cleanup.
+const SENTINEL_HOOK_EVENTS: &[&str] = &["PreToolUse", "PostToolUse"];
 
 /// install the sentinel PreToolUse hook into Claude Code settings.
 /// merges with existing hooks without clobbering them. idempotent.
 pub fn install_hook(settings_path: &Path, sentinel_binary: &Path) -> Result<(), InstallError> {
+    add_sentinel_hook(settings_path, sentinel_binary, "PreToolUse", "evaluate")
+}
+
+/// install the sentinel PostToolUse (result-scan) hook. opt-in: result scanning
+/// is detection-only and higher-FP than the PreToolUse policy layer, so it is
+/// not registered by a default install.
+pub fn install_post_hook(settings_path: &Path, sentinel_binary: &Path) -> Result<(), InstallError> {
+    add_sentinel_hook(settings_path, sentinel_binary, "PostToolUse", "post-evaluate")
+}
+
+/// shared core: register `<binary> <subcommand>` as a `.*` hook under `event`,
+/// removing any prior sentinel entry from that event's array first (idempotent).
+fn add_sentinel_hook(
+    settings_path: &Path,
+    sentinel_binary: &Path,
+    event: &str,
+    subcommand: &str,
+) -> Result<(), InstallError> {
     let mut settings = read_settings(settings_path)?;
 
-    // ensure hooks object exists
     if settings.get("hooks").is_none() {
         settings["hooks"] = json!({});
     }
-
     let hooks = settings["hooks"]
         .as_object_mut()
         .ok_or_else(|| InstallError::WriteError("hooks is not an object".into()))?;
 
-    // build sentinel hook entry
-    let sentinel_cmd = format!("{} evaluate", sentinel_binary.display());
-    let sentinel_hook = json!({
+    let cmd = format!("{} {}", sentinel_binary.display(), subcommand);
+    let entry = json!({
         "matcher": ".*",
-        "hooks": [{
-            "type": "command",
-            "command": sentinel_cmd
-        }]
+        "hooks": [{ "type": "command", "command": cmd }]
     });
 
-    // get or create PreToolUse array
-    let pre_tool_use = hooks
-        .entry("PreToolUse")
-        .or_insert_with(|| json!([]));
-
-    let arr = pre_tool_use
+    let arr = hooks
+        .entry(event)
+        .or_insert_with(|| json!([]))
         .as_array_mut()
-        .ok_or_else(|| InstallError::WriteError("PreToolUse is not an array".into()))?;
+        .ok_or_else(|| InstallError::WriteError(format!("{event} is not an array")))?;
 
-    // remove existing sentinel hooks (idempotent)
-    arr.retain(|entry| !is_sentinel_hook(entry));
-
-    // add new sentinel hook
-    arr.push(sentinel_hook);
+    arr.retain(|e| !is_sentinel_hook(e)); // idempotent: drop our prior entry
+    arr.push(entry);
 
     write_settings(settings_path, &settings)?;
     Ok(())
 }
 
 /// remove sentinel hooks from Claude Code settings.
-/// preserves all other hooks. idempotent.
+/// preserves all other hooks. idempotent. cleans every event sentinel owns.
 pub fn uninstall_hook(settings_path: &Path) -> Result<(), InstallError> {
     if !settings_path.exists() {
         return Ok(()); // nothing to uninstall
@@ -77,8 +90,8 @@ pub fn uninstall_hook(settings_path: &Path) -> Result<(), InstallError> {
     let mut settings = read_settings(settings_path)?;
 
     if let Some(hooks) = settings.get_mut("hooks") {
-        if let Some(pre_tool_use) = hooks.get_mut("PreToolUse") {
-            if let Some(arr) = pre_tool_use.as_array_mut() {
+        for event in SENTINEL_HOOK_EVENTS {
+            if let Some(arr) = hooks.get_mut(*event).and_then(|e| e.as_array_mut()) {
                 arr.retain(|entry| !is_sentinel_hook(entry));
             }
         }
@@ -88,12 +101,13 @@ pub fn uninstall_hook(settings_path: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-/// check if a hook entry belongs to sentinel
+/// check if a hook entry belongs to sentinel (either the evaluate or the
+/// post-evaluate hook).
 fn is_sentinel_hook(entry: &Value) -> bool {
     if let Some(hooks_arr) = entry.get("hooks").and_then(|h| h.as_array()) {
         for hook in hooks_arr {
             if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                if cmd.contains(SENTINEL_HOOK_MARKER) {
+                if cmd.contains(SENTINEL_HOOK_MARKER) || cmd.contains(SENTINEL_POST_HOOK_MARKER) {
                     return true;
                 }
             }
@@ -223,5 +237,55 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"x\":1}");
         // the temp sibling must be renamed away, not left behind
         assert!(!dir.path().join("settings.json.tmp").exists());
+    }
+
+    #[test]
+    fn install_post_hook_registers_posttooluse_and_is_idempotent() {
+        let (_dir, path) = temp_settings("{}");
+        let bin = Path::new("/usr/local/bin/sentinel");
+        install_hook(&path, bin).unwrap();
+        install_post_hook(&path, bin).unwrap();
+
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let post = s["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(s["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(post.len(), 1);
+        assert!(post[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("post-evaluate"));
+        assert!(is_sentinel_hook(&post[0]), "the post-evaluate marker must be recognized");
+
+        // idempotent: re-registering does not duplicate
+        install_post_hook(&path, bin).unwrap();
+        let s2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(s2["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn uninstall_removes_both_pre_and_post_sentinel_hooks() {
+        let existing = r#"{
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Edit", "hooks": [{"type": "command", "command": "other_hook.py"}]},
+                    {"matcher": ".*", "hooks": [{"type": "command", "command": "/usr/local/bin/sentinel evaluate"}]}
+                ],
+                "PostToolUse": [
+                    {"matcher": ".*", "hooks": [{"type": "command", "command": "/usr/local/bin/sentinel post-evaluate"}]},
+                    {"matcher": ".*", "hooks": [{"type": "command", "command": "prettier.sh"}]}
+                ]
+            }
+        }"#;
+        let (_dir, path) = temp_settings(existing);
+        uninstall_hook(&path).unwrap();
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        let pre = s["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "non-sentinel PreToolUse hook must survive");
+        assert!(!is_sentinel_hook(&pre[0]));
+
+        let post = s["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 1, "the sentinel post-evaluate hook must be removed");
+        assert!(!is_sentinel_hook(&post[0]), "prettier.sh must survive");
     }
 }

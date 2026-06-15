@@ -2,7 +2,9 @@ pub mod matcher;
 pub mod schema;
 
 use crate::common::normalize::normalize_for_secret_match;
-use matcher::{matches_allow_path, matches_command, matches_path, matches_secret_normalized};
+use matcher::{
+    matches_allow_path, matches_command, matches_path, matches_secret_normalized, matches_tool,
+};
 use schema::PolicyConfig;
 use std::path::Path;
 use thiserror::Error;
@@ -145,6 +147,27 @@ impl PolicyEngine {
         // (the .env / settings.json case) is preserved unchanged.
         let mut held: Option<PolicyDecision> = None;
 
+        // check deny.tools (by tool name). MCP tool calls (`mcp__server__tool`)
+        // traverse the hook like any other, so a name-matched rule lets a user
+        // block/warn a specific MCP server or tool outright. a BLOCK returns
+        // immediately (opt-in lockdown is unconditional); a WARN is held so a
+        // deny.commands BLOCK can still override it.
+        for rule in &self.config.deny_tools {
+            if matches_tool(&rule.pattern, &tool_call.tool_name) {
+                let action = parse_action(&rule.action);
+                let decision = PolicyDecision {
+                    action: action.clone(),
+                    reason: Some(rule.reason.clone()),
+                    matched_rule: Some(format!("deny.tools: {}", rule.pattern)),
+                };
+                if action == Action::Warn {
+                    held.get_or_insert(decision);
+                } else {
+                    return decision;
+                }
+            }
+        }
+
         // check deny.paths
         for rule in &self.config.deny_paths {
             for path in &tool_call.paths {
@@ -234,6 +257,27 @@ impl PolicyEngine {
             matched_rule: None,
         }
     }
+
+    /// Scan a tool RESULT blob for secret shapes, reusing the deny.secrets
+    /// patterns, and return the matched rules' reasons (the secret KIND, e.g.
+    /// "AWS access key ID") — never the matched value. Used by `sentinel
+    /// post-evaluate` for *detection* of a credential that landed in a tool
+    /// result; PostToolUse fires after execution, so this is detection + alert,
+    /// not prevention. Block-tier patterns only, to keep the post-hoc nudge
+    /// high-signal and avoid the lower-confidence warn-tier shapes.
+    pub fn scan_result_secrets(&self, blob: &str) -> Vec<&str> {
+        if self.config.deny_secrets.is_empty() {
+            return Vec::new();
+        }
+        let normalized = normalize_for_secret_match(blob);
+        self.config
+            .deny_secrets
+            .iter()
+            .filter(|r| parse_action(&r.action) == Action::Block)
+            .filter(|r| matches_secret_normalized(&r.pattern, blob, &normalized))
+            .map(|r| r.reason.as_str())
+            .collect()
+    }
 }
 
 fn parse_action(s: &str) -> Action {
@@ -304,6 +348,76 @@ mod tests {
         let decision = engine.evaluate(&call);
         assert_eq!(decision.action, Action::Block);
         assert!(decision.reason.unwrap().contains("SSH"));
+    }
+
+    fn tool_named(name: &str) -> ToolCall {
+        ToolCall {
+            tool_name: name.into(),
+            command: None,
+            paths: vec![],
+            raw_params: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn deny_tools_blocks_by_name_glob() {
+        let toml = r#"
+[policy]
+mode = "enforce"
+on_failure = "closed"
+default = "allow"
+
+[[deny.tools]]
+pattern = "mcp__evil__*"
+action = "block"
+reason = "blocked MCP server"
+"#;
+        let engine = PolicyEngine::from_toml_str(toml).unwrap();
+        // every tool from the named server blocks
+        let d = engine.evaluate(&tool_named("mcp__evil__exfiltrate"));
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.matched_rule.as_deref(), Some("deny.tools: mcp__evil__*"));
+        // a different server is untouched
+        assert_eq!(
+            engine.evaluate(&tool_named("mcp__github__create_issue")).action,
+            Action::Allow
+        );
+        // a non-MCP tool is untouched
+        assert_eq!(engine.evaluate(&tool_named("Bash")).action, Action::Allow);
+    }
+
+    #[test]
+    fn deny_tools_warn_is_overridden_by_a_command_block() {
+        // a warn-tier tool rule must NOT shadow a deny.commands BLOCK on the same
+        // call (the held-warn contract): warn the tool, but a malicious command
+        // still blocks.
+        let toml = r#"
+[policy]
+mode = "enforce"
+on_failure = "closed"
+default = "allow"
+
+[[deny.tools]]
+pattern = "mcp__shell__*"
+action = "warn"
+reason = "review MCP shell tool"
+
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+/(\s|$|[^~])'
+action = "block"
+reason = "recursive root deletion"
+"#;
+        let engine = PolicyEngine::from_toml_str(toml).unwrap();
+        // warn-tier tool alone → warn
+        assert_eq!(engine.evaluate(&tool_named("mcp__shell__exec")).action, Action::Warn);
+        // same tool carrying a block-tier command → block wins
+        let with_cmd = ToolCall {
+            tool_name: "mcp__shell__exec".into(),
+            command: Some("rm -rf /".into()),
+            paths: vec![],
+            raw_params: "{}".into(),
+        };
+        assert_eq!(engine.evaluate(&with_cmd).action, Action::Block);
     }
 
     #[test]

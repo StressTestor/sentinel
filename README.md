@@ -32,7 +32,9 @@ nobody is defending at the runtime layer. sentinel fixes that.
 
 ## how it works
 
-sentinel hooks into Claude Code's PreToolUse system. every tool call (Bash, Edit, Write, Read) passes through sentinel before execution. sentinel evaluates the call against your security policy and either allows, warns, or blocks it.
+sentinel hooks into Claude Code's PreToolUse system. every tool call (Bash, Edit, Write, Read) passes through sentinel before execution. sentinel evaluates the call against your security policy and either allows, warns, or blocks it. a block signals both ways: the nested JSON Claude Code honors, and exit code 2 - so a future change to the JSON contract can't silently disarm it.
+
+the engine is agent-agnostic. `sentinel install` wires Claude Code; `sentinel install --agent codex|gemini|crush|generic` prints the hook config for those agents (Codex's contract is byte-for-byte identical; Gemini/Crush take `{"decision":"deny"}`; generic is any agent that runs a command hook and honors exit 2). aider has no scriptable pre-tool hook, so it isn't supported - stated plainly rather than faked.
 
 ```
 you type a prompt
@@ -142,11 +144,15 @@ the structural ceiling, stated plainly:
 sentinel audit            run attack corpus against your agent
 sentinel install          install hooks + default policy (enforce mode)
 sentinel install --audit  install in audit mode (log only, never blocks)
+sentinel install --agent <name>  print the hook config for codex / gemini / crush / generic
+sentinel install --result-scan   also register the PostToolUse result-secret hook (opt-in)
 sentinel uninstall        remove hooks
-sentinel evaluate         evaluate a tool call (called by the hook)
+sentinel evaluate [--agent <name>]  evaluate a tool call (called by the hook)
+sentinel post-evaluate    scan a tool RESULT for secret shapes (PostToolUse hook; detection only)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
 sentinel verify           replay pinned attacks through the policy, assert each is caught
 sentinel doctor [--strict] validate the install chain + probe liveness. the canary spawns the hooked binary itself and asserts its own deny, so a no-op shim can't fake healthy
+sentinel audit-mcp [--strict]  enumerate configured MCP servers, flag new/changed ones (read-only)
 sentinel policy-diff      show which bundled-default rules your policy is missing (read-only)
 sentinel policy-lint      static-check a policy for dead rules, bad regexes, broad allows
 sentinel status           show config, hooks, policy summary

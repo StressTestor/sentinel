@@ -1,6 +1,6 @@
 [package]
 name = "sentinel-guard"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "runtime defense for CLI AI agents: intercepts tool calls before execution and enforces security policy"
 license = "MIT OR Apache-2.0"

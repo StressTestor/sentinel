@@ -1,4 +1,5 @@
 mod audit;
+mod audit_mcp;
 mod audit_trail;
 mod check;
 #[allow(dead_code)]
@@ -14,6 +15,7 @@ mod install;
 mod lint;
 mod policy;
 mod policy_diff;
+mod post_evaluate;
 mod preflight;
 mod selfprotect;
 mod verify;
@@ -34,14 +36,15 @@ async fn main() {
     let result = match cli.command {
         Command::Audit(args) => audit::run(args).await,
         Command::Install(args) => {
-            install::run_install(args.audit)
+            install::run_install(args.audit, args.result_scan, &args.agent)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
         Command::Uninstall => {
             install::run_uninstall()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
-        Command::Evaluate(args) => evaluate::run(args.canary),
+        Command::Evaluate(args) => evaluate::run(args.canary, &args.agent),
+        Command::PostEvaluate => post_evaluate::run(),
         Command::Wrap(args) => wrap::run_wrap(&args.agent_command),
         Command::CorpusUpdate => {
             println!("sentinel corpus update — not yet implemented");
@@ -54,6 +57,7 @@ async fn main() {
         Command::Doctor(args) => doctor::run(args),
         Command::PolicyDiff(args) => policy_diff::run(args),
         Command::PolicyLint(args) => lint::run(args),
+        Command::AuditMcp(args) => audit_mcp::run(args),
     };
 
     if let Err(e) = result {
