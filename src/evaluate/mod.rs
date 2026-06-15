@@ -61,7 +61,37 @@ impl HookOutput {
 ///     the live hook in audit mode emits `{}` (it never blocks), which would
 ///     leave the probe blind to whether the decision path works at all.
 /// With `canary == false` the behavior is exactly the live hook's.
-pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// Which host agent's decision format `evaluate` emits. The decision pipeline is
+/// identical across agents — only the deny output shape differs. A block always
+/// also exits 2, the universal hard-block signal every supported agent honors,
+/// so even one that ignores the stdout JSON is covered.
+#[derive(Clone, Copy, PartialEq)]
+pub enum AgentFormat {
+    /// Nested `hookSpecificOutput.permissionDecision` JSON. Claude Code, and
+    /// OpenAI Codex CLI — whose PreToolUse output contract is byte-for-byte the
+    /// same (`~/.codex/config.toml` `[[hooks.PreToolUse]]`).
+    ClaudeCode,
+    /// `{"decision":"<token>","reason":...}` + exit 2. token `deny` for Gemini
+    /// CLI (`BeforeTool`, `~/.gemini/settings.json`) and Crush (`PreToolUse`);
+    /// `block` for the documented generic contract (also Codex's legacy form).
+    Decision(&'static str),
+}
+
+impl AgentFormat {
+    pub fn from_name(name: &str) -> AgentFormat {
+        match name {
+            // Codex's PreToolUse output is identical to Claude Code's nested shape
+            "claude-code" | "codex" => AgentFormat::ClaudeCode,
+            // Gemini CLI / Crush accept the {"decision":"deny",...} form
+            "gemini" | "crush" => AgentFormat::Decision("deny"),
+            // the documented generic contract (also accepted by Codex's legacy form)
+            _ => AgentFormat::Decision("block"),
+        }
+    }
+}
+
+pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let format = AgentFormat::from_name(agent);
     // Load the policy FIRST, so a degraded input (empty / unparseable stdin) can
     // honor the policy's on_failure posture instead of a hard-coded allow.
     let policy_path = resolve_policy_path();
@@ -70,7 +100,7 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => {
             tracing::error!("failed to load policy: {e}");
             // can't load policy → can't make a safe decision → deny (and exit 2)
-            deny_and_exit(format!("policy load failed: {e}"));
+            deny_and_exit(format!("policy load failed: {e}"), format);
         }
     };
 
@@ -78,11 +108,11 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
         // a read error is also an un-inspectable input, not a free pass
-        degraded(&engine, "failed to read stdin");
+        degraded(&engine, "failed to read stdin", format);
     }
 
     if input.trim().is_empty() {
-        degraded(&engine, "empty input");
+        degraded(&engine, "empty input", format);
     }
 
     // Parse the hook input. A payload sentinel can't understand is NOT a free
@@ -90,7 +120,7 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
     let hook_input = match serde_json::from_str::<HookInput>(&input) {
         Ok(hi) => hi,
         Err(e) => {
-            degraded(&engine, &format!("unparseable hook input: {e}"));
+            degraded(&engine, &format!("unparseable hook input: {e}"), format);
         }
     };
 
@@ -179,6 +209,7 @@ pub fn run(canary: bool) -> Result<(), Box<dyn std::error::Error>> {
             decision
                 .reason
                 .unwrap_or_else(|| "blocked by sentinel policy".into()),
+            format,
         ),
         Action::Warn => {
             // warn = allow but log prominently
@@ -240,9 +271,14 @@ fn escalate_injected_hook(
 /// it parses stdout*, so this is belt-and-suspenders against the output-contract
 /// drift that silently disarmed every block in 0.2.0 (the flat-JSON bug): even
 /// if a future Claude Code ignores the JSON shape entirely, exit 2 still blocks.
-fn deny_and_exit(reason: impl Into<String>) -> ! {
+fn deny_and_exit(reason: impl Into<String>, format: AgentFormat) -> ! {
     let reason = reason.into();
-    print_output(&HookOutput::deny(reason.clone()));
+    match format {
+        AgentFormat::ClaudeCode => print_output(&HookOutput::deny(reason.clone())),
+        AgentFormat::Decision(token) => {
+            println!("{}", serde_json::json!({"decision": token, "reason": reason}));
+        }
+    }
     let _ = io::stdout().flush(); // ensure the JSON lands before we exit
     eprintln!("sentinel: blocked — {reason}");
     std::process::exit(2);
@@ -252,14 +288,14 @@ fn deny_and_exit(reason: impl Into<String>) -> ! {
 /// unparseable JSON). Audit mode never blocks; otherwise the policy's
 /// `on_failure` posture governs — "closed" (the default) denies rather than
 /// waving an un-inspectable call through, "open" allows with a warning.
-fn degraded(engine: &PolicyEngine, reason: &str) -> ! {
+fn degraded(engine: &PolicyEngine, reason: &str, format: AgentFormat) -> ! {
     if engine.is_audit_mode() || !engine.fail_closed() {
         tracing::warn!("{reason} — allowing (audit/fail-open)");
         print_output(&HookOutput::allow());
         std::process::exit(0);
     } else {
         tracing::warn!("{reason} — denying (fail-closed)");
-        deny_and_exit(format!("{reason} — failing closed"));
+        deny_and_exit(format!("{reason} — failing closed"), format);
     }
 }
 

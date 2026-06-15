@@ -36,14 +36,14 @@ async fn main() {
     let result = match cli.command {
         Command::Audit(args) => audit::run(args).await,
         Command::Install(args) => {
-            install::run_install(args.audit, args.result_scan)
+            install::run_install(args.audit, args.result_scan, &args.agent)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
         Command::Uninstall => {
             install::run_uninstall()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         }
-        Command::Evaluate(args) => evaluate::run(args.canary),
+        Command::Evaluate(args) => evaluate::run(args.canary, &args.agent),
         Command::PostEvaluate => post_evaluate::run(),
         Command::Wrap(args) => wrap::run_wrap(&args.agent_command),
         Command::CorpusUpdate => {

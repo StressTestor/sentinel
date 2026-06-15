@@ -4,7 +4,7 @@ last updated: 2026-06-14
 
 ## overview
 
-sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls before execution and enforces security policy. the primary adapter hooks into Claude Code's PreToolUse system via `~/.claude/settings.json`. a generic pty proxy adapter covers agents without native hooks.
+sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls before execution and enforces security policy. the engine is agent-agnostic; per-agent adapters translate each host's hook contract. the primary adapter hooks into Claude Code's PreToolUse system via `~/.claude/settings.json`; `evaluate --agent <name>` also speaks OpenAI Codex CLI (byte-for-byte the same nested output), Gemini CLI / Crush (`{"decision":"deny"}`), and a generic exit-code contract for any command-hook agent. a block always also exits 2, the universal hard-block signal. (a pty proxy for agents with no hook at all is intentionally unbuilt — it would see terminal bytes, not structured tool calls.)
 
 ## stack
 

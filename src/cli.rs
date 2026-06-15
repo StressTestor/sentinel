@@ -81,6 +81,13 @@ pub struct EvaluateArgs {
     /// audit trail. not for use as the live hook command.
     #[arg(long, default_value_t = false)]
     pub canary: bool,
+
+    /// host agent whose decision format to emit. `claude-code` (default) replies
+    /// with the nested PreToolUse hookSpecificOutput JSON; `generic` replies with
+    /// a simple `{"decision":"block","reason":...}` and relies on exit code 2.
+    /// Both signal a block via exit 2, so any agent honoring exit codes is covered.
+    #[arg(long, default_value = "claude-code")]
+    pub agent: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -169,6 +176,13 @@ pub struct InstallArgs {
     /// layer, so it is off by default.
     #[arg(long = "result-scan", default_value_t = false)]
     pub result_scan: bool,
+
+    /// host agent to install for. `claude-code` (default) writes the PreToolUse
+    /// hook into ~/.claude/settings.json. any other name prints the generic
+    /// integration contract (sentinel can't auto-configure an arbitrary agent)
+    /// and writes the default policy.
+    #[arg(long, default_value = "claude-code")]
+    pub agent: String,
 }
 
 #[derive(clap::Args, Debug)]

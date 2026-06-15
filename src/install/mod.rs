@@ -1,7 +1,7 @@
 pub mod defaults;
 pub mod hooks;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -14,10 +14,16 @@ pub enum InstallError {
     BinaryNotFound,
 }
 
-pub fn run_install(audit: bool, result_scan: bool) -> Result<(), InstallError> {
+pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), InstallError> {
     // verify sentinel binary is in PATH
     let sentinel_path = which_sentinel()?;
     println!("sentinel binary: {}", sentinel_path.display());
+
+    // Non-Claude-Code agents: sentinel can't auto-configure an arbitrary agent's
+    // hook system, so print the generic integration contract and write the policy.
+    if agent != "claude-code" {
+        return install_generic(&sentinel_path, audit, agent);
+    }
 
     // install hooks into ~/.claude/settings.json
     let settings_path = claude_settings_path();
@@ -60,6 +66,73 @@ pub fn run_install(audit: bool, result_scan: bool) -> Result<(), InstallError> {
     println!();
     println!("done. sentinel is now active.");
 
+    Ok(())
+}
+
+/// Print the generic integration contract for an agent sentinel can't
+/// auto-configure, and write the default policy so the engine has rules. The
+/// engine is agent-agnostic; any agent that runs a command hook and honors exit
+/// codes can drive it via `sentinel evaluate --agent generic`.
+fn install_generic(sentinel_path: &Path, audit: bool, agent: &str) -> Result<(), InstallError> {
+    let policy_path = sentinel_dir().join("policy.toml");
+    let mode = if audit { "audit" } else { "enforce" };
+    defaults::write_default_policy(&policy_path, mode)?;
+    let bin = sentinel_path.display();
+
+    // Per-agent integration snippets. These are printed (not auto-written): the
+    // engine is verified, but each agent's config format is not live-tested here,
+    // so the user pastes a known-good snippet rather than risk a corrupted config.
+    println!();
+    match agent {
+        "codex" => {
+            println!("OpenAI Codex CLI — add to ~/.codex/config.toml:");
+            println!();
+            println!("    [[hooks.PreToolUse]]");
+            println!("    matcher = \".*\"");
+            println!("    [[hooks.PreToolUse.hooks]]");
+            println!("    type = \"command\"");
+            println!("    command = \"{bin} evaluate --agent codex\"");
+            println!();
+            println!("(Codex's PreToolUse output contract matches sentinel's exactly.)");
+        }
+        "gemini" => {
+            println!("Gemini CLI — add to ~/.gemini/settings.json under \"hooks\":");
+            println!();
+            println!("    \"BeforeTool\": [{{ \"matcher\": \".*\", \"hooks\": [");
+            println!("      {{ \"type\": \"command\", \"command\": \"{bin} evaluate --agent gemini\" }}");
+            println!("    ] }}]");
+        }
+        "crush" => {
+            println!("Crush — add to crush.json under \"hooks\":");
+            println!();
+            println!("    \"PreToolUse\": [{{ \"name\": \"sentinel\", \"matcher\": \".*\",");
+            println!("      \"command\": \"{bin} evaluate --agent crush\" }}]");
+        }
+        "opencode" => {
+            println!("opencode has no external command hook. drop a JS plugin shim at");
+            println!("~/.config/opencode/plugin/sentinel.ts that shells out to:");
+            println!();
+            println!("    {bin} evaluate --agent generic");
+            println!();
+            println!("and throws on a non-zero exit (deny).");
+        }
+        "aider" => {
+            println!("Aider has no scriptable pre-tool hook, so it is not supported:");
+            println!("its only pre-execution gate is an interactive Y/N, and lint/test");
+            println!("commands run AFTER edits and cannot block. (honest non-coverage.)");
+        }
+        _ => {
+            println!("'{agent}' is not auto-configured. wire it into the agent's");
+            println!("pre-tool-execution command hook with:");
+            println!();
+            println!("    {bin} evaluate --agent generic");
+            println!();
+            println!("contract: tool call as JSON on stdin ({{\"tool_name\",\"tool_input\"}});");
+            println!("exit 2 + {{\"decision\":\"block\",\"reason\":...}} = block, exit 0 = allow.");
+        }
+    }
+    println!();
+    println!("default policy written to {} (mode: {mode}).", policy_path.display());
     Ok(())
 }
 
