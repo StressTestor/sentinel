@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-06-14
+last updated: 2026-06-15
 
 ## overview
 
@@ -54,9 +54,9 @@ sentinel/
 │   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> selfprotect -> preflight -> stdout JSON); --canary dry-run for doctor
 │   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema; command extraction incl. exec-named MCP tools; explicit `cwd` field
 │   ├── selfprotect/
-│   │   └── mod.rs          content-aware escalation: block writes that remove sentinel's own hook entry
+│   │   └── mod.rs          content-aware escalation: block a config write that removes sentinel's hook OR injects a malicious autorun command (hook / MCP server) across any agent + MCP config (JSON/TOML)
 │   ├── preflight/
-│   │   └── mod.rs          install-preflight: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm TTP
+│   │   └── mod.rs          install-preflight: on an install-like command, resolve the effective install dir (follow literal cd / --prefix) and inspect that package.json's lifecycle scripts + dep sources for the worm TTP
 │   ├── check/
 │   │   └── mod.rs          sentinel check: dry-run/explain a tool call (read-only)
 │   ├── verify/
@@ -67,6 +67,10 @@ sentinel/
 │   │   └── mod.rs          sentinel policy-diff: default rules missing from a policy (read-only)
 │   ├── lint/
 │   │   └── mod.rs          sentinel policy-lint: dead-rule / bad-regex / broad-allow checks
+│   ├── post_evaluate/
+│   │   └── mod.rs          sentinel post-evaluate: PostToolUse result-secret detection + nudge (opt-in, detection only)
+│   ├── audit_mcp/
+│   │   └── mod.rs          sentinel audit-mcp: read-only TOFU enumerator of configured MCP servers (flags new/changed launch commands)
 │   ├── install/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
 │   │   ├── hooks.rs        read/merge + atomic (temp+rename) write of ~/.claude/settings.json
@@ -113,6 +117,8 @@ Tool call arrives (via PreToolUse hook)
          tool input -> ToolCall (command + canonicalized paths, extracted for
          every tool type, not just "Bash"; paths are ALSO mined from the
          shell-de-obfuscated command). deny-first evaluation:
+           - deny tools: glob over the tool NAME (e.g. `mcp__evil__*`), so an MCP
+             server/tool can be blocked/warned by name. opt-in (no default rule).
            - deny paths: glob, with ~ / $HOME / symlink / case canonicalization,
              recursive directory coverage, glob-candidate de-globbing, and brace
              expansion ({a,b} -> both real files)
@@ -275,6 +281,11 @@ Claude Code decides to use a tool
      │
      └── stdout (deny):  { "hookSpecificOutput": { "hookEventName": "PreToolUse",
      │                       "permissionDecision": "deny", "permissionDecisionReason": ... } }
+     │                    AND exit code 2 — the universal hard-block signal, honored
+     │                    even if the JSON shape is ignored (belt-and-suspenders
+     │                    against the 0.2.0 silent-death). `--agent generic|gemini`
+     │                    emit `{"decision":"block|deny",...}` instead; exit 2 is the
+     │                    constant across every adapter.
      └── stdout (allow): {}   (no decision → defer to Claude Code's normal flow)
 ```
 
@@ -341,4 +352,4 @@ CI runs the AD-5 network-call lint (`scripts/ad5-network-lint.sh` — enforces t
 
 ---
 
-last updated: 2026-06-14 by StressTestor (round-two attacker-audit hardening: enforce-by-default install with --audit opt-out + non-overwrite blast-radius guard; held-warn engine ordering so a deny.commands BLOCK overrides a deny.paths WARN; shell de-obfuscation (ANSI-C/IFS/brace) wired into path extraction + command matching; broadened credential stores, no-network-pipe exfil, guard-disarm (binary tamper verbs, sentinel uninstall, config-dir deletion, shell settings-strip), DNS/git/egress channels, interpreter runtime-path cred reads; sentinel check now mirrors selfprotect+preflight; verify gate 20 -> 41 cases. prior: install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-15 by StressTestor (v0.4.0: exit-2 second enforcement channel; multi-agent adapters via `evaluate --agent` (claude-code/codex/gemini/crush/generic) + `install --agent` host snippets; `post-evaluate` PostToolUse result-secret detection (opt-in); `deny.tools` name-match + `audit-mcp` TOFU enumerator; autorun-injection guard generalized across every agent + MCP config (JSON/TOML); install-preflight follows the effective install dir (literal cd / --prefix). two octo-debate passes drove the autorun-injection generalization + preflight install-dir resolution. prior round-two attacker-audit hardening: enforce-by-default install with --audit opt-out + non-overwrite blast-radius guard; held-warn engine ordering so a deny.commands BLOCK overrides a deny.paths WARN; shell de-obfuscation (ANSI-C/IFS/brace) wired into path extraction + command matching; broadened credential stores, no-network-pipe exfil, guard-disarm (binary tamper verbs, sentinel uninstall, config-dir deletion, shell settings-strip), DNS/git/egress channels, interpreter runtime-path cred reads; sentinel check now mirrors selfprotect+preflight; verify gate 20 -> 41 cases. prior: install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)

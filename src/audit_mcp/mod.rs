@@ -45,10 +45,12 @@ pub fn run(args: AuditMcpArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // drift = servers absent from the prior baseline (new) or whose launch
-    // command changed. skipped on the first run (nothing to compare against).
+    // command changed. skipped on the first run (nothing to compare against) AND
+    // when --update was passed (the user just accepted the current set as trusted,
+    // so there is no drift to report or --strict-fail on).
     let mut new_servers = Vec::new();
     let mut changed = Vec::new();
-    if !first_run {
+    if !first_run && !args.update {
         for s in &servers {
             let key = format!("{}@{}", s.name, s.source);
             match prior.get(&key) {
