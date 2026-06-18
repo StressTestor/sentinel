@@ -35,9 +35,7 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-aho-corasick = "1"
 regex = "1"
-bincode = "1"
 anyhow = "1"
 unicode-normalization = "0.1"
 html-escape = "0.2"

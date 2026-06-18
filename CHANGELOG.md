@@ -6,6 +6,16 @@ versioning.
 
 ## [Unreleased]
 
+### Removed
+- **Dead tier scaffolding.** Deleted the unwired Tier-2 heuristic analyzer
+  (`src/heuristic/`) and Tier-3 LLM classifier stub (`src/classifier/`), neither
+  of which was ever on the `evaluate` hot path. The heuristic tier's drift signal
+  only fired on calls Tier 1 already blocked, and a model in the decision path
+  conflicts with the zero-false-positive and local/offline guarantees. Sentinel
+  is now one deterministic tier by design. Dropped the heuristic-only
+  `aho-corasick` and `bincode` dependencies. No behavior change: enforcement was
+  already Tier-1-only.
+
 ## [0.4.0] - 2026-06-15
 
 Hardening + reach: a second enforcement channel, the injection guard generalized
