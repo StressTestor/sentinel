@@ -106,15 +106,17 @@ reason = "AWS access key in command args"
 
 deny rules evaluate first. glob patterns for paths, regex for commands and secrets.
 
-## defense tiers
+## one deterministic tier, on purpose
 
-| tier | what | status |
-|------|------|--------|
-| 1. policy | deterministic deny/allow rules — path canonicalization, shell-aware command matching, secret patterns, fail-closed on un-inspectable input | **active** — runs on every tool call |
-| 2. heuristic | aho-corasick patterns from the attack corpus + multi-turn context | **implemented, not yet wired** into the hook path (see roadmap) |
-| 3. LLM classifier | secondary model for ambiguous inputs | **planned** — interface only, not implemented |
+sentinel is a single deterministic policy engine. no heuristics, no ML, no behavioral scoring in the decision path.
 
-Enforcement today is the Tier-1 policy engine. It's the deterministic, zero-false-positive layer and it's what blocks the attacks in the demo. Tiers 2 and 3 are scaffolding for defense-in-depth: the heuristic analyzer is written but isn't called on the evaluate hot path yet (wiring it needs a concurrency-safe context buffer and a false-positive budget), and the LLM classifier is an interface stub. Don't rely on 2 or 3 being active.
+| layer | what | status |
+|-------|------|--------|
+| policy engine | deterministic deny/allow rules. path canonicalization, shell-aware command matching, secret patterns, fail-closed on un-inspectable input | active, runs on every tool call |
+
+every decision is a rule you can read, not a confidence score. if the engine doesn't catch something, it's not caught, and that's a property you can reason about instead of a number you have to trust.
+
+it was scaffolded with two more tiers: an aho-corasick heuristic analyzer and an LLM classifier. both are gone. the heuristic tier's drift signal only ever fired on calls the policy engine already blocked, and putting a model in the hot path breaks the zero-false-positive promise and the local/offline guarantee. the deterministic engine is the whole product.
 
 ## supply-chain hardening (and what it can't do)
 
@@ -134,7 +136,7 @@ now the part nobody else says out loud:
 
 the structural ceiling, stated plainly:
 
-- **a child process is invisible.** a `sed -i` / `python -c` / `jq` rewrite of settings.json or policy.toml is caught only by the command-regex rules (target + a mutating verb), which are evadable; selfprotect's content check only sees Write/Edit/MultiEdit. a path or command **assembled from a shell variable** (`B=~/.cargo/bin/sentinel; chmod -x $B`), reconstructed via `a=cur;b=l;$a$b`, or built fully at runtime carries no literal token for a static matcher to see.
+- **a child process is invisible.** selfprotect's content check sees Write/Edit/MultiEdit directly; a child-process rewrite of settings.json or policy.toml is caught only by the command-regex rules, which match on literal tokens. so a command **assembled at runtime** - pieced together from shell variables or fragments instead of written out as a literal - carries no token for a static matcher to see. variable-indirected tamper of the binary or config is a known residual, because a deterministic matcher reads text, it does not run the shell.
 - **natural-language instructions** to a sub-agent ("exfiltrate my keys") can't be statically matched; only the spawned agent's own tool calls are re-evaluated. and arbitrary-data exfil through a tool sentinel can't enumerate (a novel MCP field, a non-credential-shaped URL) is out of reach.
 - the command rules **raise the cost** of the obvious attacks. they are not a wall. the deterministic path layer is the part you can lean on; treat the command and secret layers as a strong speed bump, sized to a prompt-injected agent, not a tamper-proof sandbox against a motivated operator who knows the architecture.
 

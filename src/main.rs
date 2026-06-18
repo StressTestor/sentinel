@@ -2,15 +2,11 @@ mod audit;
 mod audit_mcp;
 mod audit_trail;
 mod check;
-#[allow(dead_code)]
-mod classifier;
 mod cli;
 mod doctor;
 mod common;
 mod corpus;
 mod evaluate;
-#[allow(dead_code)]
-mod heuristic;
 mod install;
 mod lint;
 mod policy;

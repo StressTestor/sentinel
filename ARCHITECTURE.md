@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-06-15
+last updated: 2026-06-16
 
 ## overview
 
@@ -14,10 +14,8 @@ sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls b
 | CLI | clap | 4.x |
 | serialization | serde, toml, serde_json | 1.x |
 | async runtime | tokio | 1.x |
-| pattern matching | aho-corasick | 1.x |
 | regex | regex | 1.x |
 | text normalization | unicode-normalization, html-escape | 0.1 / 0.2 |
-| context persistence | bincode | 1.x |
 | terminal output | colored | 2.x |
 | error handling | thiserror, anyhow | 2.x / 1.x |
 | logging | tracing + tracing-subscriber | 0.1 / 0.3 |
@@ -75,12 +73,6 @@ sentinel/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
 │   │   ├── hooks.rs        read/merge + atomic (temp+rename) write of ~/.claude/settings.json
 │   │   └── defaults.rs     default policy.toml generator
-│   ├── heuristic/
-│   │   ├── mod.rs          Tier 2 heuristic analyzer
-│   │   ├── automata.rs     aho-corasick pattern compilation
-│   │   └── context.rs      file-backed ring buffer (bincode)
-│   ├── classifier/
-│   │   └── mod.rs          Tier 3 LLM classifier stub (Ollama/cloud)
 │   ├── wrap/
 │   │   └── mod.rs          generic pty proxy adapter stub
 │   └── audit_trail/
@@ -107,13 +99,22 @@ sentinel/
 
 ### defense pipeline
 
-Enforcement today is **Tier 1 only**. Tiers 2 and 3 exist in the tree but are
-not wired into the `evaluate` hot path — see status below.
+Sentinel is **one deterministic tier, by design**. There is no heuristic scoring
+and no ML in the decision path. The engine is the whole product: every decision
+is a rule you can read, not a confidence number. If the policy engine does not
+catch something, it is not caught, and that is a property you can reason about.
+
+(History: the project was scaffolded with a Tier-2 aho-corasick heuristic
+analyzer and a Tier-3 LLM classifier stub. Both were removed. The heuristic
+tier's drift signal only ever fired on calls Tier 1 already blocked, and a model
+in the hot path would break both the zero-false-positive promise and the
+local/offline guarantee. The 3 deterministic checks worth keeping from the
+heuristic branch were extracted into Tier 1 before it was archived.)
 
 ```
 Tool call arrives (via PreToolUse hook)
      │
-     └── Tier 1: Policy Engine  [ACTIVE — runs on every call]
+     └── Policy Engine  [the only tier; runs on every call]
          tool input -> ToolCall (command + canonicalized paths, extracted for
          every tool type, not just "Bash"; paths are ALSO mined from the
          shell-de-obfuscated command). deny-first evaluation:
@@ -143,22 +144,12 @@ Tool call arrives (via PreToolUse hook)
          scoped to the secret-content path, where the consumer DOES decode it.
          un-inspectable input (empty / unparseable stdin) fails per on_failure
          ("closed" by default → deny). zero false positives by design.
-
-   Tier 2: Heuristic Analyzer  [IMPLEMENTED, NOT WIRED]
-         aho-corasick over the PromptPressure corpus + a file-backed multi-turn
-         context buffer. `src/heuristic/` is complete but has no call site on
-         the evaluate path. Wiring it needs a concurrency-safe context buffer
-         (parallel hooks race on the ring-buffer file) and a false-positive
-         budget. Tracked as a follow-up.
-
-   Tier 3: LLM Classifier  [PLANNED — interface stub]
-         `src/classifier/` defines the interface; `classify()` returns None.
-         not implemented.
 ```
 
-> Honesty note: the policy engine (Tier 1) is the line of defense. The earlier
-> "three-tier defense" framing oversold tiers 2/3 — they're scaffolding, not
-> active mitigations. Treat anything Tier 1 doesn't catch as not caught.
+> Honesty note: the policy engine is the line of defense. Treat anything it does
+> not catch as not caught. There is no second layer to fall back on, and that is
+> deliberate - a deterministic block you can audit beats a probabilistic one you
+> can't.
 
 ### default policy coverage
 
@@ -252,12 +243,16 @@ preflight reads the top-level `package.json` in the call's `cwd` and inspects it
 > transitive dep. Pure core (`inspect`/`is_install_like`) is unit-tested without
 > the filesystem; the `apply` wrapper does the cwd read.
 >
-> **Second honest limit:** the cwd preflight inspects is the **session** cwd —
-> the one the hook hands us — not necessarily the directory the install runs in.
-> A command that changes the install directory (`cd subdir && npm install`,
-> `npm install --prefix <dir>`, `npm i -C <dir>`) installs from a manifest
-> preflight did not inspect, or none at all. The hook only provides the session
-> cwd; preflight does not follow `cd` or `--prefix`, so this evasion is inherent.
+> **Second honest limit:** preflight resolves the directory the install actually
+> runs in by following a single literal `cd <dir>` or cwd flag
+> (`--prefix`/`-C`/`--cwd`/`--dir`) off the session cwd. What it will not do is
+> guess at a directory it cannot prove: a non-literal target (a shell variable, a
+> glob, a command substitution) or more than one directory change makes the
+> install dir ambiguous, so preflight skips rather than inspect a manifest it
+> can't be sure is the right one. Skipping errs toward not blocking a normal
+> install, never toward reading an attacker-chosen manifest. So the residual is
+> "in an ambiguous case I see no manifest", not "I can be pointed at the wrong
+> one".
 
 Structural limit, by design: the PreToolUse hook only sees the agent's own tool
 calls. The worm's real payload runs in npm/pip lifecycle-script child processes,
@@ -352,4 +347,4 @@ CI runs the AD-5 network-call lint (`scripts/ad5-network-lint.sh` — enforces t
 
 ---
 
-last updated: 2026-06-15 by StressTestor (v0.4.0: exit-2 second enforcement channel; multi-agent adapters via `evaluate --agent` (claude-code/codex/gemini/crush/generic) + `install --agent` host snippets; `post-evaluate` PostToolUse result-secret detection (opt-in); `deny.tools` name-match + `audit-mcp` TOFU enumerator; autorun-injection guard generalized across every agent + MCP config (JSON/TOML); install-preflight follows the effective install dir (literal cd / --prefix). two octo-debate passes drove the autorun-injection generalization + preflight install-dir resolution. prior round-two attacker-audit hardening: enforce-by-default install with --audit opt-out + non-overwrite blast-radius guard; held-warn engine ordering so a deny.commands BLOCK overrides a deny.paths WARN; shell de-obfuscation (ANSI-C/IFS/brace) wired into path extraction + command matching; broadened credential stores, no-network-pipe exfil, guard-disarm (binary tamper verbs, sentinel uninstall, config-dir deletion, shell settings-strip), DNS/git/egress channels, interpreter runtime-path cred reads; sentinel check now mirrors selfprotect+preflight; verify gate 20 -> 41 cases. prior: install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-06-16 by StressTestor (tier gut: removed the unwired Tier-2 heuristic analyzer (`src/heuristic/`) and Tier-3 LLM classifier stub (`src/classifier/`) plus their heuristic-only deps (`aho-corasick`, `bincode`); sentinel is now one deterministic tier by design, no dead scaffolding in the tree. v0.4.0: exit-2 second enforcement channel; multi-agent adapters via `evaluate --agent` (claude-code/codex/gemini/crush/generic) + `install --agent` host snippets; `post-evaluate` PostToolUse result-secret detection (opt-in); `deny.tools` name-match + `audit-mcp` TOFU enumerator; autorun-injection guard generalized across every agent + MCP config (JSON/TOML); install-preflight follows the effective install dir (literal cd / --prefix). two octo-debate passes drove the autorun-injection generalization + preflight install-dir resolution. prior round-two attacker-audit hardening: enforce-by-default install with --audit opt-out + non-overwrite blast-radius guard; held-warn engine ordering so a deny.commands BLOCK overrides a deny.paths WARN; shell de-obfuscation (ANSI-C/IFS/brace) wired into path extraction + command matching; broadened credential stores, no-network-pipe exfil, guard-disarm (binary tamper verbs, sentinel uninstall, config-dir deletion, shell settings-strip), DNS/git/egress channels, interpreter runtime-path cred reads; sentinel check now mirrors selfprotect+preflight; verify gate 20 -> 41 cases. prior: install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
