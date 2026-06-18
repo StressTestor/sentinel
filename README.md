@@ -20,9 +20,9 @@ there's a single HTML page at [`docs/target.html`](docs/target.html) styled to l
 SENTINEL=./target/release/sentinel ./docs/run-attacks.sh
 ```
 
-![20 attacks, 20 blocks](docs/live-demo.gif)
+![24 attacks, 24 blocks](docs/live-demo.gif)
 
-20/20 attacks blocked at the hook layer, before any tool ran. full write-up and attack matrix at [`docs/index.html`](docs/index.html) (or [stresstestor.github.io/sentinel](https://stresstestor.github.io/sentinel/)).
+24/24 attacks blocked at the hook layer, before any tool ran, including the v0.4.0 de-obfuscation cases (ANSI-C `$'\xHH'`, `${IFS}`, brace expansion) and a guard-disarm attempt. the recording closes on the v0.4.0 headline features: MCP `deny.tools` policing and the exit-2 enforcement channel. full write-up and attack matrix at [`docs/index.html`](docs/index.html) (or [stresstestor.github.io/sentinel](https://stresstestor.github.io/sentinel/)). same clip as [mp4](docs/live-demo.mp4).
 
 ## the problem
 
