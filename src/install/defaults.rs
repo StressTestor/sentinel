@@ -938,9 +938,9 @@ reason = "private key material"
 # MUST stay AFTER the private-key rule above: a GCP service-account file matches
 # both the private-key rule (block) and the gcp_sa rule below (warn); first match
 # wins, so the private key has to be reached first or it silently downgrades.
-# Also note deny.paths is evaluated before deny.secrets: a secret written INTO a
-# warn-tier path (e.g. ~/.claude/settings.json) returns warn, not block - the path
-# rule matches first. This is intended and mirrors the existing */.env behavior.
+# Also note deny.paths warn matches are held while deny.secrets is evaluated:
+# a block-tier secret written INTO a warn-tier path still blocks, so agent
+# config/MCP warning surfaces cannot downgrade credential leaks to allow.
 [[deny.secrets]]
 pattern = 'AccountKey=[A-Za-z0-9+/]{{86}}=='
 action = "block"
@@ -1116,15 +1116,17 @@ mod tests {
     }
 
     #[test]
-    fn secret_in_ordinary_path_blocks_but_warn_path_shadows() {
-        // A realistic Write carries a path AND content. deny.paths is evaluated
-        // before deny.secrets, so the SAME secret resolves differently by target:
+    fn secret_blocks_even_in_warn_path() {
+        // A realistic Write carries a path AND content. Warn-tier path matches
+        // are held while deny.secrets is evaluated, so the same block-tier
+        // secret blocks whether it is written to an ordinary file or a warn path.
         let azure = format!("AccountKey={}==", "A".repeat(86));
-        // into an ordinary file → the block secret rule fires
         assert_eq!(action_of(&write_call("./src/cfg.rs", &azure)), Action::Block);
-        // into a warn-tier path → the path rule matches first → warn, not block.
-        // Intended (mirrors */.env); asserting reality, not forcing it to block.
-        assert_eq!(action_of(&write_call("~/.claude/settings.json", &azure)), Action::Warn);
+        assert_eq!(action_of(&write_call("~/.claude/settings.json", &azure)), Action::Block);
+        assert_eq!(action_of(&write_call("./repo/.mcp.json", &azure)), Action::Block);
+        assert_eq!(action_of(&write_call("./repo/.claude/hooks/start.sh", &azure)), Action::Block);
+        assert_eq!(action_of(&write_call("./repo/.claude/skills/evil/SKILL.md", &azure)), Action::Block);
+        assert_eq!(action_of(&write_call("./repo/.claude/agents/evil.md", &azure)), Action::Block);
     }
 
     // ── credential-content warns (lower-confidence; must not block ordinary code)
