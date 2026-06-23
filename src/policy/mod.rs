@@ -409,7 +409,7 @@ action = "warn"
 reason = "review MCP shell tool"
 
 [[deny.commands]]
-pattern = 'rm\s+-rf\s+/(\s|$|[^~])'
+pattern = 'rm\s+-rf\s+(?:[^\s]+\s+)*/'
 action = "block"
 reason = "recursive root deletion"
 "#;
