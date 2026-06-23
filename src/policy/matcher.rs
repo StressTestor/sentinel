@@ -11,7 +11,7 @@ pub fn matches_path(pattern: &str, path: &str) -> bool {
 /// (direct children only) so a narrow allow-list isn't silently widened — use
 /// `/**` for an intentional recursive allow. Use this for allow.paths.
 pub fn matches_allow_path(pattern: &str, path: &str) -> bool {
-    matches_path_env(pattern, path, false)
+    matches_path_env_all_expansions(pattern, path, false)
 }
 
 /// Match a tool NAME (e.g. `mcp__server__tool`, `Bash`) against a deny.tools
@@ -30,6 +30,12 @@ fn matches_path_env(pattern: &str, path: &str, recursive_dir: bool) -> bool {
     let home = std::env::var("HOME").unwrap_or_default();
     let user = std::env::var("USER").unwrap_or_default();
     matches_path_resolved(pattern, path, &home, &user, recursive_dir)
+}
+
+fn matches_path_env_all_expansions(pattern: &str, path: &str, recursive_dir: bool) -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    matches_path_resolved_all_expansions(pattern, path, &home, &user, recursive_dir)
 }
 
 /// Resolve path equivalence, then match against the (home-expanded) glob.
@@ -53,11 +59,51 @@ fn matches_path_resolved(
     if regexes.is_empty() {
         return false;
     }
-    // brace-expand the candidate first (`/etc/{passwd,master.passwd}` reads both
-    // real files), then build the equivalent spellings of each expansion.
+    // Deny rules are existential: if any shell-expanded runtime path reaches a
+    // protected target, the rule must match.
+    let expansions = crate::common::shell::brace_expand(path, 64);
+    path_expansions_match_any(&regexes, &expanded_pattern, &expansions, home, user, recursive_dir)
+}
+
+/// Allow rules are universal across shell brace expansion: every runtime path
+/// produced by the token must be covered, otherwise one allowed expansion could
+/// hide another path outside a lockdown allow-list.
+fn matches_path_resolved_all_expansions(
+    pattern: &str,
+    path: &str,
+    home: &str,
+    user: &str,
+    recursive_dir: bool,
+) -> bool {
+    let expanded_pattern = lexical_normalize(&expand_home(pattern, home, user));
+    let regexes = pattern_regexes(&expanded_pattern, pattern, recursive_dir);
+    if regexes.is_empty() {
+        return false;
+    }
+    let expansions = crate::common::shell::brace_expand(path, 64);
+    expansions.iter().all(|p| {
+        path_expansions_match_any(
+            &regexes,
+            &expanded_pattern,
+            std::slice::from_ref(p),
+            home,
+            user,
+            recursive_dir,
+        )
+    })
+}
+
+fn path_expansions_match_any(
+    regexes: &[Regex],
+    expanded_pattern: &str,
+    paths: &[String],
+    home: &str,
+    user: &str,
+    recursive_dir: bool,
+) -> bool {
     let mut candidates = Vec::new();
-    for p in crate::common::shell::brace_expand(path, 64) {
-        candidates.extend(candidate_forms(&p, home, user));
+    for p in paths {
+        candidates.extend(candidate_forms(p, home, user));
     }
     // Fail-safe for a glob-bearing CANDIDATE (the demo bypass): a candidate that
     // itself carries shell glob metacharacters (`*`, `?`, `[`) dodges the anchored
@@ -73,7 +119,7 @@ fn matches_path_resolved(
     // so allow matching deliberately skips this branch. Non-globbed candidates
     // never enter this branch, so the normal path keeps EXACT current behavior.
     if recursive_dir && candidates.iter().any(|c| has_glob_meta(c)) {
-        let rule_literal = rule_literal_prefix(&expanded_pattern);
+        let rule_literal = rule_literal_prefix(expanded_pattern);
         if !rule_literal.is_empty() {
             let mut witnesses = Vec::new();
             for c in &candidates {
@@ -572,6 +618,25 @@ mod tests {
         // public allow entry point mirrors the strict semantics
         assert!(!matches_allow_path("/p/src/*", "/p/src/sub/evil.sh"));
         assert!(matches_allow_path("/p/src/*", "/p/src/main.rs"));
+    }
+
+    #[test]
+    fn deny_brace_expansion_matches_any_target_but_allow_requires_all() {
+        assert!(matches_path_resolved("/p/src/**", "{/p/src/main.rs,/tmp/secret}", "/h", "u", true));
+        assert!(!matches_path_resolved_all_expansions(
+            "/p/src/**",
+            "{/p/src/main.rs,/tmp/secret}",
+            "/h",
+            "u",
+            false
+        ));
+        assert!(matches_path_resolved_all_expansions(
+            "/p/src/**",
+            "{/p/src/main.rs,/p/src/lib.rs}",
+            "/h",
+            "u",
+            false
+        ));
     }
 
     #[test]
