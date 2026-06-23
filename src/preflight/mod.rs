@@ -279,30 +279,41 @@ pub fn apply(decision: PolicyDecision, command: Option<&str>, cwd: Option<&str>)
 ///   glob, command-substitution, quote) OR more than once (ambiguous) —
 ///   inspecting the session root then would be the WRONG manifest, so we skip.
 fn effective_install_dir(command: &str, cwd: Option<&str>) -> Option<PathBuf> {
-    match dir_change_targets(command).as_slice() {
+    match dir_change_targets_before_install(command).as_slice() {
         [] => cwd.map(PathBuf::from),
         [one] => resolve_dir(one, cwd),
         _ => None, // multiple/ambiguous directory changes — cannot prove
     }
 }
 
-/// The directory-change targets in a command: a `cd <dir>` at a command position
-/// and the package-manager cwd flags. Literalness is judged later in
-/// [`resolve_dir`]; the COUNT is what gates the ambiguous (>1) case.
-fn dir_change_targets(command: &str) -> Vec<String> {
-    let normalized = command.replace(['\n', '\r'], " ; ");
-    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+fn is_shell_separator(tok: &str) -> bool {
+    matches!(
+        tok,
+        "&&" | "||" | ";" | "|" | "&" | "(" | "{" | "then" | "do" | "else"
+    )
+}
+
+fn install_subcommand(pm: &str, tokens: &[&str], pm_idx: usize) -> bool {
+    let sub = tokens[pm_idx + 1..]
+        .iter()
+        .take_while(|t| !is_shell_separator(t))
+        .find(|t| !t.starts_with('-'))
+        .copied();
+    match (pm, sub) {
+        ("npm", Some(s)) => matches!(s, "install" | "i" | "ci" | "add"),
+        ("pnpm", Some(s)) => matches!(s, "install" | "i" | "add"),
+        ("yarn", Some(s)) => matches!(s, "install" | "add"),
+        ("yarn", None) => true,
+        ("bun", Some(s)) => matches!(s, "install" | "add"),
+        _ => false,
+    }
+}
+
+fn cwd_flag_targets_in_segment(tokens: &[&str], start: usize) -> Vec<String> {
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
+    let mut i = start;
+    while i < tokens.len() && !is_shell_separator(tokens[i]) {
         let tok = tokens[i];
-        if tok == "cd" && at_command_position(&tokens, i) {
-            if let Some(dir) = tokens.get(i + 1) {
-                out.push((*dir).to_string());
-                i += 2;
-                continue;
-            }
-        }
         if let Some(val) = tok
             .strip_prefix("--prefix=")
             .or_else(|| tok.strip_prefix("--cwd="))
@@ -310,7 +321,7 @@ fn dir_change_targets(command: &str) -> Vec<String> {
         {
             out.push(val.to_string());
         } else if matches!(tok, "--prefix" | "-C" | "--cwd" | "--dir") {
-            if let Some(v) = tokens.get(i + 1) {
+            if let Some(v) = tokens.get(i + 1).filter(|v| !is_shell_separator(v)) {
                 out.push((*v).to_string());
                 i += 2;
                 continue;
@@ -319,6 +330,37 @@ fn dir_change_targets(command: &str) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// The directory-change targets that affect the install invocation: a preceding
+/// command-position `cd <dir>` and cwd flags on the package-manager command
+/// itself. Later/unrelated `cd` or flag-looking arguments must not redirect
+/// manifest inspection away from the install that is about to run.
+fn dir_change_targets_before_install(command: &str) -> Vec<String> {
+    let normalized = command.replace(['\n', '\r'], " ; ");
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    let mut prior = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if matches!(tok, "npm" | "pnpm" | "yarn" | "bun")
+            && at_command_position(&tokens, i)
+            && install_subcommand(tok, &tokens, i)
+        {
+            let mut out = prior;
+            out.extend(cwd_flag_targets_in_segment(&tokens, i + 1));
+            return out;
+        }
+        if tok == "cd" && at_command_position(&tokens, i) {
+            if let Some(dir) = tokens.get(i + 1) {
+                prior.push((*dir).to_string());
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    Vec::new()
 }
 
 /// Resolve a directory-change target to a path ONLY if it is a literal we can
@@ -400,10 +442,7 @@ mod tests {
 
     #[test]
     fn newline_separated_non_install_still_does_not_trigger() {
-        for cmd in [
-            "echo hi\nnpm run build",
-            "echo install\nnpm test",
-        ] {
+        for cmd in ["echo hi\nnpm run build", "echo install\nnpm test"] {
             assert!(!is_install_like(cmd), "should NOT trigger: {cmd:?}");
         }
     }
@@ -422,8 +461,8 @@ mod tests {
             "yarn test",
             "bun run start",
             "bun test",
-            "echo npm install",       // not actually invoking npm
-            "git commit -m install",  // unrelated
+            "echo npm install",      // not actually invoking npm
+            "git commit -m install", // unrelated
         ] {
             assert!(!is_install_like(cmd), "should NOT trigger: {cmd}");
         }
@@ -445,7 +484,10 @@ mod tests {
         });
         let d = inspect(&manifest).expect("should produce a finding");
         assert_eq!(d.action, Action::Block);
-        assert_eq!(d.matched_rule.as_deref(), Some("preflight: postinstall remote-exec"));
+        assert_eq!(
+            d.matched_rule.as_deref(),
+            Some("preflight: postinstall remote-exec")
+        );
     }
 
     #[test]
@@ -459,8 +501,7 @@ mod tests {
             ("prepare", ip_fetch.as_str()),
         ] {
             let manifest = json!({ "scripts": { key: script } });
-            let d = inspect(&manifest)
-                .unwrap_or_else(|| panic!("should block {key}: {script}"));
+            let d = inspect(&manifest).unwrap_or_else(|| panic!("should block {key}: {script}"));
             assert_eq!(d.action, Action::Block, "key={key} script={script}");
         }
     }
@@ -487,13 +528,21 @@ mod tests {
 
     #[test]
     fn allows_ordinary_lifecycle_scripts() {
-        for script in ["husky install", "node scripts/build.js", "node-gyp rebuild", "tsc -p ."] {
+        for script in [
+            "husky install",
+            "node scripts/build.js",
+            "node-gyp rebuild",
+            "tsc -p .",
+        ] {
             let manifest = json!({
                 "name": "demo",
                 "dependencies": { "react": "^18.2.0" },
                 "scripts": { "postinstall": script }
             });
-            assert!(inspect(&manifest).is_none(), "ordinary script must ALLOW: {script}");
+            assert!(
+                inspect(&manifest).is_none(),
+                "ordinary script must ALLOW: {script}"
+            );
         }
     }
 
@@ -518,7 +567,10 @@ mod tests {
         });
         let d = inspect(&manifest).expect("should produce a finding");
         assert_eq!(d.action, Action::Warn);
-        assert_eq!(d.matched_rule.as_deref(), Some("preflight: non-registry dep source"));
+        assert_eq!(
+            d.matched_rule.as_deref(),
+            Some("preflight: non-registry dep source")
+        );
     }
 
     #[test]
@@ -564,7 +616,11 @@ mod tests {
     // ── apply wrapper (filesystem) ───────────────────────────────────────────
 
     fn allow() -> PolicyDecision {
-        PolicyDecision { action: Action::Allow, reason: None, matched_rule: None }
+        PolicyDecision {
+            action: Action::Allow,
+            reason: None,
+            matched_rule: None,
+        }
     }
 
     fn write_manifest(dir: &Path, body: &str) {
@@ -593,8 +649,16 @@ mod tests {
             json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string(),
         )
         .unwrap();
-        let d = apply(allow(), Some("cd packages/foo && npm install"), dir.path().to_str());
-        assert_eq!(d.action, Action::Block, "must inspect the cd'd-into manifest");
+        let d = apply(
+            allow(),
+            Some("cd packages/foo && npm install"),
+            dir.path().to_str(),
+        );
+        assert_eq!(
+            d.action,
+            Action::Block,
+            "must inspect the cd'd-into manifest"
+        );
     }
 
     #[test]
@@ -608,8 +672,50 @@ mod tests {
             json!({ "scripts": { "preinstall": curl_pipe_sh() } }).to_string(),
         )
         .unwrap();
-        let d = apply(allow(), Some("npm install --prefix svc"), dir.path().to_str());
-        assert_eq!(d.action, Action::Block, "must inspect the --prefix manifest");
+        let d = apply(
+            allow(),
+            Some("npm install --prefix svc"),
+            dir.path().to_str(),
+        );
+        assert_eq!(
+            d.action,
+            Action::Block,
+            "must inspect the --prefix manifest"
+        );
+    }
+
+    #[test]
+    fn apply_ignores_trailing_cd_after_install() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            &json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string(),
+        );
+        let d = apply(allow(), Some("npm install && cd /tmp"), dir.path().to_str());
+        assert_eq!(
+            d.action,
+            Action::Block,
+            "a trailing cd must not redirect manifest inspection away from the install cwd"
+        );
+    }
+
+    #[test]
+    fn apply_ignores_unrelated_later_prefix_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            &json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string(),
+        );
+        let d = apply(
+            allow(),
+            Some("npm install && echo --prefix /tmp"),
+            dir.path().to_str(),
+        );
+        assert_eq!(
+            d.action,
+            Action::Block,
+            "a later non-install --prefix argument must not affect the install cwd"
+        );
     }
 
     #[test]
@@ -618,9 +724,20 @@ mod tests {
         // the (wrong) session root, preflight skips — no false escalation either way.
         let dir = tempfile::tempdir().unwrap();
         // a malicious manifest at the ROOT must NOT be used to block a `cd $DIR` install
-        write_manifest(dir.path(), &json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string());
-        let d = apply(allow(), Some("cd $TARGET && npm install"), dir.path().to_str());
-        assert_eq!(d.action, Action::Allow, "non-literal cd must skip, not inspect the root");
+        write_manifest(
+            dir.path(),
+            &json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string(),
+        );
+        let d = apply(
+            allow(),
+            Some("cd $TARGET && npm install"),
+            dir.path().to_str(),
+        );
+        assert_eq!(
+            d.action,
+            Action::Allow,
+            "non-literal cd must skip, not inspect the root"
+        );
     }
 
     #[test]
@@ -632,7 +749,10 @@ mod tests {
         })
         .to_string();
         write_manifest(dir.path(), &body);
-        assert_eq!(apply(allow(), Some("npm install"), dir.path().to_str()), allow());
+        assert_eq!(
+            apply(allow(), Some("npm install"), dir.path().to_str()),
+            allow()
+        );
     }
 
     #[test]
@@ -641,13 +761,19 @@ mod tests {
         let body = json!({ "scripts": { "postinstall": curl_pipe_sh() } }).to_string();
         write_manifest(dir.path(), &body);
         // a non-install command must NOT read or act on the manifest
-        assert_eq!(apply(allow(), Some("npm run build"), dir.path().to_str()), allow());
+        assert_eq!(
+            apply(allow(), Some("npm run build"), dir.path().to_str()),
+            allow()
+        );
     }
 
     #[test]
     fn apply_does_nothing_when_manifest_missing() {
         let dir = tempfile::tempdir().unwrap(); // empty: no package.json
-        assert_eq!(apply(allow(), Some("npm install"), dir.path().to_str()), allow());
+        assert_eq!(
+            apply(allow(), Some("npm install"), dir.path().to_str()),
+            allow()
+        );
     }
 
     #[test]
@@ -659,7 +785,10 @@ mod tests {
     fn apply_does_nothing_when_manifest_unparseable() {
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), "{ not json");
-        assert_eq!(apply(allow(), Some("npm install"), dir.path().to_str()), allow());
+        assert_eq!(
+            apply(allow(), Some("npm install"), dir.path().to_str()),
+            allow()
+        );
     }
 
     #[test]
@@ -672,7 +801,10 @@ mod tests {
         // even with a clean manifest and an install command, a Block stays Block
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), &json!({ "name": "demo" }).to_string());
-        assert_eq!(apply(block.clone(), Some("npm install"), dir.path().to_str()), block);
+        assert_eq!(
+            apply(block.clone(), Some("npm install"), dir.path().to_str()),
+            block
+        );
     }
 
     #[test]
