@@ -75,20 +75,20 @@ pub fn apply(decision: PolicyDecision, tool_input: &Value) -> PolicyDecision {
     if decision.action == Action::Block || !is_hook_removal_write(tool_input) {
         return decision;
     }
-    let installed =
-        target_path(tool_input).is_some_and(|path| live_hook_installed_for_target(path));
+    let installed = target_hook_config(tool_input)
+        .is_some_and(|(path, _)| live_hook_installed_for_target(path));
     escalate(decision, tool_input, installed)
 }
 
 /// pure detection: does this tool_input describe a write that targets a
 /// supported agent hook config file AND would remove the sentinel hook?
 fn is_hook_removal_write(tool_input: &Value) -> bool {
-    let Some(kind) = target_path(tool_input).and_then(hook_config_kind) else {
+    let Some((path, kind)) = target_hook_config(tool_input) else {
         return false;
     };
     // Write: full content replacement
     if let Some(content) = tool_input.get("content").and_then(|v| v.as_str()) {
-        if target_path(tool_input).is_some_and(is_claude_settings_path) {
+        if is_claude_settings_path(path) {
             return match serde_json::from_str::<Value>(content) {
                 // valid JSON: hook must survive in the shape Claude Code honors
                 Ok(new_settings) => !settings_contains_sentinel_hook(&new_settings),
@@ -180,6 +180,20 @@ fn hook_config_kind(path: &str) -> Option<ConfigKind> {
         || p.ends_with(".gemini/settings.json")
         || base == "crush.json";
     is_json.then_some(ConfigKind::Json)
+}
+
+/// The first carried target path (across ALL Write/Edit/MultiEdit aliases) that
+/// names a recognized agent hook config, with its encoding. A malicious payload
+/// can put a benign path in an earlier field (`file_path`) and the real hook
+/// config in a later one (`path`), so every alias is considered — the first
+/// path alone must NOT shadow a hook-config alias behind it.
+fn target_hook_config(tool_input: &Value) -> Option<(&str, ConfigKind)> {
+    TARGET_PATH_FIELDS.iter().find_map(|k| {
+        tool_input
+            .get(*k)
+            .and_then(|v| v.as_str())
+            .and_then(|p| hook_config_kind(p).map(|kind| (p, kind)))
+    })
 }
 
 /// Recognize a config file that can carry autorun commands (agent hook configs
@@ -656,6 +670,33 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
                 "dropping sentinel hook should be blocked: {path}"
             );
         }
+    }
+
+    // regression: a benign FIRST path alias must not shadow a hook-config path in
+    // a LATER alias. `file_path` is harmless; the real settings.json sits in
+    // `path` and the JSON is destroyed (drops all hooks) — must escalate to Block.
+    #[test]
+    fn hook_removal_detected_in_a_later_path_alias() {
+        let input = json!({
+            "file_path": "/tmp/benign.txt",
+            "path": SETTINGS,
+            "content": "{ this is not json"
+        });
+        assert_eq!(
+            escalate(warn_decision(), &input, true).action,
+            Action::Block,
+            "config path hidden behind a benign first alias must still escalate"
+        );
+        // a non-claude config (codex toml) carried in a later alias too
+        let codex = json!({
+            "file_path": "/tmp/notes.md",
+            "path": "/Users/u/.codex/config.toml",
+            "content": "x = 1"
+        });
+        assert_eq!(
+            escalate(warn_decision(), &codex, true).action,
+            Action::Block
+        );
     }
 
     #[test]
