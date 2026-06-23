@@ -238,20 +238,39 @@ impl PolicyEngine {
             return h;
         }
 
-        // check allow.paths — if allow list exists and path isn't in it, apply default
+        // check allow.paths — if an allow list exists, EVERY shell brace-expanded
+        // runtime path must be covered by some allow rule before default=block can
+        // be bypassed. A brace like `{ok,/tmp/secret}` reads every member, so one
+        // allowed member must not shadow an unlisted sibling.
         if !self.config.allow_paths.is_empty() {
+            const BRACE_CAP: usize = 64;
             for path in &tool_call.paths {
-                let allowed = self
-                    .config
-                    .allow_paths
-                    .iter()
-                    .any(|rule| matches_allow_path(&rule.pattern, path));
-                if !allowed {
+                // expand ONE past the cap so we can detect truncation: a brace too
+                // large to fully enumerate cannot be proven covered, so it must
+                // fail closed (apply default) rather than allow on a partial check.
+                let expansions = crate::common::shell::brace_expand(path, BRACE_CAP + 1);
+                if expansions.len() > BRACE_CAP {
                     return PolicyDecision {
                         action: parse_action(&self.config.policy.default),
-                        reason: Some(format!("path {path} not in allow list")),
-                        matched_rule: Some("allow.paths (miss)".into()),
+                        reason: Some(format!(
+                            "path {path} brace-expands beyond the {BRACE_CAP}-way cap; cannot prove allow-list coverage"
+                        )),
+                        matched_rule: Some("allow.paths (uncheckable)".into()),
                     };
+                }
+                for expanded_path in &expansions {
+                    let allowed = self
+                        .config
+                        .allow_paths
+                        .iter()
+                        .any(|rule| matches_allow_path(&rule.pattern, expanded_path));
+                    if !allowed {
+                        return PolicyDecision {
+                            action: parse_action(&self.config.policy.default),
+                            reason: Some(format!("path {expanded_path} not in allow list")),
+                            matched_rule: Some("allow.paths (miss)".into()),
+                        };
+                    }
                 }
             }
         }
@@ -664,6 +683,64 @@ reason = "recursive root deletion"
             raw_params: "{}".into(),
         };
         assert_eq!(engine.evaluate(&nested).action, Action::Block);
+    }
+
+    #[test]
+    fn allow_list_checks_each_brace_expanded_runtime_path() {
+        let engine = PolicyEngine::from_config(PolicyConfig::new(
+            PolicySettings {
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "block".into(),
+            },
+            vec![],
+            vec![],
+            vec![],
+            vec![AllowPathRule {
+                pattern: "/repo/src/**".into(),
+                note: None,
+            }],
+        ));
+        let bypass = ToolCall {
+            tool_name: "Bash".into(),
+            command: Some("cat {/repo/src/main.rs,/tmp/secret}".into()),
+            paths: vec!["{/repo/src/main.rs,/tmp/secret}".into()],
+            raw_params: "{}".into(),
+        };
+        let decision = engine.evaluate(&bypass);
+        assert_eq!(decision.action, Action::Block);
+        assert!(decision.reason.unwrap().contains("/tmp/secret"));
+    }
+
+    #[test]
+    fn allow_list_accepts_brace_expansions_covered_by_different_rules() {
+        let engine = PolicyEngine::from_config(PolicyConfig::new(
+            PolicySettings {
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "block".into(),
+            },
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                AllowPathRule {
+                    pattern: "/repo/src/**".into(),
+                    note: None,
+                },
+                AllowPathRule {
+                    pattern: "/repo/tests/**".into(),
+                    note: None,
+                },
+            ],
+        ));
+        let call = ToolCall {
+            tool_name: "Bash".into(),
+            command: Some("cat {/repo/src/main.rs,/repo/tests/test.rs}".into()),
+            paths: vec!["{/repo/src/main.rs,/repo/tests/test.rs}".into()],
+            raw_params: "{}".into(),
+        };
+        assert_eq!(engine.evaluate(&call).action, Action::Allow);
     }
 
     #[test]
