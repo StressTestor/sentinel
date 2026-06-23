@@ -148,8 +148,8 @@ impl PolicyEngine {
         // check deny.tools (by tool name). MCP tool calls (`mcp__server__tool`)
         // traverse the hook like any other, so a name-matched rule lets a user
         // block/warn a specific MCP server or tool outright. a BLOCK returns
-        // immediately (opt-in lockdown is unconditional); a WARN is held until
-        // after command blocks and secret blocks get a chance to override it.
+        // immediately (opt-in lockdown is unconditional); a WARN is held so a
+        // deny.commands BLOCK can still override it.
         for rule in &self.config.deny_tools {
             if matches_tool(&rule.pattern, &tool_call.tool_name) {
                 let action = parse_action(&rule.action);
@@ -159,7 +159,7 @@ impl PolicyEngine {
                     matched_rule: Some(format!("deny.tools: {}", rule.pattern)),
                 };
                 if action == Action::Warn {
-                    post_secret_held.get_or_insert(decision);
+                    held.get_or_insert(decision);
                 } else {
                     return decision;
                 }
@@ -177,7 +177,7 @@ impl PolicyEngine {
                         matched_rule: Some(format!("deny.paths: {}", rule.pattern)),
                     };
                     if action == Action::Warn {
-                        path_held.get_or_insert(decision);
+                        held.get_or_insert(decision);
                     } else {
                         return decision; // Block or explicit Allow short-circuits
                     }
@@ -199,7 +199,7 @@ impl PolicyEngine {
                         // a command BLOCK wins over a held warn-tier path match
                         Action::Block => return decision,
                         Action::Warn => {
-                            post_secret_held.get_or_insert(decision);
+                            held.get_or_insert(decision);
                         }
                         Action::Allow => return decision,
                     }
