@@ -667,10 +667,11 @@ reason = "agent invoked `sentinel uninstall` - removes the guard's hook (reconfi
 # deleting/moving the agent's config dir is a TOTAL disarm: the PreToolUse hook
 # registration lives in ~/.claude/settings.json, so `rm -rf ~/.claude` (or moving
 # the settings file) drops the guard for every future session. Anchored to the
-# user-home `.claude` and only the dir itself or its settings file - a subdir
-# cleanup (`rm -rf ~/.claude/projects/old`) does NOT match (it can't disarm).
+# user-home `.claude` and only the dir itself (with or without a trailing
+# slash) or its settings file - a subdir cleanup (`rm -rf
+# ~/.claude/projects/old`) does NOT match (it can't disarm).
 [[deny.commands]]
-pattern = '\b(rm|mv)\b.*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/settings(\.local)?\.json)?(["\x27\s;|&]|$)'
+pattern = '\b(rm|mv)\b.*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/settings(\.local)?\.json|/)?(["\x27\s;|&]|$)'
 action = "block"
 reason = "deleting/moving ~/.claude or its settings.json removes the PreToolUse hook (guard-disarm)"
 
@@ -1385,6 +1386,18 @@ mod tests {
         assert_eq!(action_of(&cmd_call("rm $(which sentinel)")), Action::Block);
         // crate binary name, even at a non-install path
         assert_eq!(action_of(&cmd_call("rm -f ~/.local/bin/sentinel-guard")), Action::Block);
+    }
+
+    #[test]
+    fn claude_config_dir_disarm_blocks_trailing_slash() {
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.claude")), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.claude/")), Action::Block);
+        assert_eq!(action_of(&cmd_call("mv ~/.claude/ /tmp/x")), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm -rf $HOME/.claude/")), Action::Block);
+        assert_eq!(action_of(&cmd_call(r#"rm -rf "$HOME/.claude/""#)), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm ~/.claude/settings.json")), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm ~/.claude/settings.local.json")), Action::Block);
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.claude/projects/old")), Action::Allow);
     }
 
     #[test]

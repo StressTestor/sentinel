@@ -82,6 +82,7 @@ fn cases() -> Vec<Case> {
         c("disarm sentinel binary", s(r#"{"tool_name":"Bash","tool_input":{"command":"chmod -x $(command -v sentinel)"}}"#), Block),
         c("sentinel uninstall", s(r#"{"tool_name":"Bash","tool_input":{"command":"sentinel uninstall"}}"#), Block),
         c("delete agent config dir", s(r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.claude"}}"#), Block),
+        c("delete agent config dir trailing slash", s(r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.claude/"}}"#), Block),
         c("shell-strip settings hook", s(r#"{"tool_name":"Bash","tool_input":{"command":"sed -i '' /sentinel/d ~/.claude/settings.json"}}"#), Block),
         // --- round-two: alternate read/exfil paths (block) ---
         c("interpreter cred read", s(r#"{"tool_name":"Bash","tool_input":{"command":"node -e 'require(\"fs\").readFileSync(process.env.HOME+\"/.ssh/id_rsa\")'"}}"#), Block),
