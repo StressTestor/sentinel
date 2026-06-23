@@ -602,12 +602,16 @@ mod tests {
     #[test]
     fn normalize_canonicalizes_rm_flag_variants() {
         // the shipped root-deletion rule, against every flag spelling
-        let rule = r"rm\s+-rf\s+/(\s|$|[^~])";
+        let rule = r"rm\s+-rf\s+(?:[^\s]+\s+)*/";
         assert!(matches_command(rule, "rm -fr /"));
         assert!(matches_command(rule, "rm -r -f /etc"));
         assert!(matches_command(rule, "rm --recursive --force /"));
         assert!(matches_command(rule, r#"rm -rf "/""#));
         assert!(matches_command(rule, "rm -rf /"));
+        assert!(matches_command(rule, "rm -rf /~ /etc"));
+        assert!(matches_command(rule, "rm -rf /~ /"));
+        assert!(matches_command(rule, "rm -rf ./build /etc"));
+        assert!(!matches_command(rule, "rm -rf ~/scratch"));
         // a non-recursive or non-force rm must NOT be canonicalized into a match
         assert!(!matches_command(rule, "rm -f /etc/hosts"));
         assert!(!matches_command(rule, "rm file.txt"));
