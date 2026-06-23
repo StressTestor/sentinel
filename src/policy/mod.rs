@@ -142,10 +142,11 @@ impl PolicyEngine {
         // the command is an unambiguous guard-disarm; `curl -d @.env` mines the
         // .env warn path, but the command is an exfil block). A deny.paths BLOCK or
         // an explicit allow-action still returns immediately. deny.secrets keeps its
-        // first-match posture and is consulted ONLY when nothing else matched, so
-        // the documented "secret written into a warn-tier path stays warn" behavior
-        // (the .env / settings.json case) is preserved unchanged.
+        // first-match posture and is consulted before non-path held warnings, so
+        // only the documented "secret written into a warn-tier path stays warn"
+        // behavior (the .env / settings.json case) is preserved unchanged.
         let mut held: Option<PolicyDecision> = None;
+        let mut held_path: Option<PolicyDecision> = None;
 
         // check deny.tools (by tool name). MCP tool calls (`mcp__server__tool`)
         // traverse the hook like any other, so a name-matched rule lets a user
@@ -179,7 +180,7 @@ impl PolicyEngine {
                         matched_rule: Some(format!("deny.paths: {}", rule.pattern)),
                     };
                     if action == Action::Warn {
-                        held.get_or_insert(decision);
+                        held_path.get_or_insert(decision);
                     } else {
                         return decision; // Block or explicit Allow short-circuits
                     }
@@ -209,9 +210,12 @@ impl PolicyEngine {
             }
         }
 
-        // a held warn (from paths or commands) wins over deny.secrets, preserving
-        // the documented "warn-tier path shadows a secret in its content" behavior.
-        if let Some(h) = held {
+        // A held path warning wins over deny.secrets, preserving the documented
+        // "warn-tier path shadows a secret in its content" behavior. Tool-name
+        // and command warnings are intentionally not returned here: unlike path
+        // warnings, they do not describe the destination that safely contains the
+        // secret, so deny.secrets must still be able to block them.
+        if let Some(h) = held_path {
             return h;
         }
 
@@ -230,6 +234,12 @@ impl PolicyEngine {
                     };
                 }
             }
+        }
+
+        // Return held non-path warnings only after deny.secrets has had a chance
+        // to block secret-bearing tool calls.
+        if let Some(h) = held {
+            return h;
         }
 
         // check allow.paths — if allow list exists and path isn't in it, apply default
@@ -418,6 +428,40 @@ reason = "recursive root deletion"
             raw_params: "{}".into(),
         };
         assert_eq!(engine.evaluate(&with_cmd).action, Action::Block);
+    }
+
+    #[test]
+    fn deny_tools_warn_does_not_shadow_secret_block() {
+        let toml = r#"
+[policy]
+mode = "enforce"
+on_failure = "closed"
+default = "allow"
+
+[[deny.tools]]
+pattern = "mcp__*"
+action = "warn"
+reason = "review MCP tools"
+
+[[deny.secrets]]
+pattern = 'AKIA[0-9A-Z]{16}'
+action = "block"
+reason = "AWS access key"
+"#;
+        let engine = PolicyEngine::from_toml_str(toml).unwrap();
+        let key = format!("AKIA{}", "A".repeat(16));
+        let call = ToolCall {
+            tool_name: "mcp__github__create_issue".into(),
+            command: None,
+            paths: vec![],
+            raw_params: format!(r#"{{"body":"{key}"}}"#),
+        };
+        let decision = engine.evaluate(&call);
+        assert_eq!(decision.action, Action::Block);
+        assert_eq!(
+            decision.matched_rule.as_deref(),
+            Some("deny.secrets: AKIA[0-9A-Z]{16}")
+        );
     }
 
     #[test]
