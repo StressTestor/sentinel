@@ -66,10 +66,13 @@ fn matches_path_resolved(
     // runtime. When (and ONLY when) a candidate is globbed, project it onto the
     // rule's literal protected prefix segment-by-segment: wherever a candidate
     // glob segment could expand to the rule's literal segment, substitute the
-    // literal. The resulting witness is then tested by the SAME rule regexes
-    // (reusing the deny subtree/anchor semantics). Non-globbed candidates never
-    // enter this branch, so the normal path keeps EXACT current behavior.
-    if candidates.iter().any(|c| has_glob_meta(c)) {
+    // literal. The resulting witness is then tested by the SAME rule regexes.
+    // This is only safe for deny-style matching: extra synthetic matches fail
+    // closed by triggering a deny rule. For allow rules the same broadening would
+    // fail open by allowing a glob that may also expand outside the allow-list,
+    // so allow matching deliberately skips this branch. Non-globbed candidates
+    // never enter this branch, so the normal path keeps EXACT current behavior.
+    if recursive_dir && candidates.iter().any(|c| has_glob_meta(c)) {
         let rule_literal = rule_literal_prefix(&expanded_pattern);
         if !rule_literal.is_empty() {
             let mut witnesses = Vec::new();
@@ -577,6 +580,18 @@ mod tests {
         assert!(matches_path("./src/**", "./src/audit/mod.rs"));
         assert!(matches_path("./src/**", "./src/deep/nested/file.rs"));
         assert!(!matches_path("./src/**", "./tests/foo.rs"));
+    }
+
+    #[test]
+    fn allow_does_not_deglob_glob_candidate_into_allow_list() {
+        // Deglob witnesses are fail-closed for deny rules, but fail-open for
+        // allow-lists: `./s*/config` could expand to both `./src/config` and
+        // `./secrets/config`, so it must not be treated as allowed merely
+        // because one synthetic witness lands under `./src/**`.
+        assert!(!matches_allow_path("./src/**", "./s*/config"));
+        // The deny entry point still uses deglob witnesses to catch the
+        // protected target despite the glob-bearing spelling.
+        assert!(matches_path("./src/**", "./s*/config"));
     }
 
     #[test]
