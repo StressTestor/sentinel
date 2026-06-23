@@ -694,24 +694,24 @@ reason = "deleting/moving ~/.sentinel removes the guard's policy + audit trail (
 # / separator / redirect / end), so a benign backup like `> settings.json.bak`
 # (final component is NOT the live settings file) does not false-block.
 [[deny.commands]]
-pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.claude/settings(\.local)?\.json(["\x27\s;|&>]|$)'
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
 action = "block"
 reason = "in-place shell rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
 
 # line editors (ed/ex) rewrite in place with no -i flag, no redirect, no tee.
 [[deny.commands]]
-pattern = '\b(ed|ex)\b\s+\S*\.claude/settings(\.local)?\.json(["\x27\s;|&]|$)'
+pattern = '\b(ed|ex)\b\s+\S*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
 action = "block"
 reason = "line-editor (ed/ex) rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
 
 # truncating/overwriting redirect (`>`, `>>`, `>|` clobber) onto the settings file.
 [[deny.commands]]
-pattern = '>>?\|?\s*"?\S*\.claude/settings(\.local)?\.json(["\x27\s;|&]|$)'
+pattern = '>>?\|?\s*"?\S*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
 action = "block"
 reason = "truncating/overwriting .claude/settings.json via redirect - can strip the PreToolUse hook (guard-disarm)"
 
 [[deny.commands]]
-pattern = '\b(tee|sponge)\b.*\.claude/settings(\.local)?\.json(["\x27\s;|&]|$)'
+pattern = '\b(tee|sponge)\b.*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
 action = "block"
 reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreToolUse hook (guard-disarm)"
 
@@ -1488,8 +1488,17 @@ mod tests {
             Action::Block
         );
         assert_eq!(action_of(&cmd_call("echo '{}' > ~/.claude/settings.json")), Action::Block);
+        assert_eq!(action_of(&cmd_call(": > ~/.claude/settings.json>/dev/null")), Action::Block);
+        assert_eq!(
+            action_of(&cmd_call("sed -i '' '/sentinel evaluate/d' ~/.claude/settings.json</dev/null")),
+            Action::Block
+        );
         assert_eq!(
             action_of(&cmd_call("jq 'del(.hooks)' a.json | sponge ~/.claude/settings.local.json")),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call("printf '{}' | tee ~/.claude/settings.json>/dev/null")),
             Action::Block
         );
     }
