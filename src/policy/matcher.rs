@@ -119,7 +119,7 @@ fn path_expansions_match_any(
     // so allow matching deliberately skips this branch. Non-globbed candidates
     // never enter this branch, so the normal path keeps EXACT current behavior.
     if recursive_dir && candidates.iter().any(|c| has_glob_meta(c)) {
-        let rule_literal = rule_literal_prefix(&expanded_pattern);
+        let rule_literal = rule_literal_prefix(expanded_pattern);
         if !rule_literal.is_empty() {
             let mut witnesses = Vec::new();
             for c in &candidates {

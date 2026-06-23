@@ -744,6 +744,41 @@ reason = "recursive root deletion"
     }
 
     #[test]
+    fn allow_list_fails_closed_when_brace_expansion_exceeds_cap() {
+        // A brace too large to fully enumerate (past the 64-way cap) cannot be
+        // proven covered by the allow-list, so it must fail closed (default) and
+        // not allow on a partial check — otherwise a secret member could be hidden
+        // past the cap behind 64 allowed siblings.
+        let engine = PolicyEngine::from_config(PolicyConfig::new(
+            PolicySettings {
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "block".into(),
+            },
+            vec![],
+            vec![],
+            vec![],
+            vec![AllowPathRule {
+                pattern: "/repo/src/**".into(),
+                note: None,
+            }],
+        ));
+        // 70 allowed members + one secret would otherwise truncate before the
+        // secret is ever checked; failing closed blocks the whole token.
+        let members: Vec<String> = (0..70).map(|i| format!("/repo/src/f{i}.rs")).collect();
+        let token = format!("{{{},/tmp/secret}}", members.join(","));
+        let call = ToolCall {
+            tool_name: "Bash".into(),
+            command: Some(format!("cat {token}")),
+            paths: vec![token],
+            raw_params: "{}".into(),
+        };
+        let decision = engine.evaluate(&call);
+        assert_eq!(decision.action, Action::Block);
+        assert_eq!(decision.matched_rule.as_deref(), Some("allow.paths (uncheckable)"));
+    }
+
+    #[test]
     fn fail_closed_posture_from_on_failure() {
         let mk = |of: &str| {
             PolicyEngine::from_config(PolicyConfig::new(
