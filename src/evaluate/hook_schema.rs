@@ -177,17 +177,18 @@ fn extract_command_from_fields(input: &serde_json::Value, fields: &[&str]) -> Op
 }
 
 /// extract file paths from a shell command string (heuristic). Splits on
-/// whitespace AND shell metacharacters so redirection targets and chained
-/// commands separate into their own tokens, and pulls a path out of a
+/// unquoted whitespace AND shell metacharacters so redirection targets and
+/// chained commands separate into their own tokens, while preserving quoted
+/// or backslash-escaped spaces inside path arguments. Also pulls a path out of a
 /// flag-glued arg (`-T<path>`, `--upload-file=<path>`, `-C<path>`) which an
 /// earlier version skipped wholesale because the token started with `-`.
 fn extract_paths_from_command(cmd: &str) -> Vec<String> {
     let mut paths = Vec::new();
-    for raw in cmd.split(|c: char| c.is_whitespace() || "|&;<>()`".contains(c)) {
+    for raw in shell_tokens(cmd) {
         if raw.is_empty() {
             continue;
         }
-        for cand in path_candidates(raw) {
+        for cand in path_candidates(&raw) {
             // strip ALL quotes, not just surrounding, so `"$HOME"/.ssh` and
             // `~/'.ssh'` normalize to a matchable path.
             let stripped = cand.replace(['"', '\''], "");
@@ -198,6 +199,43 @@ fn extract_paths_from_command(cmd: &str) -> Vec<String> {
         }
     }
     paths
+}
+
+/// A small shell lexer for path mining. It is intentionally heuristic (not a
+/// shell parser), but it must not split a valid shell word at spaces protected
+/// by quotes or backslashes, otherwise deny.path rules containing spaces can be
+/// bypassed through Bash.
+fn shell_tokens(cmd: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut chars = cmd.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                if let Some(next) = chars.next() {
+                    token.push(next);
+                } else {
+                    token.push(c);
+                }
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if !in_single && !in_double && (c.is_whitespace() || "|&;<>()`".contains(c)) => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            _ => token.push(c),
+        }
+    }
+
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
 /// the path-bearing substrings of a single token. The whole token, plus the
@@ -363,6 +401,33 @@ mod tests {
             t.paths.iter().any(|p| p.contains("$HOME/.ssh")),
             "{:?}",
             t.paths
+        );
+    }
+
+    #[test]
+    fn paths_with_shell_quoted_or_escaped_spaces_are_preserved() {
+        let quoted = tc(
+            r#"{"tool_name":"Bash","tool_input":{"command":"cat \"$HOME/Library/Application Support/Google/Chrome/Default/Cookies\" "}}"#,
+        );
+        assert!(
+            quoted
+                .paths
+                .iter()
+                .any(|p| p == "$HOME/Library/Application Support/Google/Chrome/Default/Cookies"),
+            "{:?}",
+            quoted.paths
+        );
+
+        let escaped = tc(
+            r#"{"tool_name":"Bash","tool_input":{"command":"cat ~/Library/Application\\ Support/Bitwarden/data.json"}}"#,
+        );
+        assert!(
+            escaped
+                .paths
+                .iter()
+                .any(|p| p == "~/Library/Application Support/Bitwarden/data.json"),
+            "{:?}",
+            escaped.paths
         );
     }
 
