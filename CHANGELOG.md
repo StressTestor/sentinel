@@ -6,6 +6,50 @@ versioning.
 
 ## [Unreleased]
 
+### Security
+A batch of policy-bypass fixes from an adversarial review pass over the default
+ruleset and matchers. Each lands with regression tests; `verify` stays 42/42 and
+the zero-false-positive-block ethos is preserved.
+
+- **Pipe-to-shell wrappers** (#33). `curl … | env sh`, `| /usr/bin/env bash`,
+  `| nice sh`, `| tee f | sh` now block. The shell is matched only at a command
+  position (right after a pipe, or after a known exec-wrapper), so a fetch piped
+  into a filter whose argument merely names a shell (`… | grep ssh`) does NOT
+  false-block, and every `*sh` shell name keeps coverage.
+- **`rm -rf` with a later absolute operand** (#34). `rm -rf ./build /etc` and
+  `rm -rf /~ /` block; `rm -rf ~/scratch` stays allowed.
+- **`nc`/`ncat` stdin exfil behind quoted/escaped separators** (#44). A quoted
+  separator (`nc h 443 "x;y" < secret`) no longer hides the redirect, and an
+  escaped quote inside a double-quoted arg no longer aborts matching early.
+- **settings.json rewrite via redirect** (#31). `<`/`>` immediately after the
+  path (`sed -i … settings.json</dev/null`) are treated as token terminators.
+- **`~/.claude` deletion with a trailing slash** (#32). `rm -rf ~/.claude/`
+  blocks; a subdir cleanup (`rm -rf ~/.claude/projects/old`) still doesn't.
+- **case-varied HTTP clients in the secret-env exfil rule** (#45). `CURL` /
+  `Wget` data uploads referencing a secret-looking env var now block.
+- **allow-list brace-expansion fail-open** (#39). Every shell brace-expansion of
+  a path must be covered by an allow rule (`cat {ok,/tmp/secret}` blocks); an
+  expansion past the 64-way cap fails closed rather than allowing on a partial
+  check.
+- **glob witnesses leaking into allow matching** (#47). The deny-only deglob
+  fail-safe no longer fail-opens allow rules.
+- **credential paths with spaces** (#42). A quote/escape-aware lexer keeps
+  `"~/Library/Application Support/…/Cookies"` a single token so spaced deny.path
+  rules can't be split apart.
+- **npm preflight install-dir redirection** (#35). A trailing `&& cd /tmp` (or a
+  later `--prefix`) no longer points manifest inspection away from the install.
+- **self-protect for non-Claude agents** (#30). Hook-removal escalation now
+  covers Gemini / Crush / Codex configs and resolves the target across all path
+  aliases (a benign first alias can't shadow a real config path behind it).
+- **autorun detection across path aliases** (#36). A malicious config in a later
+  alias (`file_path` benign, `path` = `.mcp.json`) is no longer shadowed.
+
+### Fixed
+- **Build break on `main`** (#49). #41 had been merged on top of #48 against a
+  stale base, leaving `evaluate()` referencing undeclared
+  `post_secret_held` / `path_held`. Reverted — #48 already delivers the same
+  intent (a block-tier secret overrides every held warn: tool, path, command).
+
 ### Removed
 - **Dead tier scaffolding.** Deleted the unwired Tier-2 heuristic analyzer
   (`src/heuristic/`) and Tier-3 LLM classifier stub (`src/classifier/`), neither
