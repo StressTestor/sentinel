@@ -349,6 +349,30 @@ mod tests {
         assert!(!paths.iter().any(|p| p.starts_with('-')));
     }
 
+    #[test]
+    fn extract_paths_with_spaces_quoted_or_escaped() {
+        // a quoted path with internal spaces must stay one matchable token, or a
+        // `cat "~/Library/Application Support/.../Cookies"` slips past deny.paths.
+        let q = extract_paths_from_command(
+            "cat \"~/Library/Application Support/Google/Chrome/Default/Cookies\"",
+        );
+        assert!(
+            q.contains(&"~/Library/Application Support/Google/Chrome/Default/Cookies".to_string()),
+            "quoted spaced path not reassembled: {q:?}"
+        );
+        // backslash-escaped spaces are equivalent
+        let e = extract_paths_from_command(
+            "wc -c ~/Library/Application\\ Support/Bitwarden/data.json",
+        );
+        assert!(
+            e.contains(&"~/Library/Application Support/Bitwarden/data.json".to_string()),
+            "escaped spaced path not reassembled: {e:?}"
+        );
+        // single-quoted too
+        let s = extract_paths_from_command("cp '/etc/master.passwd' /tmp/x");
+        assert!(s.contains(&"/etc/master.passwd".to_string()));
+    }
+
     // ── extraction completeness (audit PR #2) ──────────────────────────────
     fn tc(json: &str) -> ToolCall {
         serde_json::from_str::<HookInput>(json).unwrap().to_tool_call()

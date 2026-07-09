@@ -93,6 +93,12 @@ fn cases() -> Vec<Case> {
         c("brace-expand cred read", s(r#"{"tool_name":"Bash","tool_input":{"command":"cat /etc/{passwd,master.passwd}"}}"#), Block),
         c("ifs-split cred read", s(r#"{"tool_name":"Bash","tool_input":{"command":"cat${IFS}/etc/passwd"}}"#), Block),
         c("ansi-c escape cred read", s(r#"{"tool_name":"Bash","tool_input":{"command":"cat $'\\x2fetc\\x2fpasswd'"}}"#), Block),
+        // --- spaced-path cred reads via Bash: the extractor must not split a
+        //     quoted/escaped path on its internal space (macOS Application Support
+        //     stores, 1Password, Bitwarden) ---
+        c("bash read spaced cred path (quoted)", s(r#"{"tool_name":"Bash","tool_input":{"command":"cat \"~/Library/Application Support/Google/Chrome/Default/Cookies\""}}"#), Block),
+        c("bash read spaced cred path (escaped)", s(r#"{"tool_name":"Bash","tool_input":{"command":"wc -c ~/Library/Application\\ Support/Bitwarden/data.json"}}"#), Block),
+        c("bash copy spaced 1password vault", s(r#"{"tool_name":"Bash","tool_input":{"command":"cp \"~/Library/Group Containers/2BUA8C4S2C.com.1password/Library/Data/B5.sqlite\" /tmp/x"}}"#), Block),
         // --- benign dev work must NOT be caught (zero-FP guard) ---
         c("write project source", s(r#"{"tool_name":"Write","tool_input":{"file_path":"./src/main.rs","content":"fn main(){}"}}"#), Allow),
         c("cargo build", s(r#"{"tool_name":"Bash","tool_input":{"command":"cargo build --release"}}"#), Allow),
