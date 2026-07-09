@@ -91,9 +91,19 @@ sentinel/
 │   ├── live-demo.gif       animated capture used in README
 │   └── record-*.sh         demo recording helpers
 └── .github/
+    ├── dependabot.yml      weekly cargo + github-actions update PRs
     └── workflows/
-        └── ci.yml          AD-5 lint + cargo test + verify gate + cross-compile
+        ├── ci.yml          AD-5 lint + cargo test + verify gate + cross-compile
+        ├── codeql.yml      CodeQL static analysis (rust + actions), push/PR + weekly
+        ├── scorecard.yml   OpenSSF Scorecard, results published + SARIF upload
+        ├── deps.yml        cargo-deny (advisories/bans/licenses/sources), daily cron
+        └── dependency-review.yml  blocks PRs introducing known-vulnerable deps
 ```
+
+all workflow actions are pinned to full commit SHAs, every workflow declares
+least-privilege `permissions`, and checkouts use `persist-credentials: false`.
+`deny.toml` at repo root configures cargo-deny. `SECURITY.md` routes reports to
+github private vulnerability reporting.
 
 ## key patterns
 

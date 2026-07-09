@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/StressTestor/sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/StressTestor/sentinel/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/sentinel-guard.svg)](https://crates.io/crates/sentinel-guard)
-[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE)
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/StressTestor/sentinel/badge)](https://scorecard.dev/viewer/?uri=github.com/StressTestor/sentinel)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](https://github.com/StressTestor/sentinel)
 
 runtime defense for CLI AI agents. intercepts tool calls before execution and enforces security policy.
@@ -169,6 +170,10 @@ sentinel corpus-update    fetch latest attack corpus
 - Rust for near-zero latency in the hook path
 - Claude Code's PreToolUse hook system for structured interception
 
+## security
+
+found a policy bypass? see [SECURITY.md](SECURITY.md). private disclosure, working repro, you get credit. known residual limits are listed in [supply-chain hardening (and what it can't do)](#supply-chain-hardening-and-what-it-cant-do), check those first.
+
 ## license
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0, your pick. see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
