@@ -6,6 +6,17 @@ versioning.
 
 ## [Unreleased]
 
+### Added
+- Supply-chain security CI: CodeQL (rust + actions), OpenSSF Scorecard with
+  published results, cargo-deny (advisories/bans/licenses/sources) on a daily
+  cron, dependency review on PRs, and Dependabot for cargo + actions updates.
+- `SECURITY.md` (private vulnerability reporting), `CONTRIBUTING.md`, and the
+  `LICENSE-MIT` / `LICENSE-APACHE` files the README badge always pointed at.
+
+### Changed
+- All workflow actions are now pinned to full commit SHAs with least-privilege
+  `permissions` blocks and `persist-credentials: false` on checkouts.
+
 ### Security
 A batch of policy-bypass fixes from an adversarial review pass over the default
 ruleset and matchers. Each lands with regression tests; `verify` stays 42/42 and

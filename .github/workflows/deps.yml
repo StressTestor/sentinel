@@ -1,0 +1,34 @@
+name: deps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # on PRs, judge the PR's deps with the BASE branch's policy so a PR
+      # can't allowlist its own bad dependency by editing deny.toml in the
+      # same change. falls back to the PR's copy only while the base branch
+      # has no deny.toml yet (bootstrap).
+      - name: pin deny.toml to base ref on PRs
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "$GITHUB_BASE_REF"
+          if git cat-file -e "origin/$GITHUB_BASE_REF:deny.toml" 2>/dev/null; then
+            git checkout "origin/$GITHUB_BASE_REF" -- deny.toml
+          fi
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check advisories bans licenses sources
