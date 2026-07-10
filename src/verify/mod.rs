@@ -4,9 +4,12 @@
 //! reopens, or a new rule that starts false-blocking benign dev work, turns the
 //! gate red.
 //!
-//! By default it verifies the BUNDLED default policy (generated in-memory), which
-//! is what the shipped defaults promise. `--policy <file>` verifies a specific
-//! policy instead (e.g. your installed `~/.sentinel/policy.toml`).
+//! Bare `verify` checks the policy that actually protects you right now: your
+//! INSTALLED `~/.sentinel/policy.toml` when one exists, falling back to the
+//! bundled default only when nothing is installed (the CI case). So a stale
+//! installed policy that predates a rule fix will fail here even though the
+//! bundled default passes - that failure is the point, it tells you to reinstall.
+//! `--policy <file>` verifies a specific policy instead.
 //!
 //! Scope note: this is a pinned in-binary regression set of single tool calls
 //! through `PolicyEngine::evaluate` - NOT the multi-turn sandbox corpus that
