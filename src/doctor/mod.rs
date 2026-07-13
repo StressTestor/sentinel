@@ -565,6 +565,7 @@ mod tests {
             reason: None,
             matched_rule: None,
             mode: "enforce".into(),
+            call_id: None,
         };
         let events = vec![
             ev("block", &recent),

@@ -81,6 +81,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         reason: Some(format!("secret shape in tool result: {kinds}")),
         matched_rule: Some("post-evaluate: result-secret".into()),
         mode: engine.mode().to_string(),
+        // the correlation id (SENTINEL_CALL_ID) is set by a caller wrapping the
+        // *evaluate* subprocess; a PostToolUse invocation is a separate process
+        // Claude Code spawns directly, and the join contract is exactly one
+        // audit line per governing call — so no call_id here.
+        call_id: None,
     });
 
     let out = PostHookOutput {
