@@ -190,6 +190,10 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         reason: decision.reason.clone(),
         matched_rule: decision.matched_rule.clone(),
         mode: engine.mode().to_string(),
+        // correlate with the caller's own log when a wrapper (e.g. the ghost
+        // bridge) tagged this call. read-only telemetry: absent or malformed
+        // env never changes the decision and never touches stdout/stderr.
+        call_id: audit_trail::call_id_from_env(),
     });
 
     // in audit mode, always allow but log
