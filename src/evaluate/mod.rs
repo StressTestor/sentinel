@@ -194,6 +194,10 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         // bridge) tagged this call. read-only telemetry: absent or malformed
         // env never changes the decision and never touches stdout/stderr.
         call_id: audit_trail::call_id_from_env(),
+        // the payload's per-call id joins this pre line to the call's post
+        // line(s) — same value in both phases' payloads. telemetry only.
+        tool_use_id: hook_input.tool_use_id.clone(),
+        hook_phase: Some("pre".into()),
     });
 
     // in audit mode, always allow but log

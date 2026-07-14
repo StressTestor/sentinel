@@ -24,6 +24,14 @@ use std::io::{self, Read};
 struct PostHookInput {
     #[serde(default, alias = "tool_output", alias = "toolResponse")]
     tool_response: serde_json::Value,
+    /// same per-call id the PreToolUse payload carried — the pre↔post join key.
+    /// lenient like the pre schema: absent/empty/non-string -> None, never a
+    /// parse failure.
+    #[serde(
+        default,
+        deserialize_with = "crate::evaluate::hook_schema::lenient_opt_string"
+    )]
+    tool_use_id: Option<String>,
     #[serde(flatten)]
     _extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -83,9 +91,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         mode: engine.mode().to_string(),
         // the correlation id (SENTINEL_CALL_ID) is set by a caller wrapping the
         // *evaluate* subprocess; a PostToolUse invocation is a separate process
-        // Claude Code spawns directly, and the join contract is exactly one
-        // audit line per governing call — so no call_id here.
+        // Claude Code spawns directly, so the env route is dead here BY DESIGN.
+        // this post line joins its governing call through tool_use_id instead:
+        // pre <-> post share the payload's id, ghost <-> pre share call_id.
         call_id: None,
+        tool_use_id: hook.tool_use_id.clone(),
+        hook_phase: Some("post".into()),
     });
 
     let out = PostHookOutput {

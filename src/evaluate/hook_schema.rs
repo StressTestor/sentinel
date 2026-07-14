@@ -18,9 +18,31 @@ pub struct HookInput {
     #[serde(default)]
     pub cwd: Option<String>,
 
+    /// Claude Code's per-call tool use id. The SAME value arrives in the
+    /// PreToolUse and PostToolUse payloads for one tool call (verified against
+    /// Claude Code 2.1.207), which makes it the pre↔post join key in the audit
+    /// trail. Lenient on purpose: absent, empty, or non-string values become
+    /// `None` — a malformed id must never make the whole payload unparseable,
+    /// because an unparseable payload is a *degraded input* and can change the
+    /// verdict under fail-closed.
+    #[serde(default, deserialize_with = "lenient_opt_string")]
+    pub tool_use_id: Option<String>,
+
     // capture everything else for forward compatibility
     #[serde(flatten)]
     pub _extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Deserialize an optional string field without ever failing the parent parse:
+/// a string → trimmed `Some` (empty → `None`); null / absent / any non-string
+/// JSON type → `None`. Shared by the pre and post hook input schemas.
+pub(crate) fn lenient_opt_string<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|x| x.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty()))
 }
 
 /// Build a synthetic Bash ToolCall for a single command string, reusing the
@@ -32,6 +54,7 @@ pub fn tool_call_for_command(command: &str) -> ToolCall {
         tool_name: Some("Bash".into()),
         tool_input: serde_json::json!({ "command": command }),
         cwd: None,
+        tool_use_id: None,
         _extra: serde_json::Map::new(),
     }
     .to_tool_call()
@@ -323,6 +346,38 @@ mod tests {
         let no_cwd: HookInput =
             serde_json::from_str(r#"{"tool_name":"Bash","tool_input":{}}"#).unwrap();
         assert_eq!(no_cwd.cwd, None);
+    }
+
+    #[test]
+    fn tool_use_id_is_parsed_and_lenient() {
+        // present -> lands on the field (the pre<->post audit join key).
+        let json = r#"{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"toolu_01QoWqbiPYgBoiZQPDuvUHKb"}"#;
+        let input: HookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            input.tool_use_id.as_deref(),
+            Some("toolu_01QoWqbiPYgBoiZQPDuvUHKb")
+        );
+
+        // absent -> None.
+        let none: HookInput =
+            serde_json::from_str(r#"{"tool_name":"Bash","tool_input":{}}"#).unwrap();
+        assert_eq!(none.tool_use_id, None);
+
+        // malformed shapes must normalize to None WITHOUT failing the parse —
+        // an unparseable payload is a degraded input and can change the verdict.
+        for bad in [
+            r#"{"tool_name":"Bash","tool_input":{},"tool_use_id":null}"#,
+            r#"{"tool_name":"Bash","tool_input":{},"tool_use_id":42}"#,
+            r#"{"tool_name":"Bash","tool_input":{},"tool_use_id":["a"]}"#,
+            r#"{"tool_name":"Bash","tool_input":{},"tool_use_id":{"x":1}}"#,
+            r#"{"tool_name":"Bash","tool_input":{},"tool_use_id":""}"#,
+            r#"{"tool_name":"Bash","tool_input":{},"tool_use_id":"   "}"#,
+        ] {
+            let parsed: HookInput = serde_json::from_str(bad)
+                .unwrap_or_else(|e| panic!("must stay parseable ({bad}): {e}"));
+            assert_eq!(parsed.tool_use_id, None, "payload: {bad}");
+            assert_eq!(parsed.to_tool_call().tool_name, "Bash");
+        }
     }
 
     #[test]
