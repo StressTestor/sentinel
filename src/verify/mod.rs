@@ -63,7 +63,12 @@ fn cases() -> Vec<Case> {
         c("env var exfil via grep", s(r#"{"tool_name":"Bash","tool_input":{"command":"env | grep -i secret"}}"#), Block),
         c("exfil ssh key via bash", s(r#"{"tool_name":"Bash","tool_input":{"command":"cat ~/.ssh/id_rsa"}}"#), Block),
         // --- self-protect (block) ---
-        c("overwrite sentinel policy", s(r#"{"tool_name":"Write","tool_input":{"file_path":"~/.sentinel/policy.toml","content":"[policy]\nmode=\"audit\""}}"#), Block),
+        // policy.toml's PATH rule is warn-tier (reads/copies-OUT are legitimate);
+        // a shell REWRITE is the engine-visible disarm this pure (no-I/O) self-test
+        // checks, mirroring "shell-strip settings hook" below. The Write-tool
+        // rewrite is blocked by the selfprotect pass, which the live evaluate
+        // pipeline runs but this engine-only self-test does not exercise.
+        c("rewrite sentinel policy", s(r#"{"tool_name":"Bash","tool_input":{"command":"sed -i '' s/enforce/audit/ ~/.sentinel/policy.toml"}}"#), Block),
         // --- secret content in a write (block) ---
         c("write AWS access key", s(r#"{"tool_name":"Write","tool_input":{"file_path":"./notes.txt","content":"key AKIAIOSFODNN7EXAMPLE here"}}"#), Block),
         c("write azure account key", azure, Block),

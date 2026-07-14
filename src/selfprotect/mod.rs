@@ -72,12 +72,76 @@ pub fn escalate(
 /// already looks like a hook-removing settings write — the hot path
 /// (every other tool call) stays free of extra I/O.
 pub fn apply(decision: PolicyDecision, tool_input: &Value) -> PolicyDecision {
-    if decision.action == Action::Block || !is_hook_removal_write(tool_input) {
+    if decision.action == Action::Block {
+        return decision; // a real block keeps its own reason
+    }
+    // sentinel's OWN policy file: any Write/Edit/MultiEdit whose target path is
+    // ~/.sentinel/policy.toml is blocked UNCONDITIONALLY. Unlike the agent hook
+    // configs (which developers legitimately edit, so only a hook-removing write
+    // escalates), there is NO legitimate agent write to policy.toml — the human
+    // reconfigures it outside the guarded session — so no content check applies. A
+    // Read carries no new content and is left alone: it stays at the warn-tier
+    // deny.path rule (reads/copies-OUT are allowed). This closes the Write-tool
+    // disarm that flipping policy.toml's path rule from block to warn would open.
+    if is_policy_toml_write(tool_input) {
+        return PolicyDecision {
+            action: Action::Block,
+            reason: Some(
+                "write to sentinel's own policy.toml would let an injected agent disable the \
+                 guard mid-session (self-protect; reconfigure outside the agent)"
+                    .into(),
+            ),
+            matched_rule: Some("selfprotect: policy.toml write".into()),
+        };
+    }
+    if !is_hook_removal_write(tool_input) {
         return decision;
     }
     let installed = target_hook_config(tool_input)
         .is_some_and(|(path, _)| live_hook_installed_for_target(path));
     escalate(decision, tool_input, installed)
+}
+
+/// A Write/Edit/MultiEdit whose target path (across every carried alias) is
+/// sentinel's own policy file. Requires a new-content payload, so a plain Read of
+/// policy.toml (no `content`/`edits`/`new_string`) is NOT caught — reads stay at
+/// the warn-tier path rule. Every alias is checked, mirroring
+/// [`target_hook_config`], so a benign first alias can't shadow a policy.toml path
+/// in a later one.
+fn is_policy_toml_write(tool_input: &Value) -> bool {
+    let targets_policy = TARGET_PATH_FIELDS.iter().any(|k| {
+        tool_input
+            .get(*k)
+            .and_then(|v| v.as_str())
+            .is_some_and(is_sentinel_policy_path)
+    });
+    targets_policy && carries_write_payload(tool_input)
+}
+
+/// does this tool_input carry NEW content — Write `content`, Edit `new_string`,
+/// or MultiEdit `edits` — i.e. is it a mutating tool call rather than a Read?
+fn carries_write_payload(tool_input: &Value) -> bool {
+    tool_input.get("content").and_then(|v| v.as_str()).is_some()
+        || tool_input.get("new_string").is_some()
+        || tool_input.get("edits").and_then(|v| v.as_array()).is_some()
+}
+
+/// suffix match on sentinel's own policy file, requiring `.sentinel` to be a real
+/// path component (so `/x/foo.sentinel/policy.toml` does not match). mirrors
+/// [`is_claude_settings_path`]: `~`-prefixed paths need no expansion, and the
+/// compare is lowercased for macOS's case-insensitive default FS.
+fn is_sentinel_policy_path(path: &str) -> bool {
+    let p = path.trim().to_ascii_lowercase();
+    const SUFFIX: &str = ".sentinel/policy.toml";
+    if p == SUFFIX {
+        return true; // bare relative form
+    }
+    if let Some(prefix) = p.strip_suffix(SUFFIX) {
+        if prefix.ends_with('/') {
+            return true; // ~/..., /abs/..., rel/... forms
+        }
+    }
+    false
 }
 
 /// pure detection: does this tool_input describe a write that targets a
@@ -958,6 +1022,74 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
             autorun_commands(&json!({"file_path": "/proj/src/main.rs", "content": claude}))
                 .is_empty()
         );
+    }
+
+    const POLICY: &str = "/Users/u/.sentinel/policy.toml";
+
+    // FIX C: a Write/Edit/MultiEdit targeting policy.toml is blocked
+    // UNCONDITIONALLY — no content check, unlike the agent hook configs. There is
+    // no legitimate agent write to sentinel's own policy.
+    #[test]
+    fn write_to_policy_toml_is_blocked_unconditionally() {
+        // even harmless-looking content blocks (there is no valid agent write)
+        let write = json!({"file_path": POLICY, "content": "harmless = true"});
+        let d = apply(allow_decision(), &write);
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(
+            d.matched_rule.as_deref(),
+            Some("selfprotect: policy.toml write")
+        );
+        assert!(
+            d.reason.as_deref().unwrap_or("").contains("self-protect"),
+            "reason should name self-protect: {:?}",
+            d.reason
+        );
+
+        // an Edit and a MultiEdit targeting policy.toml block too
+        let edit = json!({"file_path": POLICY, "old_string": "enforce", "new_string": "audit"});
+        assert_eq!(apply(allow_decision(), &edit).action, Action::Block);
+        let multi = json!({"file_path": POLICY, "edits": [{"old_string": "a", "new_string": "b"}]});
+        assert_eq!(apply(allow_decision(), &multi).action, Action::Block);
+
+        // a benign FIRST path alias must not shadow the policy.toml path in a LATER
+        // alias (mirrors the settings.json alias-shadowing guard).
+        let aliased = json!({"file_path": "/tmp/benign.txt", "path": POLICY, "content": "x = 1"});
+        assert_eq!(apply(allow_decision(), &aliased).action, Action::Block);
+
+        // an existing Block keeps its own reason — policy.toml block doesn't clobber it
+        let block = PolicyDecision {
+            action: Action::Block,
+            reason: Some("real policy block".into()),
+            matched_rule: Some("deny.paths: something".into()),
+        };
+        assert_eq!(apply(block.clone(), &write), block);
+    }
+
+    // a READ of policy.toml carries no new content → selfprotect leaves it alone
+    // (it stays at the warn-tier path rule; reads/copies-OUT are allowed).
+    #[test]
+    fn read_of_policy_toml_is_not_escalated() {
+        let read = json!({"file_path": POLICY});
+        assert_eq!(apply(warn_decision(), &read), warn_decision());
+    }
+
+    // `.sentinel` must be a real path component: a directory merely NAMED
+    // `foo.sentinel` does not match; tilde and bare-relative forms do.
+    #[test]
+    fn policy_toml_path_component_matching() {
+        let near_miss = json!({"file_path": "/x/foo.sentinel/policy.toml", "content": "x = 1"});
+        assert_eq!(apply(allow_decision(), &near_miss), allow_decision());
+        for p in [".sentinel/policy.toml", "~/.sentinel/policy.toml"] {
+            let input = json!({"file_path": p, "content": "x = 1"});
+            assert_eq!(
+                apply(allow_decision(), &input).action,
+                Action::Block,
+                "should protect: {p}"
+            );
+        }
+        // case-insensitive match (macOS default FS)
+        let cased = json!({"file_path": "/Users/u/.Sentinel/Policy.toml", "content": "x = 1"});
+        assert_eq!(apply(allow_decision(), &cased).action, Action::Block);
     }
 
     // A benign earlier path alias must not shadow a later config-path alias.
