@@ -81,15 +81,19 @@ reason = "process environment (env-var exfil via file read)"
 # not the worm self-propagating. See README "what this does and doesn't catch".
 
 # self-protect: a prompt-injected agent must not be able to weaken Sentinel's own
-# policy. Only the agent's tool-call writes are blocked - your own
+# policy. Reading/copying-FROM policy.toml is legitimate (backup, inspection), so
+# the PATH rule is warn-tier - a pure read (`cat`, `cp policy.toml backup`) is
+# surfaced, not blocked. Every WRITE/mutation is blocked elsewhere: the policy.toml
+# Bash-mutation command cluster below (sed -i / redirect / tee / cp-as-dest / ...)
+# and the selfprotect module (a Write/Edit/MultiEdit targeting policy.toml is
+# blocked UNCONDITIONALLY - there is no legitimate agent write to it). Your own
 # `vim ~/.sentinel/policy.toml` and `sentinel install` (writes via std::fs, not a
-# tool call) are unaffected. Reconfigure outside the guarded session. This raises
-# the cost of the obvious disarm; a path built from a shell variable or written by
-# a subprocess can still get through.
+# tool call) are unaffected. Reconfigure outside the guarded session. A path built
+# from a shell variable or written by a subprocess can still get through.
 [[deny.paths]]
 pattern = "~/.sentinel/policy.toml"
-action = "block"
-reason = "Sentinel's own enforcement policy - agent writes blocked so an injected agent can't disable the guard mid-session (reconfigure outside the agent)"
+action = "warn"
+reason = "Sentinel's own enforcement policy - reads warn (backup/inspect ok); writes blocked by the policy.toml command cluster + selfprotect so an injected agent can't disable the guard mid-session (reconfigure outside the agent)"
 
 # self-protect the Sentinel BINARY: deleting/overwriting it disarms the guard
 # (doctor documents a missing binary fails open). Block agent writes and
@@ -732,6 +736,51 @@ pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.claude/settings(\.local)?\.
 action = "block"
 reason = "replacing/zeroing .claude/settings.json via cp/install/ln/dd/truncate - can strip the PreToolUse hook (guard-disarm)"
 
+# rewriting ~/.sentinel/policy.toml from a SHELL child process is the disarm the
+# selfprotect content-check CANNOT see (it inspects only Write/Edit/MultiEdit tool
+# calls, not a Bash subprocess). policy.toml's path rule mines to WARN so reads /
+# copies-OUT pass; these BLOCK rules override that WARN for a mutation. Mirrors the
+# .claude/settings.json cluster above, retargeted to policy.toml. `rm`/`mv`/
+# `truncate`/`chflags` of ~/.sentinel are already covered by the ~/.sentinel rule
+# above, so they are NOT repeated here. Reconfigure outside the guarded session.
+#
+# the sed/gsed/perl/awk `-i` member deliberately uses `.*` (NOT the [^;&|\n]*
+# separator-narrowing applied to the rest): a real in-place script legitimately
+# carries `;` `|` `&` as literals inside its program text (`sed -i 's/a/b/;s/c/d/'`),
+# so narrowing this one rule would let an in-place policy rewrite slip through. The
+# other members use [^;&|\n]* so an innocent verb in one command segment can't reach
+# the policy.toml target in another (the separator-scope fix already in this file).
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of ~/.sentinel/policy.toml - can flip enforce->audit or drop rules (guard-disarm)"
+
+# line editors (ed/ex) rewrite in place with no -i flag, no redirect, no tee.
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor (ed/ex) rewrite of ~/.sentinel/policy.toml - can flip enforce->audit or drop rules (guard-disarm)"
+
+# truncating/overwriting redirect (`>`, `>>`, `>|` clobber) onto the policy file.
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting ~/.sentinel/policy.toml via redirect - can flip enforce->audit or drop rules (guard-disarm)"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting ~/.sentinel/policy.toml via tee/sponge - can flip enforce->audit or drop rules (guard-disarm)"
+
+# replacing the policy file with attacker content via cp/install/ln/dd, or zeroing
+# it via truncate. End-anchored so policy.toml must be the DESTINATION (last path,
+# modulo trailing flags) - `cp ~/.sentinel/policy.toml backup` (reading it OUT)
+# stays at the warn-tier path rule, not blocked.
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.sentinel/policy\.toml(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing ~/.sentinel/policy.toml via cp/install/ln/dd/truncate - can flip enforce->audit or drop rules (guard-disarm)"
+
 # --- FIX C: data-exfil via curl/wget/fetch carrying DATA/UPLOAD flags ---
 # Existing curl rules only catch pipe-to-shell, $(curl, backtick-curl, staged
 # -o+run, and @credfile. A bare data POST/upload (`curl --data "$(env)"`,
@@ -1003,7 +1052,8 @@ mod tests {
     use crate::policy::{Action, PolicyEngine, ToolCall};
 
     // These tests exercise the ACTUAL generated default policy end-to-end through
-    // the real PolicyEngine::evaluate. The per-rule matcher semantics are covered
+    // the real PolicyEngine::evaluate PLUS the selfprotect pass the live evaluate
+    // pipeline runs (see `action_of`). The per-rule matcher semantics are covered
     // by unit tests in policy/matcher.rs; what's verified HERE is the assembled
     // file - rule ordering, cross-rule shadowing, and tier (block vs warn) - which
     // is exactly where a single-rule view can't catch a regression.
@@ -1054,7 +1104,16 @@ mod tests {
     }
 
     fn action_of(call: &ToolCall) -> Action {
-        engine().evaluate(call).action
+        let decision = engine().evaluate(call);
+        // route through the SAME selfprotect pass the production evaluate pipeline
+        // applies (src/evaluate/mod.rs) so a Write-tool disarm of policy.toml /
+        // settings.json is exercised end-to-end, not just at the rule layer. The
+        // tool_input is reconstructed from raw_params exactly as `to_tool_call`
+        // serialized it; path_call/cmd_call/secret_call carry no target-path field,
+        // so selfprotect is a no-op for them.
+        let tool_input =
+            serde_json::from_str(&call.raw_params).unwrap_or(serde_json::Value::Null);
+        crate::selfprotect::apply(decision, &tool_input).action
     }
 
     // ── self-protect: block Sentinel's own policy, allow audit-log reads ────────
@@ -1062,14 +1121,63 @@ mod tests {
     #[test]
     fn self_protect_blocks_policy_writes() {
         // ~ form is portable: pattern and candidate both expand with runtime HOME.
-        assert_eq!(action_of(&path_call("~/.sentinel/policy.toml")), Action::Block);
+        // FIX C: the policy.toml PATH rule is now warn-tier (reads/copies-OUT are
+        // legitimate); writes are blocked by the command cluster + selfprotect.
+        assert_eq!(action_of(&path_call("~/.sentinel/policy.toml")), Action::Warn);
         let decision = engine().evaluate(&path_call("~/.sentinel/policy.toml"));
         assert!(
             decision.matched_rule.unwrap().contains(".sentinel"),
             "must be attributed to the self-protect rule"
         );
-        // rm of the policy file (mined from a Bash command) is the same rule
+        // rm of the policy file (mined from a Bash command) still blocks via the
+        // ~/.sentinel delete rule.
         assert_eq!(action_of(&cmd_call("rm -f ~/.sentinel/policy.toml")), Action::Block);
+    }
+
+    // FIX C disarm-closed: reads/copies-FROM policy.toml pass (warn-tier path
+    // rule); every write/mutation blocks. The path rule alone can't tell a read
+    // from a write, so reads warn while the Bash-mutation command cluster and the
+    // selfprotect Write/Edit/MultiEdit block cover every write path. If any
+    // MUST-BLOCK case slips to warn, flipping the path rule to warn opened a
+    // disarm and the whole fix is unsafe.
+    #[test]
+    fn policy_toml_reads_pass_writes_block() {
+        // MUST-PASS: pure reads / copy-OUT are surfaced (warn) but never blocked.
+        for pass in [
+            "cat ~/.sentinel/policy.toml",
+            "cp ~/.sentinel/policy.toml /tmp/backup.toml",
+            "grep enforce ~/.sentinel/policy.toml",
+        ] {
+            assert_ne!(
+                action_of(&cmd_call(pass)),
+                Action::Block,
+                "reading/copying-OUT policy.toml must not block: {pass}"
+            );
+        }
+
+        // MUST-BLOCK: in-place mutation / overwrite / replace / delete of policy.toml.
+        for block in [
+            "sed -i 's/enforce/audit/' ~/.sentinel/policy.toml",
+            "echo x > ~/.sentinel/policy.toml",
+            "cp evil.toml ~/.sentinel/policy.toml",
+            "rm -f ~/.sentinel/policy.toml",
+        ] {
+            assert_eq!(
+                action_of(&cmd_call(block)),
+                Action::Block,
+                "mutating policy.toml must block: {block}"
+            );
+        }
+
+        // the disarm-closed check: a Write TOOL targeting policy.toml carries no
+        // shell verb, so no command rule sees it — selfprotect must block it. If
+        // this is not Block, flipping the path rule to warn opened a Write-tool
+        // disarm and the whole fix is unsafe.
+        assert_eq!(
+            action_of(&write_call("~/.sentinel/policy.toml", "harmless=true")),
+            Action::Block,
+            "Write tool targeting policy.toml must block (selfprotect disarm-closed)"
+        );
     }
 
     #[test]
