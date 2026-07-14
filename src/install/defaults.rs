@@ -619,7 +619,7 @@ reason = "defaults read of a secret-named preference - review for credential exf
 # the binary non-executable, immutable, or zero-length disarms the guard just as
 # deleting it does (doctor documents a missing/broken binary fails open).
 [[deny.commands]]
-pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b.*\bsentinel-guard\b'
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b[^;&|\n]*\bsentinel-guard\b'
 action = "block"
 reason = "destructive/disarming operation against the Sentinel crate binary (sentinel-guard) - guard-disarm tamper"
 
@@ -628,7 +628,7 @@ reason = "destructive/disarming operation against the Sentinel crate binary (sen
 # ~/projects/sentinel/target`) or a sentinel-prefixed file (`/tmp/sentinel-build`)
 # is NOT a false positive - only a path whose final component is the binary itself.
 [[deny.commands]]
-pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate)\b.*/sentinel(["\x27\s<>;|&]|$)'
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate)\b[^;&|\n]*/sentinel(["\x27\s<>;|&]|$)'
 action = "block"
 reason = "destructive/disarming operation against a path ending in /sentinel - guard-disarm tamper"
 
@@ -677,7 +677,7 @@ reason = "agent invoked `sentinel uninstall` - removes the guard's hook (reconfi
 # slash) or its settings file - a subdir cleanup (`rm -rf
 # ~/.claude/projects/old`) does NOT match (it can't disarm).
 [[deny.commands]]
-pattern = '\b(rm|mv)\b.*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/settings(\.local)?\.json|/)?(["\x27\s;|&]|$)'
+pattern = '\b(rm|mv)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/settings(\.local)?\.json|/)?(["\x27\s;|&]|$)'
 action = "block"
 reason = "deleting/moving ~/.claude or its settings.json removes the PreToolUse hook (guard-disarm)"
 
@@ -686,7 +686,7 @@ reason = "deleting/moving ~/.claude or its settings.json removes the PreToolUse 
 # a real disarm and erases the audit trail - block it. (READING ~/.sentinel/*,
 # e.g. the audit log, is untouched: this is a command rule on rm/mv only.)
 [[deny.commands]]
-pattern = '\b(rm|mv)\b.*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.sentinel(/|["\x27\s;|&]|$)'
+pattern = '\b(rm|mv|truncate|chflags)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.sentinel(/|["\x27\s;|&]|$)'
 action = "block"
 reason = "deleting/moving ~/.sentinel removes the guard's policy + audit trail (guard-disarm)"
 
@@ -718,7 +718,7 @@ action = "block"
 reason = "truncating/overwriting .claude/settings.json via redirect - can strip the PreToolUse hook (guard-disarm)"
 
 [[deny.commands]]
-pattern = '\b(tee|sponge)\b.*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
 action = "block"
 reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreToolUse hook (guard-disarm)"
 
@@ -728,7 +728,7 @@ reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreTo
 # the DESTINATION (last path, modulo trailing flags) - `cp settings.json backup`
 # (reading it OUT) stays at the warn-tier path rule, not blocked.
 [[deny.commands]]
-pattern = '\b(cp|install|ln|dd|truncate)\b.*\.claude/settings(\.local)?\.json(\s+-\S+)*\s*$'
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.claude/settings(\.local)?\.json(\s+-\S+)*\s*$'
 action = "block"
 reason = "replacing/zeroing .claude/settings.json via cp/install/ln/dd/truncate - can strip the PreToolUse hook (guard-disarm)"
 
@@ -1082,6 +1082,45 @@ mod tests {
     #[test]
     fn self_protect_does_not_overmatch_siblings() {
         assert_eq!(action_of(&path_call("~/.sentinelrc")), Action::Allow);
+    }
+
+    // ── self-protect command rules are separator-scoped (greedy .* → [^;&|\n]*) ──
+    // greedy .* let an innocent verb in ONE command segment reach a protected
+    // target in ANOTHER, false-blocking on mere co-occurrence. Narrowing to
+    // [^;&|\n]* stops at a shell separator, so only a mutating verb whose OWN
+    // operand is the target still trips — while real disarms (no separator between
+    // verb and target) stay blocked.
+    #[test]
+    fn self_protect_command_rules_stop_at_separators() {
+        // MUST-PASS: the destructive verb targets a DIFFERENT file; the protected
+        // path only co-occurs in a later segment (the exact field FP).
+        for pass in [
+            "rm seance-state; cat ~/.sentinel/audit.jsonl",
+            "rm build.log && grep mode ~/.sentinel/audit.jsonl",
+            "echo x | tee /tmp/log; cat .claude/settings.json",
+        ] {
+            assert_ne!(
+                action_of(&cmd_call(pass)),
+                Action::Block,
+                "co-occurrence across a separator must not block: {pass}"
+            );
+        }
+        // MUST-BLOCK: a mutating verb whose own operand IS the protected target
+        // (no separator between) — coverage preserved, plus truncate/chflags added.
+        for block in [
+            "rm -rf ~/.sentinel",
+            "truncate -s0 ~/.sentinel/audit.jsonl",
+            "chmod 000 /opt/tools/sentinel",
+            "rm -rf ~/.claude",
+            "cat evil | tee ~/.claude/settings.json",
+            "test -d ~/.sentinel && rm -rf ~/.sentinel",
+        ] {
+            assert_eq!(
+                action_of(&cmd_call(block)),
+                Action::Block,
+                "real disarm must still block: {block}"
+            );
+        }
     }
 
     // ── cred-content ordering: a GCP SA file must BLOCK via the pre-existing pem
