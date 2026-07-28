@@ -1,0 +1,348 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      sha: ${{ steps.identity.outputs.sha }}
+      crate_published: ${{ steps.identity.outputs.crate_published }}
+      release_exists: ${{ steps.identity.outputs.release_exists }}
+      release_draft: ${{ steps.identity.outputs.release_draft }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: fetch canonical main and tags
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --tags origin
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - name: prove dirty local source is rejected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dirty_marker=".sentinel-release-dirty-test"
+          trap 'rm -f "$dirty_marker"' EXIT
+          touch "$dirty_marker"
+          if negative_output="$(
+            GITHUB_SHA= GITHUB_REF= \
+              bash scripts/release-identity.sh --dry-run 2>&1
+          )"; then
+            echo "release identity accepted a dirty local worktree" >&2
+            exit 1
+          fi
+          grep -q 'local verification requires a clean committed worktree' \
+            <<<"$negative_output"
+      - name: prove unmerged source is rejected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          unmerged_sha="$(
+            GIT_AUTHOR_NAME=sentinel \
+            GIT_AUTHOR_EMAIL=release-test@invalid \
+            GIT_COMMITTER_NAME=sentinel \
+            GIT_COMMITTER_EMAIL=release-test@invalid \
+              git commit-tree "$(git rev-parse HEAD^{tree})" -m "release identity negative test"
+          )"
+          if negative_output="$(
+            GITHUB_SHA="$unmerged_sha" \
+            GITHUB_REF=refs/heads/main \
+              bash scripts/release-identity.sh --dry-run 2>&1
+          )"; then
+            echo "release identity accepted an unmerged source" >&2
+            exit 1
+          fi
+          grep -q 'not reachable from canonical origin/main' <<<"$negative_output"
+      - name: prove release identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            bash scripts/release-identity.sh --publish
+          else
+            bash scripts/release-identity.sh --dry-run
+          fi
+
+  verify:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: AD-5 network-call lint
+        run: bash scripts/ad5-network-lint.sh
+      - name: tests
+        run: cargo test --locked --all-targets --all-features --verbose
+      - name: clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: build verifier binary
+        run: cargo build --locked --all-features --bin sentinel
+      - name: bundled attack regression gate
+        run: |
+          verify_home="$RUNNER_TEMP/sentinel-verify-home"
+          mkdir -p "$verify_home"
+          HOME="$verify_home" target/debug/sentinel verify
+      - name: public documentation assertions
+        run: bash scripts/docs-claims-check.sh target/debug/sentinel
+      - name: packaged-source install and command smoke
+        env:
+          SENTINEL_EXPECTED_VCS_SHA: ${{ needs.preflight.outputs.sha }}
+        run: bash scripts/package-smoke.sh
+      - name: install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: RustSec advisory audit
+        run: cargo audit --deny warnings
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-crate
+          path: target/package/sentinel-guard-*.crate
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    needs: [preflight, verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: install musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: build locked release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: inspect binary
+        run: |
+          binary="target/${{ matrix.target }}/release/sentinel"
+          file "$binary"
+          host_target="$(rustc -vV | sed -n 's/^host: //p')"
+          host_arch="${host_target%%-*}"
+          target_arch="${{ matrix.target }}"
+          target_arch="${target_arch%%-*}"
+          if [[ "$host_target" == "${{ matrix.target }}" ]] \
+            || [[ "${{ matrix.target }}" == *-unknown-linux-musl \
+              && "$host_arch" == "$target_arch" ]]; then
+            "$binary" --version
+          fi
+          if [[ "${{ matrix.target }}" == *-unknown-linux-musl ]]; then
+            file "$binary" | grep -Eq 'statically linked|static-pie linked'
+          fi
+      - name: stage target archive
+        run: |
+          archive_root="sentinel-${{ matrix.target }}"
+          mkdir -p "dist/$archive_root"
+          cp "target/${{ matrix.target }}/release/sentinel" "dist/$archive_root/sentinel"
+          cp LICENSE-APACHE LICENSE-MIT README.md "dist/$archive_root/"
+          tar -C dist -czf "dist/$archive_root.tar.gz" "$archive_root"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/sentinel-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    needs: [preflight, verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: generate target-specific CycloneDX SBOMs
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          targets=(
+            x86_64-unknown-linux-musl
+            aarch64-unknown-linux-musl
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+          )
+          for target in "${targets[@]}"; do
+            cargo cyclonedx \
+              --format json \
+              --target "$target" \
+              --target-in-filename
+          done
+          cp sentinel-guard_*.cdx.json dist/
+          test "$(find dist -maxdepth 1 -name 'sentinel-guard_*.cdx.json' | wc -l)" -eq 4
+      - name: generate checksums
+        run: |
+          find dist -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  dist/#  #' \
+            > dist/SHA256SUMS
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dist-${{ needs.preflight.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: attest release artifacts
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/*
+
+  publish:
+    needs: [preflight, assemble]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: fetch canonical main and tags
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --tags origin
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist-${{ needs.preflight.outputs.version }}
+          path: dist
+      - name: require crates.io release credential
+        if: needs.preflight.outputs.crate_published != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "CARGO_REGISTRY_TOKEN is not configured in the release environment" >&2
+            exit 1
+          fi
+      - name: publish crate from the tagged source
+        if: needs.preflight.outputs.crate_published != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+      - name: verify crates.io source identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if bash scripts/release-identity.sh --publish; then
+              exit 0
+            fi
+            if [[ "$attempt" == "6" ]]; then
+              exit 1
+            fi
+            sleep 5
+          done
+      - name: create or resume draft release
+        if: >-
+          needs.preflight.outputs.release_exists != 'true' ||
+          needs.preflight.outputs.release_draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EXISTS: ${{ needs.preflight.outputs.release_exists }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "See [CHANGELOG.md](https://github.com/StressTestor/sentinel/blob/$RELEASE_TAG/CHANGELOG.md) for the complete change list."
+            echo
+            echo "Artifacts are built from \`$RELEASE_SHA\`, checksummed in \`SHA256SUMS\`, and covered by GitHub artifact attestations."
+          } >"$notes_file"
+          if [[ "$RELEASE_EXISTS" != "true" ]]; then
+            gh release create "$RELEASE_TAG" \
+              --repo StressTestor/sentinel \
+              --verify-tag \
+              --target "$RELEASE_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes-file "$notes_file" \
+              --draft
+          fi
+      - name: upload every asset before publication
+        if: >-
+          needs.preflight.outputs.release_exists != 'true' ||
+          needs.preflight.outputs.release_draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: gh release upload "$RELEASE_TAG" --repo StressTestor/sentinel --clobber dist/*
+      - name: revalidate remote tag before publication
+        if: >-
+          needs.preflight.outputs.release_exists != 'true' ||
+          needs.preflight.outputs.release_draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release-identity.sh --publish
+      - name: publish immutable-ready GitHub release
+        if: >-
+          needs.preflight.outputs.release_exists != 'true' ||
+          needs.preflight.outputs.release_draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --repo StressTestor/sentinel --draft=false --latest

@@ -6,20 +6,48 @@ versioning.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-28
+
 ### Added
 - Supply-chain security CI: CodeQL (rust + actions), OpenSSF Scorecard with
   published results, cargo-deny (advisories/bans/licenses/sources) on a daily
   cron, dependency review on PRs, and Dependabot for cargo + actions updates.
 - `SECURITY.md` (private vulnerability reporting), `CONTRIBUTING.md`, and the
   `LICENSE-MIT` / `LICENSE-APACHE` files the README badge always pointed at.
+- **Stateful real-agent audit.** Claude Code and Codex adapters resume one
+  structured session across the turns of each sequence, isolate separate
+  sequences, correlate action evidence, bound runtime and output, and require
+  `--unsafe-host` because no containment layer ships.
+- **Versioned audit corpus.** `corpus/v1` bundles three project-authored safe
+  canaries with provenance and license notes; explicit filesystem overrides are
+  deterministic and schema-validated.
+- **Native lifecycle health.** Claude Code and Codex install/uninstall now
+  reconcile direct and Ghost-mediated ownership. Status and doctor inspect
+  activation, Codex trust, conflicts, policy health, and a real deny canary.
+- **Explicit MCP baselines.** Discovery is read-only until `audit-mcp --update`;
+  versioned baselines store salted canonical digests and strict mode reports
+  added, changed, missing, or removed servers.
+- **Validated policy migration.** `policy-migrate --check` reports drift;
+  `--apply` uses a comment-preserving three-way merge, backup, atomic write, and
+  lint/verifier/self-protect/canary validation with rollback on failure.
+- **Release evidence.** CI now includes Rust 1.85 MSRV, docs-claims, and
+  extracted-package gates. Tag releases enforce source identity, build four
+  targets, generate SBOMs and checksums, attest artifacts, and publish the crate
+  before making the GitHub release public.
 
 ### Changed
 - All workflow actions are now pinned to full commit SHAs with least-privilege
   `permissions` blocks and `persist-credentials: false` on checkouts.
+- Host payloads now pass through one typed normalization and policy pipeline.
+  Codex `apply_patch` is treated as a file mutation, not executable shell text.
+- The crate package explicitly includes source, tests, assets, the versioned
+  corpus, Cargo manifests, security docs, and both licenses.
+- Native lifecycle support is stated narrowly: Sentinel manages Claude Code and
+  Codex; other hook-capable agents may use the lower-level evaluate contract.
 
 ### Security
 A batch of policy-bypass fixes from an adversarial review pass over the default
-ruleset and matchers. Each lands with regression tests; `verify` stays 42/42 and
+ruleset and matchers. Each lands with regression tests; `verify` stays 45/45 and
 the zero-false-positive-block ethos is preserved.
 
 - **Pipe-to-shell wrappers** (#33). `curl … | env sh`, `| /usr/bin/env bash`,
@@ -62,6 +90,8 @@ the zero-false-positive-block ethos is preserved.
   intent (a block-tier secret overrides every held warn: tool, path, command).
 
 ### Removed
+- **Unshipped public surfaces.** Removed the PTY proxy and mutable corpus-update
+  stubs. Real-agent audit has no sandbox fallback or hidden download path.
 - **Dead tier scaffolding.** Deleted the unwired Tier-2 heuristic analyzer
   (`src/heuristic/`) and Tier-3 LLM classifier stub (`src/classifier/`), neither
   of which was ever on the `evaluate` hot path. The heuristic tier's drift signal

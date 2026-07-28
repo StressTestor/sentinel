@@ -20,14 +20,23 @@ fn to_tuples(engine: &PolicyEngine) -> Vec<RuleTuple> {
     engine
         .rules()
         .into_iter()
-        .map(|r| (r.section.into(), r.pattern.into(), r.action.into(), r.reason.into()))
+        .map(|r| {
+            (
+                r.section.into(),
+                r.pattern.into(),
+                r.action.into(),
+                r.reason.into(),
+            )
+        })
         .collect()
 }
 
 /// Default rules whose (section, pattern) identity is absent from the user policy.
 fn missing_defaults(default: &[RuleTuple], user: &[RuleTuple]) -> Vec<RuleTuple> {
-    let user_keys: HashSet<(&str, &str)> =
-        user.iter().map(|(s, p, _, _)| (s.as_str(), p.as_str())).collect();
+    let user_keys: HashSet<(&str, &str)> = user
+        .iter()
+        .map(|(s, p, _, _)| (s.as_str(), p.as_str()))
+        .collect();
     default
         .iter()
         .filter(|(s, p, _, _)| !user_keys.contains(&(s.as_str(), p.as_str())))
@@ -60,7 +69,10 @@ fn format_rule((section, pattern, action, reason): &RuleTuple) -> String {
 pub fn run(args: PolicyDiffArgs) -> Result<(), Box<dyn std::error::Error>> {
     let user_path = args.policy.clone().unwrap_or_else(resolve_policy_path);
     let user = PolicyEngine::load(&user_path).map_err(|e| {
-        format!("could not load policy at {}: {e}\n(run 'sentinel install' first)", user_path.display())
+        format!(
+            "could not load policy at {}: {e}\n(run 'sentinel install' first)",
+            user_path.display()
+        )
     })?;
     let default = PolicyEngine::from_toml_str(&default_policy_content("enforce"))?;
 
@@ -102,7 +114,11 @@ mod tests {
 
     #[test]
     fn reports_only_rules_absent_from_user() {
-        let default = vec![t("deny.paths", "~/.ssh/*"), t("deny.paths", "~/.npmrc"), t("deny.secrets", "AKIA")];
+        let default = vec![
+            t("deny.paths", "~/.ssh/*"),
+            t("deny.paths", "~/.npmrc"),
+            t("deny.secrets", "AKIA"),
+        ];
         let user = vec![t("deny.paths", "~/.ssh/*")];
         let missing = missing_defaults(&default, &user);
         let patterns: Vec<&str> = missing.iter().map(|(_, p, _, _)| p.as_str()).collect();
@@ -132,14 +148,24 @@ mod tests {
         let bare = PolicyEngine::from_toml_str("[policy]\nmode=\"enforce\"\n").unwrap();
         let default = PolicyEngine::from_toml_str(&default_policy_content("enforce")).unwrap();
         let missing = missing_defaults(&to_tuples(&default), &to_tuples(&bare));
-        assert!(missing.len() > 10, "a bare policy should be missing the full default rule set");
+        assert!(
+            missing.len() > 10,
+            "a bare policy should be missing the full default rule set"
+        );
         // and the self-protect rule must be among the missing
-        assert!(missing.iter().any(|(_, p, _, _)| p.contains(".sentinel/policy.toml")));
+        assert!(missing
+            .iter()
+            .any(|(_, p, _, _)| p.contains(".sentinel/policy.toml")));
     }
 
     #[test]
     fn format_rule_is_pasteable_toml() {
-        let r = ("deny.paths".into(), "~/.npmrc".into(), "block".into(), "npm auth".into());
+        let r = (
+            "deny.paths".into(),
+            "~/.npmrc".into(),
+            "block".into(),
+            "npm auth".into(),
+        );
         let out = format_rule(&r);
         assert!(out.contains("[[deny.paths]]"));
         assert!(out.contains(r#"pattern = "~/.npmrc""#)); // globs: double-quoted
@@ -150,7 +176,12 @@ mod tests {
     fn regex_rules_are_single_quoted_to_match_the_file() {
         // a regex with backslashes must paste as a single-quoted literal (no \\),
         // matching how deny.commands/deny.secrets are written in the default file.
-        let r = ("deny.commands".into(), r"rm\s+-rf\s+/".into(), "block".into(), "x".into());
+        let r = (
+            "deny.commands".into(),
+            r"rm\s+-rf\s+/".into(),
+            "block".into(),
+            "x".into(),
+        );
         let out = format_rule(&r);
         assert!(out.contains(r"pattern = 'rm\s+-rf\s+/'"), "got: {out}");
     }

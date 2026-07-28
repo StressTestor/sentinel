@@ -57,7 +57,10 @@ fn secret_in_result_emits_detection_nudge() {
 
     // PostToolUse never blocks (the tool already ran) - always exit 0.
     assert_eq!(code, Some(0), "post-evaluate must not block; got {code:?}");
-    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PostToolUse", "got {out}");
+    assert_eq!(
+        out["hookSpecificOutput"]["hookEventName"], "PostToolUse",
+        "got {out}"
+    );
     let ctx = out["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap_or("");
@@ -82,13 +85,21 @@ fn benign_result_emits_nothing() {
     .to_string();
     let (code, out) = post_eval(h.path(), &payload);
     assert_eq!(code, Some(0));
-    assert_eq!(out, serde_json::json!({}), "a clean result emits an empty object");
+    assert_eq!(
+        out,
+        serde_json::json!({}),
+        "a clean result emits an empty object"
+    );
 }
 
 #[test]
 fn degraded_input_stays_quiet_and_never_blocks() {
     let h = home();
     let (code, out) = post_eval(h.path(), "");
-    assert_eq!(code, Some(0), "empty stdin must not block (nothing to deny post-hoc)");
+    assert_eq!(
+        code,
+        Some(0),
+        "empty stdin must not block (nothing to deny post-hoc)"
+    );
     assert_eq!(out, serde_json::json!({}));
 }

@@ -1,8 +1,9 @@
 pub mod hook_schema;
+pub mod normalize;
+pub mod pipeline;
 
 use crate::audit_trail;
 use crate::policy::{Action, PolicyDecision, PolicyEngine};
-use hook_schema::HookInput;
 use serde::Serialize;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -104,67 +105,15 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         }
     };
 
-    // read JSON from stdin
+    // Read once, then hand every host payload to the shared normalization and
+    // decision pipeline. Parse/normalization failures retain the policy's
+    // explicit on_failure posture rather than falling through as an allow.
     let mut input = String::new();
-    if io::stdin().read_to_string(&mut input).is_err() {
-        // a read error is also an un-inspectable input, not a free pass
-        degraded(&engine, "failed to read stdin", format);
-    }
-
-    if input.trim().is_empty() {
-        degraded(&engine, "empty input", format);
-    }
-
-    // Parse the hook input. A payload sentinel can't understand is NOT a free
-    // pass — it's a degraded input, handled per the policy's on_failure posture.
-    let hook_input = match serde_json::from_str::<HookInput>(&input) {
-        Ok(hi) => hi,
-        Err(e) => {
-            degraded(&engine, &format!("unparseable hook input: {e}"), format);
-        }
+    let result = match io::stdin().read_to_string(&mut input) {
+        Ok(_) => pipeline::evaluate_raw(&engine, &input),
+        Err(error) => pipeline::degraded(&engine, format!("failed to read stdin: {error}")),
     };
-
-    // convert hook input to tool call
-    let tool_call = hook_input.to_tool_call();
-
-    // evaluate
-    let decision = engine.evaluate(&tool_call);
-
-    // self-protect (finding #5): the default policy keeps `.claude/settings.json`
-    // at WARN tier, and warn = allowed — so a Write/Edit/MultiEdit that rewrites
-    // the file to DROP the installed `sentinel evaluate` PreToolUse hook would
-    // disarm the guard with only a warning. inspect the write's CONTENT and
-    // escalate exactly the hook-removing ones to Block; ordinary settings edits
-    // that preserve the hook keep their policy-assigned action. applied before
-    // the canary/audit/enforce branches so all three see the escalated decision.
-    let decision = crate::selfprotect::apply(decision, &hook_input.tool_input);
-
-    // autorun-injection guard (the inverse of self-protect's hook *removal*
-    // check): a config write that ADDS a malicious autorun command — a hook that
-    // pipes a fetch to a shell, or an MCP server with a malicious launch command
-    // — while preserving sentinel's own would otherwise stay warn-tier. covers
-    // every agent/MCP config surface sentinel adapts to (Claude/Codex/Gemini/
-    // Crush hooks + .mcp.json/.claude.json servers), closing the plant-an-autorun
-    // gap the multi-agent adapters opened. re-evaluate each extracted command
-    // through the SAME zero-FP deny.commands/deny.paths rules a real Bash call
-    // hits; a block-tier match escalates the whole write to Block. extraction is
-    // path-gated, so the hot path is untouched.
-    let decision = escalate_autorun_injection(decision, &hook_input.tool_input, &engine);
-
-    // install-preflight (worm TTP): when the agent runs an install-like command
-    // (`npm install`, `pnpm add`, `yarn`, `bun install`, …), inspect the
-    // top-level package.json in the call's cwd and escalate a lifecycle script
-    // that fetches-and-executes remote code (Block) or a non-registry dep source
-    // alongside a lifecycle script (Warn). reads the manifest ONLY when the
-    // command is install-like, so the hot path stays clean. applied before the
-    // canary/audit/enforce branches so all three see the escalated decision.
-    // HONEST LIMIT: sees only the TOP-LEVEL manifest — not poisoned transitive
-    // dependency lifecycle scripts, which resolve during the install itself.
-    let decision = crate::preflight::apply(
-        decision,
-        tool_call.command.as_deref(),
-        hook_input.cwd.as_deref(),
-    );
+    let decision = result.decision().clone();
 
     if canary {
         // doctor's liveness probe: surface the would-be decision, skip the
@@ -182,6 +131,18 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
+    let call = match result.call() {
+        Some(call) => call,
+        None => {
+            if let Some(reason) = result.degraded_reason() {
+                tracing::warn!("{reason}");
+            }
+            emit_live_decision(&decision, "<uninspectable>", format, &engine);
+            return Ok(());
+        }
+    };
+    let tool_call = call.to_tool_call();
+
     // log to audit trail
     let _ = audit_trail::log_event(&audit_trail::AuditEvent {
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -196,45 +157,11 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         call_id: audit_trail::call_id_from_env(),
         // the payload's per-call id joins this pre line to the call's post
         // line(s) — same value in both phases' payloads. telemetry only.
-        tool_use_id: hook_input.tool_use_id.clone(),
+        tool_use_id: call.tool_use_id.clone(),
         hook_phase: Some("pre".into()),
     });
 
-    // in audit mode, always allow but log
-    if engine.is_audit_mode() {
-        if decision.action != Action::Allow {
-            tracing::info!(
-                "AUDIT: would {} {} — {}",
-                decision.action,
-                tool_call.tool_name,
-                decision.reason.as_deref().unwrap_or("no reason")
-            );
-        }
-        print_output(&HookOutput::allow()); // audit mode never blocks
-        return Ok(());
-    }
-
-    // enforce mode
-    match decision.action {
-        Action::Block => deny_and_exit(
-            decision
-                .reason
-                .unwrap_or_else(|| "blocked by sentinel policy".into()),
-            format,
-        ),
-        Action::Warn => {
-            // warn = allow but log prominently
-            eprintln!(
-                "\x1b[33msentinel warning:\x1b[0m {} — {}",
-                tool_call.tool_name,
-                decision.reason.as_deref().unwrap_or("policy warning")
-            );
-            print_output(&HookOutput::allow());
-        }
-        Action::Allow => {
-            print_output(&HookOutput::allow());
-        }
-    }
+    emit_live_decision(&decision, &tool_call.tool_name, format, &engine);
 
     Ok(())
 }
@@ -245,36 +172,43 @@ fn print_output(output: &HookOutput) {
     }
 }
 
-/// Escalate a settings write that injects a malicious hook command. Each hook
-/// `command` value in the write's new content is re-evaluated through the real
-/// policy (via a synthetic Bash tool call, so paths are mined and the command is
-/// shell-de-obfuscated exactly as a live call would be); a block-tier match
-/// escalates the whole write to Block. Returns the decision unchanged when it is
-/// already Block, when the write targets no settings file (the common case, no
-/// work), or when every injected command is benign.
-fn escalate_autorun_injection(
-    decision: PolicyDecision,
-    tool_input: &serde_json::Value,
+fn emit_live_decision(
+    decision: &PolicyDecision,
+    tool_name: &str,
+    format: AgentFormat,
     engine: &PolicyEngine,
-) -> PolicyDecision {
-    if decision.action == Action::Block {
-        return decision;
-    }
-    for cmd in crate::selfprotect::autorun_commands(tool_input) {
-        let probe = hook_schema::tool_call_for_command(&cmd);
-        if engine.evaluate(&probe).action == Action::Block {
-            return PolicyDecision {
-                action: Action::Block,
-                reason: Some(
-                    "config write injects an autorun command (agent hook or MCP server) \
-                     that matches a deny rule (self-protect: autorun-injection)"
-                        .into(),
-                ),
-                matched_rule: Some("selfprotect: autorun-injection".into()),
-            };
+) {
+    if engine.is_audit_mode() {
+        if decision.action != Action::Allow {
+            tracing::info!(
+                "AUDIT: would {} {} — {}",
+                decision.action,
+                tool_name,
+                decision.reason.as_deref().unwrap_or("no reason")
+            );
         }
+        print_output(&HookOutput::allow());
+        return;
     }
-    decision
+
+    match decision.action {
+        Action::Block => deny_and_exit(
+            decision
+                .reason
+                .clone()
+                .unwrap_or_else(|| "blocked by sentinel policy".into()),
+            format,
+        ),
+        Action::Warn => {
+            eprintln!(
+                "\x1b[33msentinel warning:\x1b[0m {} — {}",
+                tool_name,
+                decision.reason.as_deref().unwrap_or("policy warning")
+            );
+            print_output(&HookOutput::allow());
+        }
+        Action::Allow => print_output(&HookOutput::allow()),
+    }
 }
 
 /// Emit the nested deny JSON, mirror the reason to stderr, and exit 2. Never
@@ -287,27 +221,15 @@ fn deny_and_exit(reason: impl Into<String>, format: AgentFormat) -> ! {
     match format {
         AgentFormat::ClaudeCode => print_output(&HookOutput::deny(reason.clone())),
         AgentFormat::Decision(token) => {
-            println!("{}", serde_json::json!({"decision": token, "reason": reason}));
+            println!(
+                "{}",
+                serde_json::json!({"decision": token, "reason": reason})
+            );
         }
     }
     let _ = io::stdout().flush(); // ensure the JSON lands before we exit
     eprintln!("sentinel: blocked — {reason}");
     std::process::exit(2);
-}
-
-/// Decide what to do with an input sentinel cannot evaluate (empty stdin,
-/// unparseable JSON). Audit mode never blocks; otherwise the policy's
-/// `on_failure` posture governs — "closed" (the default) denies rather than
-/// waving an un-inspectable call through, "open" allows with a warning.
-fn degraded(engine: &PolicyEngine, reason: &str, format: AgentFormat) -> ! {
-    if engine.is_audit_mode() || !engine.fail_closed() {
-        tracing::warn!("{reason} — allowing (audit/fail-open)");
-        print_output(&HookOutput::allow());
-        std::process::exit(0);
-    } else {
-        tracing::warn!("{reason} — denying (fail-closed)");
-        deny_and_exit(format!("{reason} — failing closed"), format);
-    }
 }
 
 /// The policy path the hook reads on every call. Shared with `sentinel check`

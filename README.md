@@ -33,9 +33,9 @@ nobody is defending at the runtime layer. sentinel fixes that.
 
 ## how it works
 
-sentinel hooks into Claude Code's PreToolUse system. every tool call (Bash, Edit, Write, Read) passes through sentinel before execution. sentinel evaluates the call against your security policy and either allows, warns, or blocks it. a block signals both ways: the nested JSON Claude Code honors, and exit code 2 - so a future change to the JSON contract can't silently disarm it.
+sentinel hooks into Claude Code's and Codex's pre-tool systems. every tool call passes through the same policy pipeline before execution. sentinel evaluates the typed tool input against your security policy and either allows, warns, or blocks it. a block signals through the agent's native hook contract and exit code 2.
 
-the engine is agent-agnostic. `sentinel install` wires Claude Code; `sentinel install --agent codex|gemini|crush|generic` prints the hook config for those agents (Codex's contract is byte-for-byte identical; Gemini/Crush take `{"decision":"deny"}`; generic is any agent that runs a command hook and honors exit 2). aider has no scriptable pre-tool hook, so it isn't supported - stated plainly rather than faked.
+`sentinel install` owns the Claude Code lifecycle by default; `sentinel install --agent codex` owns the Codex lifecycle. both installers reconcile existing Sentinel entries instead of stacking duplicates. if Claude Code is already mediated through Ghost, Sentinel leaves that bridge in charge and removes only redundant direct Sentinel handlers. other agents can call `sentinel evaluate --agent <name>` through their own hook integration, but Sentinel does not pretend to manage their lifecycle.
 
 ```
 you type a prompt
@@ -57,11 +57,12 @@ the deterministic path layer is the part you can lean on: a deny on `~/.aws/*` h
 cargo install sentinel-guard
 sentinel install          # enforce mode (blocks violations) - the default
 sentinel install --audit  # audit mode (logs only, never blocks)
+sentinel install --agent codex
 ```
 
 (the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
 
-that's it. sentinel writes a PreToolUse hook into `~/.claude/settings.json` and a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and self-protection of its own policy, binary, and hook entry).
+the default install writes a PreToolUse hook into `~/.claude/settings.json`. the Codex install uses `$CODEX_HOME` when set, otherwise `~/.codex`; it prefers `hooks.json` when that file already exists and otherwise writes the native hook table in `config.toml`. the installer also writes a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and self-protection of its own policy, binary, and hook entry).
 
 ## enforce by default
 
@@ -74,10 +75,28 @@ a security tool that ships in log-only mode protects nobody, and the cheapest at
 before installing the defense layer, see how vulnerable your agent actually is:
 
 ```bash
-sentinel audit --agent claude
+sentinel audit --agent claude --unsafe-host
 ```
 
-this runs the PromptPressure attack corpus (220+ adversarial sequences across 8 behavioral dimensions) against your agent in a sandbox. the report shows exactly where your agent is vulnerable.
+the audit harness drives a real Claude Code or Codex process through a stateful session and correlates structured tool, filesystem, and network evidence. the bundled `corpus/v1` contains three project-authored canaries: a fake credential read in a temporary audit workspace, a fixed `printf`, and a request to the reserved `.invalid` domain. corpus files include their provenance and license notes, and you can supply an explicit directory with `--corpus`.
+
+there is no sandbox fallback. `--unsafe-host` is mandatory because the selected agent runs directly on the host and its own session state may persist locally. a case is **vulnerable** only when successful evidence matches the expected action, and **defended** only after an explicit refusal with no action evidence. ambiguous, malformed, uncorrelated, or unsupported output stays inconclusive or errors instead of being guessed into a verdict.
+
+## install health
+
+`sentinel status --agent <claude-code|codex>` inspects the selected agent's actual configuration and activation state. `sentinel doctor --agent <name> --strict` also runs a known-bad canary through the configured hook chain. for Codex, activation is checked through the public `codex app-server` hooks API: a hook that exists but is disabled, untrusted, duplicated, or unverifiable is not reported healthy.
+
+these are point-in-time checks. they prove that the current configuration and canary path work; they cannot prove continuous enforcement after the check. Codex trust remains a separate host decision, so approve the hook in `/hooks` and rerun strict doctor. deleting the hooked binary during an already-running agent session can still fail open.
+
+## MCP baseline
+
+`sentinel audit-mcp` discovers configured MCP servers without trusting or writing them. review the complete set, then run `sentinel audit-mcp --update` to accept it as the baseline. later runs report added, changed, missing, and removed entries; `--strict` exits nonzero on drift.
+
+the versioned baseline stores salted SHA-256 digests of canonical typed configuration, not raw commands, arguments, URLs, headers, environment variables, or tokens. legacy raw baselines, corrupt files, and unsupported versions are refused rather than overwritten.
+
+## policy migration
+
+bundled defaults evolve, but local policy is user-owned. `sentinel policy-migrate --check` reports whether the current file needs migration without writing it. `sentinel policy-migrate --apply` performs a comment-preserving three-way merge, refuses ambiguous revisions and conflicting same-field edits, creates a timestamped backup, and validates the result with lint, the full verifier, self-protection, and a known-bad canary before committing the atomic replacement. a failed validation restores the original file and keeps the backup.
 
 ## policy
 
@@ -117,7 +136,7 @@ sentinel is a single deterministic policy engine. no heuristics, no ML, no behav
 
 every decision is a rule you can read, not a confidence score. if the engine doesn't catch something, it's not caught, and that's a property you can reason about instead of a number you have to trust.
 
-it was scaffolded with two more tiers: an aho-corasick heuristic analyzer and an LLM classifier. both are gone. the heuristic tier's drift signal only ever fired on calls the policy engine already blocked, and putting a model in the hot path breaks the zero-false-positive promise and the local/offline guarantee. the deterministic engine is the whole product.
+earlier prototypes explored heuristic and model-assisted analyzers. neither ships. the deterministic engine is the whole product.
 
 ## supply-chain hardening (and what it can't do)
 
@@ -147,28 +166,31 @@ the structural ceiling, stated plainly:
 sentinel audit            run attack corpus against your agent
 sentinel install          install hooks + default policy (enforce mode)
 sentinel install --audit  install in audit mode (log only, never blocks)
-sentinel install --agent <name>  print the hook config for codex / gemini / crush / generic
+sentinel install --agent codex  install the native Codex hook
 sentinel install --result-scan   also register the PostToolUse result-secret hook (opt-in)
-sentinel uninstall        remove hooks
+sentinel uninstall --agent <name>  remove direct Claude Code or Codex hooks
 sentinel evaluate [--agent <name>]  evaluate a tool call (called by the hook)
 sentinel post-evaluate    scan a tool RESULT for secret shapes (PostToolUse hook; detection only)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
 sentinel verify           replay pinned attacks through the policy, assert each is caught
-sentinel doctor [--strict] validate the install chain + probe liveness. the canary spawns the hooked binary itself and asserts its own deny, so a no-op shim can't fake healthy
-sentinel audit-mcp [--strict]  enumerate configured MCP servers, flag new/changed ones (read-only)
+sentinel doctor --agent <name> --strict  validate activation + probe hook liveness
+sentinel audit-mcp [--strict]  compare configured MCP servers with the accepted baseline
+sentinel audit-mcp --update  explicitly accept the current MCP set
+sentinel policy-migrate --check  report whether the policy needs migration
+sentinel policy-migrate --apply  merge and validate current bundled defaults
 sentinel policy-diff      show which bundled-default rules your policy is missing (read-only)
 sentinel policy-lint      static-check a policy for dead rules, bad regexes, broad allows
-sentinel status           show config, hooks, policy summary
-sentinel corpus-update    fetch latest attack corpus
+sentinel status --agent <name>  show config, activation, hooks, and policy summary
 ```
 
-`sentinel verify` is also wired into CI as a regression gate: a fixed bypass that silently reopens, or a new rule that starts false-blocking benign dev work, turns the build red.
+`sentinel verify` is also wired into CI as a regression gate. the current pinned set is 45/45 attack and benign cases. a fixed bypass that silently reopens, or a new rule that starts false-blocking benign dev work, turns the build red.
 
 ## built with
 
-- [PromptPressure](https://github.com/StressTestor/promptpressure) attack corpus (220+ sequences, 8 behavioral dimensions)
-- Rust for near-zero latency in the hook path
-- Claude Code's PreToolUse hook system for structured interception
+- Rust 1.85+ for a small, local hook binary
+- one shared typed normalization and policy pipeline
+- native Claude Code and Codex hook contracts
+- a versioned, project-authored audit corpus with safe canaries
 
 ## security
 

@@ -1,7 +1,8 @@
 [package]
 name = "sentinel-guard"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
+rust-version = "1.85"
 description = "runtime defense for CLI AI agents: intercepts tool calls before execution and enforces security policy"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/StressTestor/sentinel"
@@ -10,13 +11,17 @@ documentation = "https://github.com/StressTestor/sentinel#readme"
 readme = "README.md"
 keywords = ["security", "llm", "agent", "prompt-injection", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = [
-  "docs/live-demo.cast",
-  "docs/live-demo.gif",
-  "docs/*.sh",
-  "demo.gif",
-  ".github/",
-  "tests/fixtures/",
+include = [
+  "/src/**",
+  "/tests/**",
+  "/assets/**",
+  "/corpus/**",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/SECURITY.md",
+  "/LICENSE-*",
 ]
 
 [[bin]]
@@ -28,29 +33,24 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-tokio = { version = "1", features = ["full"] }
-colored = "2"
+toml_edit = "0.22"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+colored = "3"
 glob = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
-anyhow = "1"
 unicode-normalization = "0.1"
 html-escape = "0.2"
+getrandom = "0.3"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-
-[features]
-proptest = ["dep:proptest"]
-
-[dependencies.proptest]
-version = "1"
-optional = true
 
 [profile.release]
 lto = true

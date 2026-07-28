@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,45 +14,82 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: rustfmt
+        run: cargo fmt --all -- --check
       - name: AD-5 network-call lint
         run: bash scripts/ad5-network-lint.sh
-      - name: unit + integration tests
-        run: cargo test --verbose
-      - name: clippy
-        run: cargo clippy -- -D warnings
-      - name: attack regression gate
-        run: cargo run --quiet -- verify
+      - name: locked all-target all-feature tests
+        run: cargo test --locked --all-targets --all-features --verbose
+      - name: locked all-target all-feature clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: build verifier binary
+        run: cargo build --locked --all-features --bin sentinel
+      - name: bundled attack regression gate
+        run: |
+          verify_home="$RUNNER_TEMP/sentinel-verify-home"
+          mkdir -p "$verify_home"
+          HOME="$verify_home" target/debug/sentinel verify
+      - name: public documentation assertions
+        run: bash scripts/docs-claims-check.sh target/debug/sentinel
 
-  cross:
-    needs: test
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.85.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: minimum supported Rust
+        run: cargo check --locked --all-targets --all-features
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: packaged-source install and command smoke
+        env:
+          SENTINEL_EXPECTED_VCS_SHA: ${{ github.sha }}
+        run: bash scripts/package-smoke.sh
+
+  platform:
+    name: platform (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: build release
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: native all-target all-feature tests
+        run: cargo test --locked --all-targets --all-features --verbose
+      - name: native release build
+        run: cargo build --release --locked --all-features
+      - name: native binary smoke
+        run: target/release/sentinel --version

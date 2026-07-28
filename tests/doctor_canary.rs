@@ -139,7 +139,39 @@ fn spoof_shim_that_noops_evaluate_is_caught() {
         report["healthy"], false,
         "a spoof shim (no-op evaluate) must NOT read healthy; report: {report}"
     );
-    assert_eq!(level, "ERR", "spoofed liveness must be an ERR line, got {level}: {msg}");
+    assert_eq!(
+        level, "ERR",
+        "spoofed liveness must be an ERR line, got {level}: {msg}"
+    );
+}
+
+#[test]
+fn shell_wrapped_direct_hook_is_not_reported_healthy() {
+    let dir = tempdir().unwrap();
+    let home = dir.path();
+    write_policy(home, "enforce");
+    write_settings(
+        home,
+        &format!(
+            "{} evaluate >/dev/null 2>&1 || true",
+            env!("CARGO_BIN_EXE_sentinel")
+        ),
+    );
+
+    let report = doctor_json(home);
+    assert_eq!(
+        report["healthy"], false,
+        "a shell wrapper that suppresses the hook decision must not read healthy: {report}"
+    );
+    let (level, _) = liveness_check(&report);
+    assert_eq!(level, "ERR");
+
+    Command::cargo_bin("sentinel")
+        .unwrap()
+        .args(["doctor", "--strict"])
+        .env("HOME", home)
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -147,12 +179,18 @@ fn real_binary_enforce_install_is_healthy_and_does_not_pollute_audit_trail() {
     let dir = tempdir().unwrap();
     let home = dir.path();
     write_policy(home, "enforce");
-    write_settings(home, &format!("{} evaluate", env!("CARGO_BIN_EXE_sentinel")));
+    write_settings(
+        home,
+        &format!("{} evaluate", env!("CARGO_BIN_EXE_sentinel")),
+    );
 
     let report = doctor_json(home);
     let (level, _) = liveness_check(&report);
 
-    assert_eq!(report["healthy"], true, "genuine enforce install must be healthy: {report}");
+    assert_eq!(
+        report["healthy"], true,
+        "genuine enforce install must be healthy: {report}"
+    );
     assert_eq!(level, "OK");
     // the synthetic known-bad probe must never land in the audit trail
     assert!(
@@ -170,13 +208,22 @@ fn audit_mode_real_binary_reads_would_deny_warn_not_err() {
     let dir = tempdir().unwrap();
     let home = dir.path();
     write_policy(home, "audit");
-    write_settings(home, &format!("{} evaluate", env!("CARGO_BIN_EXE_sentinel")));
+    write_settings(
+        home,
+        &format!("{} evaluate", env!("CARGO_BIN_EXE_sentinel")),
+    );
 
     let report = doctor_json(home);
     let (level, msg) = liveness_check(&report);
 
-    assert_eq!(report["healthy"], true, "a healthy audit install must not fail doctor: {report}");
-    assert_eq!(level, "WARN", "audit + would-deny is WARN, got {level}: {msg}");
+    assert_eq!(
+        report["healthy"], true,
+        "a healthy audit install must not fail doctor: {report}"
+    );
+    assert_eq!(
+        level, "WARN",
+        "audit + would-deny is WARN, got {level}: {msg}"
+    );
     assert!(
         !home.join(".sentinel").join("audit.jsonl").exists(),
         "doctor's canary probe polluted the audit trail"
@@ -209,7 +256,11 @@ fn evaluate_canary_emits_allow_for_benign_input() {
 
     let out = run_evaluate(home, &["evaluate", "--canary"], BENIGN);
 
-    assert_eq!(out, serde_json::json!({}), "benign canary input must defer (empty object)");
+    assert_eq!(
+        out,
+        serde_json::json!({}),
+        "benign canary input must defer (empty object)"
+    );
     assert!(
         !home.join(".sentinel").join("audit.jsonl").exists(),
         "--canary must not write to the audit trail"
@@ -244,7 +295,10 @@ fn evaluate_normal_path_still_logs_and_denies_in_enforce_mode() {
 
     let out = run_evaluate(home, &["evaluate"], KNOWN_BAD);
 
-    assert!(is_nested_deny(&out), "enforce mode must deny the known-bad; got: {out}");
+    assert!(
+        is_nested_deny(&out),
+        "enforce mode must deny the known-bad; got: {out}"
+    );
     assert!(
         home.join(".sentinel").join("audit.jsonl").exists(),
         "normal evaluate must log to the audit trail"

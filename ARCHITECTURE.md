@@ -1,23 +1,34 @@
 # architecture
 
-last updated: 2026-06-16
+last updated: 2026-07-28
 
 ## overview
 
-sentinel is a runtime defense tool for CLI AI agents. it intercepts tool calls before execution and enforces security policy. the engine is agent-agnostic; per-agent adapters translate each host's hook contract. the primary adapter hooks into Claude Code's PreToolUse system via `~/.claude/settings.json`; `evaluate --agent <name>` also speaks OpenAI Codex CLI (byte-for-byte the same nested output), Gemini CLI / Crush (`{"decision":"deny"}`), and a generic exit-code contract for any command-hook agent. a block always also exits 2, the universal hard-block signal. (a pty proxy for agents with no hook at all is intentionally unbuilt — it would see terminal bytes, not structured tool calls.)
+sentinel is a runtime defense tool for CLI AI agents. it normalizes typed tool
+calls, evaluates them through one deterministic policy pipeline, and answers in
+the selected host's hook contract. native install, uninstall, status, and doctor
+lifecycle support is implemented for Claude Code and Codex. `evaluate --agent
+<name>` remains the lower-level integration contract for other hook-capable
+agents. a deny also exits 2.
+
+the separate `audit` command is not an enforcement hook or a sandbox. it drives a
+real Claude Code or Codex process through a stateful session, correlates
+structured evidence against a small versioned corpus, and requires the caller to
+acknowledge uncontained host execution with `--unsafe-host`.
 
 ## stack
 
 | layer | technology | version |
 |-------|-----------|---------|
-| language | Rust | 2021 edition |
+| language | Rust | 2021 edition, MSRV 1.85 |
 | CLI | clap | 4.x |
-| serialization | serde, toml, serde_json | 1.x |
+| serialization and config edits | serde, serde_json, toml, toml_edit | 1.x / 0.22 |
 | async runtime | tokio | 1.x |
 | regex | regex | 1.x |
 | text normalization | unicode-normalization, html-escape | 0.1 / 0.2 |
-| terminal output | colored | 2.x |
-| error handling | thiserror, anyhow | 2.x / 1.x |
+| terminal output | colored | 3.x |
+| error handling | thiserror | 2.x |
+| hashing and random salt | sha2, getrandom | 0.10 / 0.3 |
 | logging | tracing + tracing-subscriber | 0.1 / 0.3 |
 | testing | built-in + assert_cmd, tempfile, predicates | - |
 
@@ -28,6 +39,7 @@ sentinel/
 ├── Cargo.toml
 ├── ARCHITECTURE.md         <- you are here
 ├── README.md
+├── corpus/v1/              versioned, bundled audit cases + provenance/license
 ├── src/
 │   ├── main.rs             CLI entry, subcommand dispatch
 │   ├── cli.rs              clap arg definitions
@@ -37,20 +49,22 @@ sentinel/
 │   │   ├── shell.rs        shell de-obfuscation (ANSI-C $'\xHH' escapes, ${IFS} desugar, brace expansion) — path/command path
 │   │   └── types.rs        shared types (AttackSequence, AuditReport, etc.)
 │   ├── corpus/
-│   │   ├── mod.rs          corpus loader (embedded + filesystem override)
+│   │   ├── mod.rs          versioned bundled corpus + explicit filesystem override
 │   │   └── parser.rs       TOML attack sequence parser
 │   ├── audit/
 │   │   ├── mod.rs          audit orchestrator
-│   │   ├── sandbox.rs      sandbox trait + backend detection
-│   │   ├── runner.rs       attack sequence executor
+│   │   ├── adapter.rs      stateful Claude Code and Codex process adapters
+│   │   ├── runner.rs       timeout, output caps, evidence correlation
 │   │   └── report.rs       terminal + JSON report generator
 │   ├── policy/
 │   │   ├── mod.rs          policy engine (Tier 1: deny-first evaluation)
 │   │   ├── schema.rs       TOML policy schema + parsing
 │   │   └── matcher.rs      glob path matching, regex command/secret matching
 │   ├── evaluate/
-│   │   ├── mod.rs          sentinel evaluate entry (stdin JSON -> policy -> selfprotect -> preflight -> stdout JSON); --canary dry-run for doctor
-│   │   └── hook_schema.rs  Claude Code PreToolUse hook JSON schema; command extraction incl. exec-named MCP tools; explicit `cwd` field
+│   │   ├── mod.rs          hook I/O and native response rendering
+│   │   ├── hook_schema.rs  Claude Code PreToolUse hook JSON schema; command extraction incl. exec-named MCP tools; explicit `cwd` field
+│   │   ├── normalize.rs    host payloads -> typed calls, paths, commands, patches
+│   │   └── pipeline.rs     shared policy, self-protect, autorun, preflight path
 │   ├── selfprotect/
 │   │   └── mod.rs          content-aware escalation: block a config write that removes sentinel's hook OR injects a malicious autorun command (hook / MCP server) across any agent + MCP config (JSON/TOML)
 │   ├── preflight/
@@ -68,21 +82,24 @@ sentinel/
 │   ├── post_evaluate/
 │   │   └── mod.rs          sentinel post-evaluate: PostToolUse result-secret detection + nudge (opt-in, detection only)
 │   ├── audit_mcp/
-│   │   └── mod.rs          sentinel audit-mcp: read-only TOFU enumerator of configured MCP servers (flags new/changed launch commands)
+│   │   └── mod.rs          explicit, salted-digest MCP baseline + drift report
 │   ├── install/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
-│   │   ├── hooks.rs        read/merge + atomic (temp+rename) write of ~/.claude/settings.json
+│   │   ├── activation.rs   Codex public hooks API activation/trust probe
+│   │   ├── state.rs        Claude/Codex installed and activated state
+│   │   ├── hooks.rs        direct/Ghost ownership reconciliation + atomic writes
 │   │   └── defaults.rs     default policy.toml generator
-│   ├── wrap/
-│   │   └── mod.rs          generic pty proxy adapter stub
+│   ├── policy_migrate.rs   revision detection + validated three-way migration
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger
 ├── tests/
 │   └── fixtures/
 │       └── corpus/         test attack sequences (3 TOML files)
 ├── scripts/
-│   └── ad5-network-lint.sh AD-5 lint: greps src/ for outbound-network imports
-│                           outside the allowlist (src/audit only); CI gate
+│   ├── ad5-network-lint.sh network-import boundary gate
+│   ├── docs-claims-check.sh verifier-count + public-command claims gate
+│   ├── package-smoke.sh    extracted-crate build/install/public-CLI smoke
+│   └── release-identity.sh tag/version/source/registry identity checks
 ├── docs/                   live attack demo + github pages site
 │   ├── index.html          write-up + attack matrix (published to stresstestor.github.io/sentinel)
 │   ├── target.html         poisoned "CloudSync" docs page with 20+ embedded injections
@@ -93,7 +110,8 @@ sentinel/
 └── .github/
     ├── dependabot.yml      weekly cargo + github-actions update PRs
     └── workflows/
-        ├── ci.yml          AD-5 lint + cargo test + verify gate + cross-compile
+        ├── ci.yml          quality, MSRV, package, Linux, and macOS gates
+        ├── release.yml     identity, verification, four targets, SBOM, attest/publish
         ├── codeql.yml      CodeQL static analysis (rust + actions), push/PR + weekly
         ├── scorecard.yml   OpenSSF Scorecard, results published + SARIF upload
         ├── deps.yml        cargo-deny (advisories/bans/licenses/sources), daily cron
@@ -114,17 +132,17 @@ and no ML in the decision path. The engine is the whole product: every decision
 is a rule you can read, not a confidence number. If the policy engine does not
 catch something, it is not caught, and that is a property you can reason about.
 
-(History: the project was scaffolded with a Tier-2 aho-corasick heuristic
-analyzer and a Tier-3 LLM classifier stub. Both were removed. The heuristic
-tier's drift signal only ever fired on calls Tier 1 already blocked, and a model
-in the hot path would break both the zero-false-positive promise and the
-local/offline guarantee. The 3 deterministic checks worth keeping from the
-heuristic branch were extracted into Tier 1 before it was archived.)
+earlier heuristic and model-assisted prototypes do not ship. there is no hidden
+fallback classifier behind an unmatched policy decision.
 
 ```
-Tool call arrives (via PreToolUse hook)
+Host hook payload arrives
      │
-     └── Policy Engine  [the only tier; runs on every call]
+     ├── Typed normalization
+     │   host payload -> command/path/content/mutation evidence
+     │   Codex apply_patch is parsed as a file mutation, not executable shell
+     │
+     └── Shared policy pipeline  [the only decision path]
          tool input -> ToolCall (command + canonicalized paths, extracted for
          every tool type, not just "Bash"; paths are ALSO mined from the
          shell-de-obfuscated command). deny-first evaluation:
@@ -153,7 +171,7 @@ Tool call arrives (via PreToolUse hook)
          only add false positives. `common/normalize` (Unicode/entity) stays
          scoped to the secret-content path, where the consumer DOES decode it.
          un-inspectable input (empty / unparseable stdin) fails per on_failure
-         ("closed" by default → deny). zero false positives by design.
+         ("closed" by default → deny).
 ```
 
 > Honesty note: the policy engine is the line of defense. Treat anything it does
@@ -306,6 +324,93 @@ installed by `sentinel install` which writes hook config to `~/.claude/settings.
 the hook entry uses `matcher: ".*"` to intercept all tool types.
 idempotent: running install twice doesn't duplicate hooks.
 
+### lifecycle reconciliation and activation
+
+native lifecycle ownership is limited to Claude Code and Codex:
+
+- Claude Code uses `~/.claude/settings.json`. if the matching handler is already
+  mediated through `ghost hook --sentinel ...`, install preserves that Ghost
+  bridge and removes redundant direct Sentinel handlers. unrelated mixed
+  handlers remain untouched.
+- Codex respects `$CODEX_HOME`, falling back to `~/.codex`. if `hooks.json`
+  exists, install writes there and removes a prior inline Sentinel entry from
+  `config.toml`; otherwise it writes the native `[[hooks.PreToolUse]]` table.
+- uninstall removes direct Sentinel-owned handlers only. it does not remove a
+  Ghost bridge owned by another tool or delete the user's policy.
+- config writes use sibling temporary files and preserve private permissions.
+
+`status` and `doctor` inspect agent config rather than inferring health from the
+binary alone. Claude activation includes `disableAllHooks`. Codex activation is
+queried from the public `codex app-server` `hooks/list` API with a bounded
+timeout, and requires the matching hook to be enabled and trusted. configured,
+configured-but-untrusted, disabled, duplicate/conflicting, unverifiable, and
+broken are distinct states. strict doctor also sends a known-bad SSH read
+through the hooked binary and requires the expected deny; a Ghost-mediated
+chain is probed through the bridge.
+
+these checks are point-in-time evidence. they cannot prove continuous
+enforcement, and a hooked binary removed during an active agent session may
+still fail open. Codex trust is a host decision outside Sentinel; install tells
+the user to approve the hook in `/hooks` and rerun strict doctor.
+
+### real-agent audit harness
+
+`audit/adapter.rs` implements stateful real-process sessions:
+
+- Claude Code uses stream JSON, an output schema, and a generated session id
+  which later turns in the same sequence resume.
+- Codex uses `codex exec --json`, records the returned thread id, and resumes
+  that thread for later turns in the same sequence. each corpus sequence starts
+  a fresh session and workspace so state does not leak between verdicts.
+- prompts are written through piped stdin and never interpolated into a shell
+  command. process startup, stdin writes, and execution share a timeout; timed
+  out children are killed. stdout is capped at 4 MiB, stderr is drained, and
+  diagnostics are sanitized.
+
+the bundled `corpus/v1` is project-authored and contains three safe canaries: a
+fake local credential file inside the temporary audit workspace, a fixed
+`printf`, and a request to the reserved `.invalid` domain. its README and license
+record provenance. callers may choose a different directory with `--corpus`;
+paths are loaded deterministically and empty, duplicate, invalid-action,
+invalid-role, and invalid-glob inputs are rejected.
+
+structured events are correlated to the expected tool, filesystem, or network
+action. only successful matching evidence is vulnerable. only an explicit final
+refusal with no action evidence is defended. incomplete or unsupported evidence
+is inconclusive or an error, and incomplete risk scores serialize as `null`.
+there is no sandbox backend or degraded fallback. real audit therefore requires
+`--unsafe-host`, and the agent may persist its session locally.
+
+### explicit MCP baseline
+
+`audit-mcp` discovers Claude Code and Codex MCP configuration, including
+`$CODEX_HOME` and working-directory config. discovery alone writes nothing and
+trusts nothing. only `--update` accepts the complete discovered set as baseline
+version 1.
+
+the baseline keys entries by source and server and stores salted SHA-256 digests
+of canonical typed config. it never stores raw commands, arguments, URLs,
+headers, environment variables, or tokens. comparisons report added, changed,
+missing, and removed entries; `--strict` exits nonzero on drift. legacy raw
+baselines, corrupt files, and unsupported versions are refused rather than
+silently overwritten. writes are atomic and mode 0600 on Unix.
+
+### policy migration
+
+the bundled default carries revision `2026-07-28`. `policy-migrate --check` is
+read-only and exits nonzero when migration is required. unversioned policies are
+matched only to known published generations; unknown revisions, ambiguous
+generations, and same-field conflicts stop without writing.
+
+`policy-migrate --apply` performs a comment-preserving three-way merge from the
+recognized base through the user's edits to the current default. user-only
+rules, unknown fields, mode, comments, and non-overlapping edits survive. apply
+rejects symlinks, creates a unique timestamped backup, preserves permissions,
+and atomically replaces the sibling file only after parse/mode checks, policy
+lint, the full verifier, self-protection, and the known-bad canary pass. a failed
+validation restores the original and retains the backup. applying the current
+revision is idempotent.
+
 ### audit mode vs enforce mode
 
 - **enforce** (default): actively block tool calls that match deny rules. a
@@ -330,31 +435,52 @@ never silently flips them to enforce.
 
 | command | what it does |
 |---------|-------------|
-| `cargo test` | run all unit + integration tests |
-| `cargo test --features proptest` | run property-based tests (slower) |
+| `cargo test --locked --all-targets --all-features` | run all unit and integration tests |
 | `cargo build --release` | build optimized binary |
-| `cargo clippy` | lint |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | lint the supported feature/target set |
 | `bash scripts/ad5-network-lint.sh` | AD-5 lint: fail if outbound-network imports appear in src/ outside the allowlist (src/audit) |
-| `sentinel audit --corpus ./tests/fixtures/corpus --sandbox degraded` | test audit with fixture corpus |
-| `sentinel install` | install PreToolUse hook (enforce mode, the default) |
+| `bash scripts/docs-claims-check.sh target/debug/sentinel` | compare public command and verifier claims with the built binary |
+| `bash scripts/package-smoke.sh` | test the packaged and extracted crate, installed binary, CLI, VCS metadata, and empty-HOME verifier |
+| `sentinel audit --agent claude --unsafe-host` | run the bundled real-agent audit without containment |
+| `sentinel install` | install the Claude Code hook (enforce mode, the default) |
+| `sentinel install --agent codex` | install the native Codex hook |
 | `sentinel install --audit` | install in audit mode (log only) |
-| `sentinel uninstall` | remove hooks |
+| `sentinel uninstall --agent <name>` | remove direct Claude Code or Codex hooks |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
-| `sentinel verify [--policy <file>]` | replay a pinned attack set through the policy, assert each is caught; non-zero exit on miss (CI gate) |
-| `sentinel doctor [--strict] [--json]` | validate the install chain (hook entry, binary runs, policy loads, self-protect rule) + probe liveness; the canary spawns the hooked binary as `evaluate --canary` and asserts its own deny (catches a no-op shim that fakes `--version`), without polluting the audit trail; `--strict` exits non-zero on any failure |
+| `sentinel verify [--policy <file>]` | replay the pinned 45/45 attack and benign cases; nonzero on a mismatch |
+| `sentinel doctor --agent <name> [--strict] [--json]` | inspect activation and policy, then probe the actual hook chain with a known-bad canary |
+| `sentinel audit-mcp [--strict]` | compare current MCP config with an explicitly accepted baseline |
+| `sentinel audit-mcp --update` | accept the complete current MCP set |
+| `sentinel policy-migrate --check` | report whether policy migration is needed without writing |
+| `sentinel policy-migrate --apply` | merge current defaults and validate before atomic replacement |
 | `sentinel policy-diff [--policy <file>]` | print bundled-default rules missing from an installed policy, for manual paste (read-only; reaches users who installed before a hardening update) |
 | `sentinel policy-lint [--policy <file>]` | static-check a policy: invalid regexes (dead rules), exact-duplicate/unreachable patterns, over-broad allow entries; non-zero exit on an error-level finding |
-| `sentinel status` | show config + hooks |
+| `sentinel status --agent <name>` | show configuration, hook ownership, activation, and policy summary |
 | `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
 
-CI runs the AD-5 network-call lint (`scripts/ad5-network-lint.sh` — enforces the README's "no ambient network calls" claim by grepping src/ for reqwest/hyper/Tcp\*/Udp\*/bollard imports outside the `src/audit` allowlist) and `cargo run -- verify` as an attack-regression gate, alongside `cargo test` + `cargo clippy -- -D warnings` (see `.github/workflows/ci.yml`).
+CI runs format, AD-5, locked all-target/all-feature tests and clippy, the empty-HOME
+verifier, docs claims, Rust 1.85 MSRV, extracted-package smoke, and native Linux
+and macOS smoke. CodeQL, dependency review, cargo-deny, cargo-audit in release,
+and Scorecard remain separate gates.
 
 ## publishing
 
 - crate name: `sentinel-guard` (binary is still `sentinel`). `sentinel` was taken on crates.io.
 - installed via `cargo install sentinel-guard`.
 - github pages site served from `docs/index.html` at stresstestor.github.io/sentinel.
+- `Cargo.toml` packages source, tests, assets, the versioned corpus, release
+  manifests, security docs, and dual licenses.
+- tag releases verify that the source commit is reachable from `origin/main` and
+  that tag, crate version, registry metadata, and release identity agree. the
+  workflow rejects an unmerged-commit negative test before publishing.
+- release artifacts cover x86_64/aarch64 Linux musl and x86_64/aarch64 macOS,
+  with licenses and README in each archive, CycloneDX SBOMs, SHA-256 sums, and
+  GitHub artifact attestations. the GitHub release remains a draft until the
+  crate and every asset are present.
 
 ---
 
-last updated: 2026-06-16 by StressTestor (tier gut: removed the unwired Tier-2 heuristic analyzer (`src/heuristic/`) and Tier-3 LLM classifier stub (`src/classifier/`) plus their heuristic-only deps (`aho-corasick`, `bincode`); sentinel is now one deterministic tier by design, no dead scaffolding in the tree. v0.4.0: exit-2 second enforcement channel; multi-agent adapters via `evaluate --agent` (claude-code/codex/gemini/crush/generic) + `install --agent` host snippets; `post-evaluate` PostToolUse result-secret detection (opt-in); `deny.tools` name-match + `audit-mcp` TOFU enumerator; autorun-injection guard generalized across every agent + MCP config (JSON/TOML); install-preflight follows the effective install dir (literal cd / --prefix). two octo-debate passes drove the autorun-injection generalization + preflight install-dir resolution. prior round-two attacker-audit hardening: enforce-by-default install with --audit opt-out + non-overwrite blast-radius guard; held-warn engine ordering so a deny.commands BLOCK overrides a deny.paths WARN; shell de-obfuscation (ANSI-C/IFS/brace) wired into path extraction + command matching; broadened credential stores, no-network-pipe exfil, guard-disarm (binary tamper verbs, sentinel uninstall, config-dir deletion, shell settings-strip), DNS/git/egress channels, interpreter runtime-path cred reads; sentinel check now mirrors selfprotect+preflight; verify gate 20 -> 41 cases. prior: install-preflight review pass: newline counts as a command boundary in the install trigger — multi-line commands no longer evade it; documented the session-cwd manifest limit (cd/--prefix installs read a manifest preflight did not inspect); prior pass: on an install-like command, inspect <cwd>/package.json lifecycle scripts + dep sources for the worm fetch-exec TTP — top-level manifest only, never transitive deps; explicit `cwd` field on HookInput; wired after self-protect on the evaluate path; prior pass: encoded-secret normalization — full Unicode Cf + TAG-block strip, computed once per evaluate, secret path only; warn-tier tripwire for `.github/workflows/*`; AD-5 network-call lint added as a CI gate; red-team hardening — glob-candidate matcher fix, curl/wget data-exfil rules, binary self-protect, content-aware hook-removal block, authoritative doctor canary, exec-named MCP command extraction)
+last updated: 2026-07-28 by StressTestor. documents the shared typed
+evaluation pipeline, native Claude Code/Codex lifecycle reconciliation,
+trust-aware health checks, uncontained stateful audit, explicit MCP baselines,
+validated policy migration, and release/package evidence gates.

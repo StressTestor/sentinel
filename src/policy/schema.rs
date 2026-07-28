@@ -78,6 +78,9 @@ impl PolicyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicySettings {
+    /// Bundled policy rule generation. Legacy policies omitted this marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     /// "audit" (log only) or "enforce" (block)
     #[serde(default = "default_mode")]
     pub mode: String,
@@ -89,9 +92,15 @@ pub struct PolicySettings {
     pub default: String,
 }
 
-fn default_mode() -> String { "audit".into() }
-fn default_on_failure() -> String { "closed".into() }
-fn default_default() -> String { "warn".into() }
+fn default_mode() -> String {
+    "audit".into()
+}
+fn default_on_failure() -> String {
+    "closed".into()
+}
+fn default_default() -> String {
+    "warn".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyPathRule {
@@ -135,8 +144,8 @@ pub struct AllowPathRule {
 /// parse a policy TOML string into a finalized PolicyConfig
 #[cfg(test)]
 pub fn parse_policy(toml_content: &str) -> Result<PolicyConfig, String> {
-    let config: PolicyConfig = toml::from_str(toml_content)
-        .map_err(|e| format!("policy parse error: {e}"))?;
+    let config: PolicyConfig =
+        toml::from_str(toml_content).map_err(|e| format!("policy parse error: {e}"))?;
     Ok(config.finalize())
 }
 

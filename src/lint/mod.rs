@@ -25,7 +25,10 @@ pub struct Finding {
 }
 
 fn is_broad_allow(pattern: &str) -> bool {
-    matches!(pattern.trim(), "*" | "**" | "/*" | "/**" | "~" | "~/" | "~/**" | "**/*" | "./**")
+    matches!(
+        pattern.trim(),
+        "*" | "**" | "/*" | "/**" | "~" | "~/" | "~/**" | "**/*" | "./**"
+    )
 }
 
 /// Run the static checks against a loaded policy. Pure. Testable.
@@ -40,7 +43,10 @@ pub fn lint_engine(engine: &PolicyEngine) -> Vec<Finding> {
             if let Err(e) = Regex::new(r.pattern) {
                 findings.push(Finding {
                     error: true,
-                    message: format!("{}: invalid regex {:?} (never matches): {e}", r.section, r.pattern),
+                    message: format!(
+                        "{}: invalid regex {:?} (never matches): {e}",
+                        r.section, r.pattern
+                    ),
                 });
             }
         }
@@ -82,7 +88,10 @@ pub fn lint_engine(engine: &PolicyEngine) -> Vec<Finding> {
 pub fn run(args: LintArgs) -> Result<(), Box<dyn std::error::Error>> {
     let path = args.policy.clone().unwrap_or_else(resolve_policy_path);
     let engine = PolicyEngine::load(&path).map_err(|e| {
-        format!("could not load policy at {}: {e}\n(run 'sentinel install' first)", path.display())
+        format!(
+            "could not load policy at {}: {e}\n(run 'sentinel install' first)",
+            path.display()
+        )
     })?;
 
     let findings = lint_engine(&engine);
@@ -119,7 +128,10 @@ mod tests {
         // gcp_sa ordering) must produce ZERO findings, or lint is crying wolf.
         let e = PolicyEngine::from_toml_str(&default_policy_content("enforce")).unwrap();
         let findings = lint_engine(&e);
-        assert!(findings.is_empty(), "default policy must lint clean; got: {findings:?}");
+        assert!(
+            findings.is_empty(),
+            "default policy must lint clean; got: {findings:?}"
+        );
     }
 
     #[test]
@@ -128,7 +140,9 @@ mod tests {
             "[policy]\nmode=\"enforce\"\n[[deny.commands]]\npattern = \"a(b\"\naction=\"block\"\nreason=\"x\"\n",
         );
         let findings = lint_engine(&e);
-        assert!(findings.iter().any(|f| f.error && f.message.contains("invalid regex")));
+        assert!(findings
+            .iter()
+            .any(|f| f.error && f.message.contains("invalid regex")));
     }
 
     #[test]
@@ -139,7 +153,9 @@ mod tests {
              [[deny.paths]]\npattern=\"~/.ssh/*\"\naction=\"warn\"\nreason=\"b\"\n",
         );
         let findings = lint_engine(&e);
-        assert!(findings.iter().any(|f| !f.error && f.message.contains("unreachable")));
+        assert!(findings
+            .iter()
+            .any(|f| !f.error && f.message.contains("unreachable")));
     }
 
     #[test]
@@ -159,6 +175,8 @@ mod tests {
             "[policy]\nmode=\"enforce\"\ndefault=\"block\"\n[[allow.paths]]\npattern=\"**\"\n",
         );
         let findings = lint_engine(&e);
-        assert!(findings.iter().any(|f| !f.error && f.message.contains("widens a lockdown")));
+        assert!(findings
+            .iter()
+            .any(|f| !f.error && f.message.contains("widens a lockdown")));
     }
 }

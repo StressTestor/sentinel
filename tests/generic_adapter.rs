@@ -56,7 +56,10 @@ fn gemini_block_emits_decision_deny() {
     let h = home();
     let (code, out) = eval_agent(h.path(), "gemini", BLOCKED);
     assert_eq!(code, Some(2), "gemini block must exit 2; got {code:?}");
-    assert_eq!(out["decision"], "deny", "Gemini/Crush use the 'deny' token; got {out}");
+    assert_eq!(
+        out["decision"], "deny",
+        "Gemini/Crush use the 'deny' token; got {out}"
+    );
 }
 
 #[test]
@@ -79,7 +82,10 @@ fn generic_block_emits_decision_block_and_exit_2() {
     );
     assert_eq!(code, Some(2), "generic block must exit 2; got {code:?}");
     assert_eq!(out["decision"], "block", "got {out}");
-    assert!(out["reason"].is_string(), "block must carry a reason; got {out}");
+    assert!(
+        out["reason"].is_string(),
+        "block must carry a reason; got {out}"
+    );
     // NOT the Claude Code nested shape
     assert!(
         out.get("hookSpecificOutput").is_none(),

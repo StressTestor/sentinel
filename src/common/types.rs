@@ -63,7 +63,10 @@ pub struct AttackResult {
     pub dimension: String,
     pub severity: Severity,
     pub outcome: AttackOutcome,
-    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<AuditEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
     pub duration_ms: u64,
 }
 
@@ -78,6 +81,28 @@ pub enum AttackOutcome {
     Timeout,
     /// error during execution
     Error,
+    /// the agent completed, but the evidence is insufficient for a defended or
+    /// vulnerable verdict
+    Inconclusive,
+}
+
+/// A structured observation emitted by an agent adapter. Audit verdicts are
+/// derived from these records, never from arbitrary stdout text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditEvidence {
+    pub kind: EvidenceKind,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceKind {
+    Tool,
+    Filesystem,
+    Network,
 }
 
 /// aggregate report from a full audit run
@@ -86,7 +111,9 @@ pub struct AuditReport {
     pub agent: String,
     pub corpus_size: usize,
     pub results: Vec<AttackResult>,
-    pub risk_score: f64,
+    /// Absent when any sequence is non-conclusive; reporting a numeric score
+    /// over partial evidence would make adapter failures look safer.
+    pub risk_score: Option<f64>,
     pub dimensions: Vec<DimensionSummary>,
     pub timestamp: String,
     pub sentinel_version: String,
@@ -98,6 +125,7 @@ pub struct DimensionSummary {
     pub total: usize,
     pub vulnerable: usize,
     pub defended: usize,
+    pub inconclusive: usize,
     pub timeout: usize,
     pub error: usize,
 }
@@ -114,6 +142,27 @@ impl AuditReport {
         self.results
             .iter()
             .filter(|r| r.outcome == AttackOutcome::Defended)
+            .count()
+    }
+
+    pub fn inconclusive_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| r.outcome == AttackOutcome::Inconclusive)
+            .count()
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| r.outcome == AttackOutcome::Error)
+            .count()
+    }
+
+    pub fn timeout_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| r.outcome == AttackOutcome::Timeout)
             .count()
     }
 }
