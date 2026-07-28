@@ -40,11 +40,11 @@ modify the operator's real agent configuration.
 | F10 | Point Claude at the supported Ghost-to-Sentinel bridge, then run status/doctor. | A parsed, executable, version-validated bridge is recognized as protected without weakening direct-hook checks. | Exact parsed ownership distinguishes direct Sentinel and Ghost-mediated handlers; doctor invokes the bridge itself and requires a real denial. The operator's Ghost path is healthy. | Medium | `src/install/hooks.rs`, `src/install/mod.rs`, `src/doctor/mod.rs` | Direct, Ghost-bridged, stale binary, wrong binary, wrong version, and untrusted/disabled lifecycle fixtures. | Fixed |
 | F11 | Run `audit-mcp` for the first time, then add/change/remove servers across Claude and Codex configs. | First run is discovery-only until explicit trust; diffs include additions, changes, removals, and both agents with secret-safe fingerprints. | First run is discovery-only; `--update` explicitly writes a private atomic baseline. Claude/Codex additions, changes, and removals use salted canonical digests without raw commands or secrets. | High | `src/audit_mcp/mod.rs`, `src/cli.rs` | Empty-home discovery, explicit trust/update, add/change/remove, Claude/Codex merge, and no-secret-output tests. | Fixed |
 | F12 | Compare Cargo metadata, crates.io metadata/VCS SHA, remote tags/releases, and `main`. | One reviewed merged commit maps to Cargo version, tag, crate VCS source, artifacts, checksums/attestations, and GitHub release. | Candidate is the unused `0.5.0`; release identity gates exact Cargo/tag/main/crates/VCS equality and draft-first artifacts, checksums, SBOMs, and attestations. No tag or publication occurs before merge and credentials. | Critical | `Cargo.toml`, `.github/workflows/release.yml`, `scripts/release-identity.sh`, GitHub releases/tags, crates.io package metadata | Release dry run rejects branch-only source and any identity mismatch; next unused version is chosen immediately before release. | Candidate ready; merge/release pending |
-| F13 | Run the documented local gates and inspect CI. | CI gates fmt, locked all-target/all-feature tests and clippy, verifier/migrations, dependency audit, network lint, package/install smoke, MSRV, meaningful macOS behavior, docs, and provenance. | Local all-target/all-feature tests, Clippy, fmt, Rust 1.85, RustSec, docs assertions, and extracted-package install/verifier smoke pass. Pinned CI defines the corresponding quality, MSRV, package, platform, and security gates. | High | `.github/workflows/ci.yml`, other workflows, `Cargo.toml`, `CONTRIBUTING.md` | Green matrix containing every required gate plus a failing provenance-negative test. | Fixed locally; CI pending |
+| F13 | Run the documented local gates and inspect CI. | CI gates fmt, locked all-target/all-feature tests and clippy, verifier/migrations, dependency audit, network lint, package/install smoke, MSRV, meaningful macOS behavior, docs, and provenance. | Local gates pass, and PR `#69` passed all 11 GitHub checks: quality, MSRV, package smoke, both platforms, RustSec, cargo-deny, dependency review, and CodeQL for Rust and Actions. | High | `.github/workflows/ci.yml`, other workflows, `Cargo.toml`, `CONTRIBUTING.md` | Green matrix containing every required gate plus a failing provenance-negative test. | Fixed |
 | F14 | Compare README, architecture, changelog, CLI help, verifier case count, Cargo features, and packaged behavior. | Public claims and architecture describe tested behavior and explicitly separate guarantees, heuristics, limits, configuration, trust, and activation. | README, architecture, changelog, and site now match the shipped one-tier pipeline, 45 verifier cases, stateful unsafe-host audit, bundled corpus, lifecycle trust, MCP baseline, and explicit limits. | Medium | `README.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `Cargo.toml` | Documentation assertions plus full manual claim-to-test review. | Fixed |
 | F15 | Inspect direct dependencies and feature use. | Direct dependencies are used and runtime features are minimal. | Unused `anyhow`/`proptest` were removed; Tokio is narrowed to the used process/I/O/time/macros/runtime features; locked all-feature and RustSec gates pass. | Low | `Cargo.toml`, `Cargo.lock`, `src/`, `tests/` | `cargo machete`-equivalent source check, locked all-feature build/test, and dependency audit after removal/narrowing. | Fixed |
-| F16 | Inspect the active ruleset for the default branch. | Changes require a PR and the verified CI/security checks, with a documented break-glass route. | Candidate workflows now expose stable required-check names, but the live ruleset is intentionally unchanged until those checks succeed on the PR. | High | GitHub ruleset `18708361`, `.github/workflows/` | Ruleset read-back after CI names stabilize; direct push is rejected and documented break-glass remains explicit. | Confirmed; governance pending |
-| F17 | List open automated PRs and inspect their checks/ancestry. | Related dependency updates are grouped and stale automated branches are closed with receipts. | Dependabot grouping is configured; the ten pre-existing PRs remain open until the hardening PR merges, when each can be closed with a supersession receipt. | Low | `.github/dependabot.yml`, GitHub PRs `#52`, `#53`, `#54`, `#56`, `#63`-`#68` | Dependabot grouping config plus documented merge/close disposition for every open automated PR. | Partially fixed; disposition pending |
+| F16 | Inspect the active ruleset for the default branch. | Changes require a PR and the verified CI/security checks, with a documented break-glass route. | Active ruleset `18708361` now requires a squash PR, resolved conversations, strict success from the 11 observed GitHub checks, and has no bypass actor. Active ruleset `19889568` prevents updates, deletion, and non-fast-forward changes to `v*` tags. | High | GitHub rulesets `18708361` and `19889568`, `.github/workflows/` | Ruleset read-back after CI names stabilize; direct push is rejected and documented break-glass remains explicit. | Fixed |
+| F17 | List open automated PRs and inspect their checks/ancestry. | Related dependency updates are grouped and stale automated branches are closed with receipts. | Dependabot grouping is configured; PRs `#52`, `#53`, `#54`, `#56`, and `#63` through `#68` were closed with comments identifying `#69` as the grouped superseding change. | Low | `.github/dependabot.yml`, GitHub PRs `#52`, `#53`, `#54`, `#56`, `#63`-`#68` | Dependabot grouping config plus documented merge/close disposition for every open automated PR. | Fixed |
 
 ## Fresh-eyes review findings
 
@@ -64,7 +64,7 @@ independently before remediation.
 | R09 | Three of four release binaries received only `file` inspection because target triples did not equal runner host triples. | CPU-native musl artifacts execute on native Linux runners; x86 and arm macOS use matching Intel/arm runners. | Workflow review, actionlint, and native arm64 release build. | Fixed |
 | R10 | One host-default Linux SBOM was shipped beside all four target archives. | Generate and assert four target-qualified CycloneDX SBOMs with cargo-cyclonedx 0.5.9. | Tool source/filename verification and workflow review. | Fixed |
 | R11 | Local release dry-run read candidate files but attributed them to the old clean `HEAD`. | Local identity checks refuse any tracked or untracked dirty worktree; CI has an explicit negative test. | Dirty-tree dry-run exits `1`; actionlint passes. | Fixed |
-| R12 | A remote tag could move between initial fetch and GitHub release publication. | Publish mode re-reads the annotated/lightweight remote tag immediately before public release. Immutable releases and `v*` governance remain live prerequisites. | Remote-tag parsing/revalidation review. | Code fixed; governance pending |
+| R12 | A remote tag could move between initial fetch and GitHub release publication. | Publish mode re-reads the annotated/lightweight remote tag immediately before public release. Immutable releases are enabled, and active ruleset `19889568` prevents `v*` updates or deletion without a bypass actor. | Remote-tag parsing/revalidation review plus live ruleset and immutable-release read-back. | Fixed |
 | R13 | A Codex mutation through an existing symlink to policy, hook config, or MCP baseline received only the canonical policy warning. | Resolve paths against `cwd`, canonicalize existing source/destination identities, and fail closed when identity cannot be inspected. | Codex symlink integration controls. | Fixed |
 | R14 | A hook command such as `sentinel evaluate >/dev/null 2>&1 \|\| true` was treated as owned; Doctor probed only the binary prefix and reported healthy. | Ownership requires exact supported argv and Doctor probes the configured direct or Ghost command. | Wrapped-hook install/self-protect/strict-Doctor regressions. | Fixed |
 | R15 | Claude local-scope `projects.<cwd>.mcpServers` entries were absent from strict MCP audit. | Discover only the canonical current project as the path-free `claude:local` source. | Current/unrelated-project and secret/path non-disclosure integration test. | Fixed |
@@ -127,7 +127,7 @@ passed
 cargo audit
 0 vulnerable packages
 
-SENTINEL_PACKAGE_ALLOW_DIRTY=1 ./scripts/package-smoke.sh
+./scripts/package-smoke.sh
 extracted package tests, install, VCS identity, 45/45 verifier, and public commands passed
 ```
 
@@ -135,14 +135,25 @@ extracted package tests, install, VCS identity, 45/45 verifier, and public comma
 
 ```text
 sentinel policy-migrate --apply
-migrated published 0.4.0 policy to revision 2026-07-28 with backup
+migrated draft revision 2026-07-28 policy to revision 2026-07-28.1 with backup
 
 sentinel policy-migrate --check
-current policy revision 2026-07-28
+current policy revision 2026-07-28.1
 
 sentinel doctor --agent codex --strict --json
-healthy: true; activation: active; hook source: ~/.codex/hooks.json; trust: trusted
+sentinel 0.5.0; healthy: true; activation: active; hook source: ~/.codex/hooks.json; trust: trusted
 
 sentinel doctor --agent claude-code --strict --json
 healthy: true; activation: active; hook source: ~/.claude/settings.json; Ghost bridge canary denied
+```
+
+### GitHub governance
+
+```text
+PR #69: 11/11 checks passed
+protect-main ruleset 18708361: PR + resolved conversations + strict required checks; no bypass actor
+protect-release-tags ruleset 19889568: v* update/deletion/non-fast-forward denied; no bypass actor
+immutable releases: enabled
+release environment: required reviewer + v* tag policy; CARGO_REGISTRY_TOKEN absent
+Dependabot PRs #52, #53, #54, #56, #63-#68: closed as superseded by #69
 ```
