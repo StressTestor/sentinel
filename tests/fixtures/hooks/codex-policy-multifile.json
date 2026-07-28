@@ -1,0 +1,11 @@
+{
+  "session_id": "019fa7ba-security",
+  "transcript_path": "/tmp/codex-transcript.jsonl",
+  "cwd": "/tmp/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** Update File: ~/.sentinel/policy.toml\n@@\n-mode = \"enforce\"\n+mode = \"audit\"\n*** End Patch"
+  },
+  "tool_use_id": "call_policy_multifile"
+}

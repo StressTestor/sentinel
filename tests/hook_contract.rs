@@ -34,9 +34,8 @@ fn run_evaluate(home: &std::path::Path, payload: &str) -> (Option<i32>, serde_js
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let json = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-        panic!("evaluate stdout was not valid JSON: {e}\nstdout: {stdout:?}")
-    });
+    let json = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("evaluate stdout was not valid JSON: {e}\nstdout: {stdout:?}"));
     (output.status.code(), json)
 }
 
@@ -87,5 +86,9 @@ fn allowed_call_defers_to_normal_flow() {
     // Code's normal permission prompt. Crucially NOT permissionDecision:"allow",
     // which would auto-approve the call.
     assert_eq!(code, Some(0), "an allowed call must exit 0; got {code:?}");
-    assert_eq!(out, serde_json::json!({}), "allow must emit an empty object");
+    assert_eq!(
+        out,
+        serde_json::json!({}),
+        "allow must emit an empty object"
+    );
 }

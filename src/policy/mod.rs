@@ -66,17 +66,19 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub fn load(path: &Path) -> Result<Self, PolicyError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| PolicyError::ReadError(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| PolicyError::ReadError(e.to_string()))?;
         Self::from_toml_str(&content)
     }
 
     /// Build an engine from a policy TOML string (no filesystem read). Used by
     /// `sentinel verify` to evaluate against the bundled default policy in-memory.
     pub fn from_toml_str(content: &str) -> Result<Self, PolicyError> {
-        let config: PolicyConfig = toml::from_str(content)
-            .map_err(|e| PolicyError::ParseError(format!("{e}")))?;
-        Ok(Self { config: config.finalize() })
+        let config: PolicyConfig =
+            toml::from_str(content).map_err(|e| PolicyError::ParseError(format!("{e}")))?;
+        Ok(Self {
+            config: config.finalize(),
+        })
     }
 
     #[cfg(test)]
@@ -104,7 +106,8 @@ impl PolicyEngine {
     /// reconfigured by the agent.
     pub fn has_self_protect_rule(&self) -> bool {
         self.config.deny_paths.iter().any(|r| {
-            r.pattern.contains(".sentinel/policy.toml") && r.action.eq_ignore_ascii_case("block")
+            r.pattern.contains(".sentinel/policy.toml")
+                && (r.action.eq_ignore_ascii_case("block") || r.action.eq_ignore_ascii_case("warn"))
         })
     }
 
@@ -112,13 +115,28 @@ impl PolicyEngine {
     pub fn rules(&self) -> Vec<RuleView<'_>> {
         let mut out = Vec::new();
         for r in &self.config.deny_paths {
-            out.push(RuleView { section: "deny.paths", pattern: &r.pattern, action: &r.action, reason: &r.reason });
+            out.push(RuleView {
+                section: "deny.paths",
+                pattern: &r.pattern,
+                action: &r.action,
+                reason: &r.reason,
+            });
         }
         for r in &self.config.deny_commands {
-            out.push(RuleView { section: "deny.commands", pattern: &r.pattern, action: &r.action, reason: &r.reason });
+            out.push(RuleView {
+                section: "deny.commands",
+                pattern: &r.pattern,
+                action: &r.action,
+                reason: &r.reason,
+            });
         }
         for r in &self.config.deny_secrets {
-            out.push(RuleView { section: "deny.secrets", pattern: &r.pattern, action: &r.action, reason: &r.reason });
+            out.push(RuleView {
+                section: "deny.secrets",
+                pattern: &r.pattern,
+                action: &r.action,
+                reason: &r.reason,
+            });
         }
         for r in &self.config.allow_paths {
             out.push(RuleView {
@@ -321,6 +339,7 @@ mod tests {
     fn test_engine() -> PolicyEngine {
         PolicyEngine::from_config(PolicyConfig::new(
             PolicySettings {
+                revision: None,
                 mode: "enforce".into(),
                 on_failure: "closed".into(),
                 default: "warn".into(),
@@ -404,7 +423,9 @@ reason = "blocked MCP server"
         assert_eq!(d.matched_rule.as_deref(), Some("deny.tools: mcp__evil__*"));
         // a different server is untouched
         assert_eq!(
-            engine.evaluate(&tool_named("mcp__github__create_issue")).action,
+            engine
+                .evaluate(&tool_named("mcp__github__create_issue"))
+                .action,
             Action::Allow
         );
         // a non-MCP tool is untouched
@@ -434,7 +455,10 @@ reason = "recursive root deletion"
 "#;
         let engine = PolicyEngine::from_toml_str(toml).unwrap();
         // warn-tier tool alone → warn
-        assert_eq!(engine.evaluate(&tool_named("mcp__shell__exec")).action, Action::Warn);
+        assert_eq!(
+            engine.evaluate(&tool_named("mcp__shell__exec")).action,
+            Action::Warn
+        );
         // same tool carrying a block-tier command → block wins
         let with_cmd = ToolCall {
             tool_name: "mcp__shell__exec".into(),
@@ -507,6 +531,7 @@ reason = "recursive root deletion"
         // rule in the loop, not just the first.
         let engine = PolicyEngine::from_config(PolicyConfig::new(
             PolicySettings {
+                revision: None,
                 mode: "enforce".into(),
                 on_failure: "closed".into(),
                 default: "warn".into(),
@@ -588,9 +613,22 @@ reason = "recursive root deletion"
         // path, the rm is a disarm) and `curl -d @.env` (the .env path warns, the
         // command exfiltrates).
         let engine = PolicyEngine::from_config(PolicyConfig::new(
-            PolicySettings { mode: "enforce".into(), on_failure: "closed".into(), default: "warn".into() },
-            vec![DenyPathRule { pattern: "**/.env".into(), action: "warn".into(), reason: "env file".into() }],
-            vec![DenyCommandRule { pattern: r"\brm\b.*\.env".into(), action: "block".into(), reason: "delete env".into() }],
+            PolicySettings {
+                revision: None,
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "warn".into(),
+            },
+            vec![DenyPathRule {
+                pattern: "**/.env".into(),
+                action: "warn".into(),
+                reason: "env file".into(),
+            }],
+            vec![DenyCommandRule {
+                pattern: r"\brm\b.*\.env".into(),
+                action: "block".into(),
+                reason: "delete env".into(),
+            }],
             vec![],
             vec![],
         ));
@@ -601,7 +639,11 @@ reason = "recursive root deletion"
             raw_params: "{}".into(),
         };
         let d = engine.evaluate(&call);
-        assert_eq!(d.action, Action::Block, "command block must override the warn-tier path match");
+        assert_eq!(
+            d.action,
+            Action::Block,
+            "command block must override the warn-tier path match"
+        );
         assert!(d.matched_rule.unwrap().starts_with("deny.commands"));
     }
 
@@ -610,10 +652,23 @@ reason = "recursive root deletion"
         // A warn-tier path must not shadow block-tier credential content: in
         // enforce mode, warn allows/defer-executes while block denies.
         let engine = PolicyEngine::from_config(PolicyConfig::new(
-            PolicySettings { mode: "enforce".into(), on_failure: "closed".into(), default: "warn".into() },
-            vec![DenyPathRule { pattern: "**/.env".into(), action: "warn".into(), reason: "env file".into() }],
+            PolicySettings {
+                revision: None,
+                mode: "enforce".into(),
+                on_failure: "closed".into(),
+                default: "warn".into(),
+            },
+            vec![DenyPathRule {
+                pattern: "**/.env".into(),
+                action: "warn".into(),
+                reason: "env file".into(),
+            }],
             vec![],
-            vec![DenySecretRule { pattern: r"AKIA[0-9A-Z]{16}".into(), action: "block".into(), reason: "AWS key".into() }],
+            vec![DenySecretRule {
+                pattern: r"AKIA[0-9A-Z]{16}".into(),
+                action: "block".into(),
+                reason: "AWS key".into(),
+            }],
             vec![],
         ));
         // token built at runtime so no literal AWS key appears in this source file
@@ -624,13 +679,18 @@ reason = "recursive root deletion"
             paths: vec!["./config/.env".into()],
             raw_params: format!(r#"{{"content":"{key}"}}"#),
         };
-        assert_eq!(engine.evaluate(&call).action, Action::Block, "block-tier secret must override the warn-tier path");
+        assert_eq!(
+            engine.evaluate(&call).action,
+            Action::Block,
+            "block-tier secret must override the warn-tier path"
+        );
     }
 
     #[test]
     fn no_rules_matched_allows() {
         let engine = PolicyEngine::from_config(PolicyConfig::new(
             PolicySettings {
+                revision: None,
                 mode: "enforce".into(),
                 on_failure: "closed".into(),
                 default: "allow".into(),
@@ -657,6 +717,7 @@ reason = "recursive root deletion"
         // deny-side recursive-glob fix must not silently widen allow-lists.
         let engine = PolicyEngine::from_config(PolicyConfig::new(
             PolicySettings {
+                revision: None,
                 mode: "enforce".into(),
                 on_failure: "closed".into(),
                 default: "block".into(),
@@ -689,6 +750,7 @@ reason = "recursive root deletion"
     fn allow_list_checks_each_brace_expanded_runtime_path() {
         let engine = PolicyEngine::from_config(PolicyConfig::new(
             PolicySettings {
+                revision: None,
                 mode: "enforce".into(),
                 on_failure: "closed".into(),
                 default: "block".into(),
@@ -716,6 +778,7 @@ reason = "recursive root deletion"
     fn allow_list_accepts_brace_expansions_covered_by_different_rules() {
         let engine = PolicyEngine::from_config(PolicyConfig::new(
             PolicySettings {
+                revision: None,
                 mode: "enforce".into(),
                 on_failure: "closed".into(),
                 default: "block".into(),
@@ -751,6 +814,7 @@ reason = "recursive root deletion"
         // past the cap behind 64 allowed siblings.
         let engine = PolicyEngine::from_config(PolicyConfig::new(
             PolicySettings {
+                revision: None,
                 mode: "enforce".into(),
                 on_failure: "closed".into(),
                 default: "block".into(),
@@ -775,7 +839,10 @@ reason = "recursive root deletion"
         };
         let decision = engine.evaluate(&call);
         assert_eq!(decision.action, Action::Block);
-        assert_eq!(decision.matched_rule.as_deref(), Some("allow.paths (uncheckable)"));
+        assert_eq!(
+            decision.matched_rule.as_deref(),
+            Some("allow.paths (uncheckable)")
+        );
     }
 
     #[test]
@@ -783,6 +850,7 @@ reason = "recursive root deletion"
         let mk = |of: &str| {
             PolicyEngine::from_config(PolicyConfig::new(
                 PolicySettings {
+                    revision: None,
                     mode: "enforce".into(),
                     on_failure: of.into(),
                     default: "warn".into(),

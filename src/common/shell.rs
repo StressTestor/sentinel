@@ -111,7 +111,11 @@ fn decode_escape(rest: &[char]) -> (String, usize) {
         'u' => hex_escape(&rest[1..], 4).unwrap_or_else(|| ("u".into(), 1)),
         'U' => hex_escape(&rest[1..], 8).unwrap_or_else(|| ("U".into(), 1)),
         '0'..='7' => {
-            let oct: String = rest.iter().take(3).take_while(|c| ('0'..='7').contains(c)).collect();
+            let oct: String = rest
+                .iter()
+                .take(3)
+                .take_while(|c| ('0'..='7').contains(c))
+                .collect();
             match u32::from_str_radix(&oct, 8).ok().and_then(char::from_u32) {
                 Some(c) => (c.to_string(), oct.len()),
                 None => (oct.clone(), oct.len()),
@@ -134,11 +138,17 @@ fn decode_escape(rest: &[char]) -> (String, usize) {
 
 /// `\xHH` / `\uHHHH` / `\UHHHHHHHH`: take up to `max` hex digits.
 fn hex_escape(rest: &[char], max: usize) -> Option<(String, usize)> {
-    let hex: String = rest.iter().take(max).take_while(|c| c.is_ascii_hexdigit()).collect();
+    let hex: String = rest
+        .iter()
+        .take(max)
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
     if hex.is_empty() {
         return None;
     }
-    let c = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)?;
+    let c = u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)?;
     // +1 for the leading x/u/U selector consumed by the caller's match arm
     Some((c.to_string(), 1 + hex.len()))
 }
@@ -178,28 +188,49 @@ mod tests {
 
     #[test]
     fn ansi_c_hex_decodes_to_path() {
-        assert_eq!(decode_obfuscation("cat $'\\x2fetc\\x2fpasswd'").as_deref(), Some("cat /etc/passwd"));
+        assert_eq!(
+            decode_obfuscation("cat $'\\x2fetc\\x2fpasswd'").as_deref(),
+            Some("cat /etc/passwd")
+        );
     }
 
     #[test]
     fn ansi_c_decodes_command_word() {
         // $'\x72\x6d' is "rm"
-        assert_eq!(decode_obfuscation("$'\\x72\\x6d' -rf /").as_deref(), Some("rm -rf /"));
+        assert_eq!(
+            decode_obfuscation("$'\\x72\\x6d' -rf /").as_deref(),
+            Some("rm -rf /")
+        );
     }
 
     #[test]
     fn ansi_c_octal_and_unicode() {
         // \057 octal = '/'
-        assert_eq!(decode_obfuscation("cat $'\\057etc\\057passwd'").as_deref(), Some("cat /etc/passwd"));
+        assert_eq!(
+            decode_obfuscation("cat $'\\057etc\\057passwd'").as_deref(),
+            Some("cat /etc/passwd")
+        );
         // / = '/'
-        assert_eq!(decode_obfuscation("cat $'\\u002fetc\\u002fpasswd'").as_deref(), Some("cat /etc/passwd"));
+        assert_eq!(
+            decode_obfuscation("cat $'\\u002fetc\\u002fpasswd'").as_deref(),
+            Some("cat /etc/passwd")
+        );
     }
 
     #[test]
     fn ifs_desugar_brace_and_bare() {
-        assert_eq!(decode_obfuscation("cat${IFS}/etc/passwd").as_deref(), Some("cat /etc/passwd"));
-        assert_eq!(decode_obfuscation("cat${IFS:0:1}/etc/passwd").as_deref(), Some("cat /etc/passwd"));
-        assert_eq!(decode_obfuscation("cat$IFS/etc/passwd").as_deref(), Some("cat /etc/passwd"));
+        assert_eq!(
+            decode_obfuscation("cat${IFS}/etc/passwd").as_deref(),
+            Some("cat /etc/passwd")
+        );
+        assert_eq!(
+            decode_obfuscation("cat${IFS:0:1}/etc/passwd").as_deref(),
+            Some("cat /etc/passwd")
+        );
+        assert_eq!(
+            decode_obfuscation("cat$IFS/etc/passwd").as_deref(),
+            Some("cat /etc/passwd")
+        );
     }
 
     #[test]
@@ -222,9 +253,15 @@ mod tests {
         assert!(r.contains(&"~/.ssh/a".to_string()));
         assert!(r.contains(&"~/.aws/b".to_string()));
         // no comma => left intact
-        assert_eq!(brace_expand("/etc/{passwd}", 64), vec!["/etc/{passwd}".to_string()]);
+        assert_eq!(
+            brace_expand("/etc/{passwd}", 64),
+            vec!["/etc/{passwd}".to_string()]
+        );
         // no brace => identity
-        assert_eq!(brace_expand("/etc/passwd", 64), vec!["/etc/passwd".to_string()]);
+        assert_eq!(
+            brace_expand("/etc/passwd", 64),
+            vec!["/etc/passwd".to_string()]
+        );
     }
 
     #[test]

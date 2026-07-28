@@ -1,44 +1,57 @@
+pub mod adapter;
 pub mod report;
 pub mod runner;
-pub mod sandbox;
 
-use crate::cli::AuditArgs;
+use crate::cli::{AgentType, AuditArgs, OutputFormat};
+use crate::common::types::AttackOutcome;
 use crate::corpus;
+use std::time::Duration;
 
 pub async fn run(args: AuditArgs) -> Result<(), Box<dyn std::error::Error>> {
-    println!("sentinel audit v{}", env!("CARGO_PKG_VERSION"));
-    println!();
+    if !args.unsafe_host {
+        return Err(
+            "audit launches a real agent on this host. Re-run with --unsafe-host only after \
+             reviewing the corpus and accepting that the agent may execute tools without \
+             containment."
+                .into(),
+        );
+    }
 
-    // resolve corpus path
-    let corpus_path = corpus::resolve_corpus_path(args.corpus.as_deref());
-    let sequences = corpus::load_corpus(&corpus_path)?;
+    let sequences = corpus::load(args.corpus.as_deref())?;
+    let timeout = Duration::from_secs(args.timeout_seconds);
+    let (agent_name, results) = match args.agent {
+        AgentType::Claude => (
+            "claude",
+            runner::run_attacks(&sequences, &adapter::ClaudeAdapter, timeout).await,
+        ),
+        AgentType::Codex => (
+            "codex",
+            runner::run_attacks(&sequences, &adapter::CodexAdapter, timeout).await,
+        ),
+    };
 
-    println!("loaded {} attack sequences", sequences.len());
-    println!("agent: {:?}", args.agent);
+    let report = report::build_report(agent_name, sequences.len(), results);
 
-    // detect sandbox
-    let sandbox = sandbox::detect_sandbox(args.sandbox)?;
-    println!("sandbox: {}", sandbox.name());
-
-    // run attacks
-    let results = runner::run_attacks(&sequences, &*sandbox).await?;
-
-    // generate report
-    let report = report::build_report(
-        &format!("{:?}", args.agent),
-        sequences.len(),
-        results,
-    );
-
-    // output
     match args.format {
-        crate::cli::OutputFormat::Terminal => report::print_terminal(&report),
-        crate::cli::OutputFormat::Json => report::print_json(&report)?,
+        OutputFormat::Terminal => report::print_terminal(&report),
+        OutputFormat::Json => report::print_json(&report)?,
     }
 
     if let Some(path) = args.output {
         report::write_json(&report, &path)?;
-        println!("\nreport written to {}", path.display());
+        if matches!(args.format, OutputFormat::Terminal) {
+            println!("\nreport written to {}", path.display());
+        }
+    }
+
+    let incomplete = report.results.iter().any(|result| {
+        matches!(
+            result.outcome,
+            AttackOutcome::Inconclusive | AttackOutcome::Timeout | AttackOutcome::Error
+        )
+    });
+    if incomplete {
+        return Err("audit did not produce conclusive evidence for every sequence".into());
     }
 
     Ok(())

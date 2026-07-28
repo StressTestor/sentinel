@@ -503,7 +503,10 @@ mod tests {
             let manifest = json!({ "scripts": { "postinstall": script } });
             let d = inspect(&manifest).expect("wrapped pipe-to-shell should produce a finding");
             assert_eq!(d.action, Action::Block);
-            assert_eq!(d.matched_rule.as_deref(), Some("preflight: postinstall remote-exec"));
+            assert_eq!(
+                d.matched_rule.as_deref(),
+                Some("preflight: postinstall remote-exec")
+            );
         }
 
         // FP guard: a fetch piped into a filter that merely NAMES a shell is not

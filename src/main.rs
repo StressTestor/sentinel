@@ -3,19 +3,19 @@ mod audit_mcp;
 mod audit_trail;
 mod check;
 mod cli;
-mod doctor;
 mod common;
 mod corpus;
+mod doctor;
 mod evaluate;
 mod install;
 mod lint;
 mod policy;
 mod policy_diff;
+mod policy_migrate;
 mod post_evaluate;
 mod preflight;
 mod selfprotect;
 mod verify;
-mod wrap;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -25,34 +25,29 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        // Several commands expose machine-readable stdout contracts (hook
+        // decisions and `--json`). Diagnostics must never corrupt those
+        // streams, even when RUST_LOG enables warnings or debug output.
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
 
     let result = match cli.command {
         Command::Audit(args) => audit::run(args).await,
-        Command::Install(args) => {
-            install::run_install(args.audit, args.result_scan, &args.agent)
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-        }
-        Command::Uninstall => {
-            install::run_uninstall()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-        }
+        Command::Install(args) => install::run_install(args.audit, args.result_scan, &args.agent)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>),
+        Command::Uninstall(args) => install::run_uninstall(&args.agent)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>),
         Command::Evaluate(args) => evaluate::run(args.canary, &args.agent),
         Command::PostEvaluate => post_evaluate::run(),
-        Command::Wrap(args) => wrap::run_wrap(&args.agent_command),
-        Command::CorpusUpdate => {
-            println!("sentinel corpus update — not yet implemented");
-            println!("for now, manually update ~/.sentinel/corpus/core/");
-            Ok(())
-        }
-        Command::Status => run_status(),
+        Command::Status(args) => run_status(&args.agent),
         Command::Check(args) => check::run(args),
         Command::Verify(args) => verify::run(args),
         Command::Doctor(args) => doctor::run(args),
         Command::PolicyDiff(args) => policy_diff::run(args),
         Command::PolicyLint(args) => lint::run(args),
+        Command::PolicyMigrate(args) => policy_migrate::run(args),
         Command::AuditMcp(args) => audit_mcp::run(args),
     };
 
@@ -62,47 +57,43 @@ async fn main() {
     }
 }
 
-fn run_status() -> Result<(), Box<dyn std::error::Error>> {
+fn run_status(agent: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("sentinel v{}", env!("CARGO_PKG_VERSION"));
     println!();
 
-    // check if installed
+    let target = install::AgentTarget::parse(agent)
+        .ok_or_else(|| format!("unsupported status agent: {agent}"))?;
+    let state = install::state::inspect_agent(target);
+    println!("agent:    {}", target.label());
+    println!("config:   {}", state.config_path.display());
+    println!("hook:     {:?}", state.hook.ownership);
+    println!("active:   {}", state.activation.label());
+    if let Some(detail) = state.activation.detail() {
+        println!("detail:   {detail}");
+    }
+
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let settings_path = format!("{home}/.claude/settings.json");
     let policy_path = format!("{home}/.sentinel/policy.toml");
     let audit_path = format!("{home}/.sentinel/audit.jsonl");
 
-    if std::path::Path::new(&settings_path).exists() {
-        let content = std::fs::read_to_string(&settings_path)?;
-        if content.contains("sentinel evaluate") {
-            println!("hooks:   installed (PreToolUse in ~/.claude/settings.json)");
-        } else {
-            println!("hooks:   not installed (run 'sentinel install')");
-        }
-    } else {
-        println!("hooks:   not installed (no ~/.claude/settings.json)");
-    }
-
-    if std::path::Path::new(&policy_path).exists() {
-        let content = std::fs::read_to_string(&policy_path)?;
-        if content.contains("mode = \"enforce\"") {
-            println!("policy:  {} (enforce mode)", policy_path);
-        } else {
-            println!("policy:  {} (AUDIT mode)", policy_path);
-            println!("         WARNING: enforcement is OFF - sentinel is logging only, not blocking.");
-            println!("         set mode = \"enforce\" in the policy (or reinstall) to actually block.");
-        }
-    } else {
-        println!("policy:  not configured (run 'sentinel install')");
-    }
+    let engine = policy::PolicyEngine::load(std::path::Path::new(&policy_path))
+        .map_err(|error| format!("policy at {policy_path} cannot load: {error}"))?;
+    println!("policy:   {} ({})", policy_path, engine.mode());
 
     if std::path::Path::new(&audit_path).exists() {
-        let line_count = std::fs::read_to_string(&audit_path)?
-            .lines()
-            .count();
-        println!("audit:   {} events logged", line_count);
+        let line_count = std::fs::read_to_string(&audit_path)?.lines().count();
+        println!("audit:    {} events logged", line_count);
     } else {
-        println!("audit:   no events yet");
+        println!("audit:    no events yet");
+    }
+
+    if !state.activation.healthy() {
+        return Err(format!(
+            "{} hook is configured but not proven active ({})",
+            target.label(),
+            state.activation.label()
+        )
+        .into());
     }
 
     Ok(())

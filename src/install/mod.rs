@@ -1,5 +1,7 @@
+pub mod activation;
 pub mod defaults;
 pub mod hooks;
+pub mod state;
 
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -12,6 +14,38 @@ pub enum InstallError {
     WriteError(String),
     #[error("sentinel binary not found in PATH")]
     BinaryNotFound,
+    #[error("unsupported agent: {0}")]
+    UnsupportedAgent(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentTarget {
+    ClaudeCode,
+    Codex,
+}
+
+impl AgentTarget {
+    pub fn parse(agent: &str) -> Option<Self> {
+        match agent.to_ascii_lowercase().as_str() {
+            "claude" | "claude-code" | "claude_code" => Some(Self::ClaudeCode),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn evaluate_agent_arg(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
 }
 
 pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), InstallError> {
@@ -19,21 +53,54 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
     let sentinel_path = which_sentinel()?;
     println!("sentinel binary: {}", sentinel_path.display());
 
-    // Non-Claude-Code agents: sentinel can't auto-configure an arbitrary agent's
-    // hook system, so print the generic integration contract and write the policy.
-    if agent != "claude-code" {
+    let Some(target) = AgentTarget::parse(agent) else {
         return install_generic(&sentinel_path, audit, agent);
-    }
+    };
 
-    // install hooks into ~/.claude/settings.json
-    let settings_path = claude_settings_path();
-    hooks::install_hook(&settings_path, &sentinel_path)?;
-    println!("installed PreToolUse hook in {}", settings_path.display());
-
-    // opt-in: register the PostToolUse result-scan hook (detection only)
-    if result_scan {
-        hooks::install_post_hook(&settings_path, &sentinel_path)?;
-        println!("installed PostToolUse result-scan hook (detection only)");
+    match target {
+        AgentTarget::ClaudeCode => {
+            let settings_path = claude_settings_path();
+            hooks::install_hook(&settings_path, &sentinel_path)?;
+            println!(
+                "configured PreToolUse protection in {}",
+                settings_path.display()
+            );
+            if result_scan {
+                hooks::install_post_hook(&settings_path, &sentinel_path)?;
+                println!("configured PostToolUse result-scan hook (detection only)");
+            }
+        }
+        AgentTarget::Codex => {
+            let hooks_path = codex_hooks_path();
+            if hooks_path.exists() {
+                hooks::install_codex_json_hook(&hooks_path, &sentinel_path)?;
+                // Reconcile a prior inline install so Codex does not load the
+                // same protection from both config.toml and hooks.json.
+                hooks::uninstall_codex_hook(&codex_config_path())?;
+                println!(
+                    "configured PreToolUse protection in {}",
+                    hooks_path.display()
+                );
+                if result_scan {
+                    hooks::install_codex_json_post_hook(&hooks_path, &sentinel_path)?;
+                    println!("configured PostToolUse result-scan hook (detection only)");
+                }
+            } else {
+                let config_path = codex_config_path();
+                hooks::install_codex_hook(&config_path, &sentinel_path)?;
+                println!(
+                    "configured PreToolUse protection in {}",
+                    config_path.display()
+                );
+                if result_scan {
+                    hooks::install_codex_post_hook(&config_path, &sentinel_path)?;
+                    println!("configured PostToolUse result-scan hook (detection only)");
+                }
+            }
+            println!(
+                "Codex hook trust is a separate host decision; run `sentinel doctor --agent codex --strict` after approving it in `/hooks`."
+            );
+        }
     }
 
     // write default policy. ENFORCE is the default: a security tool that ships in
@@ -48,7 +115,9 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
         println!("mode: {mode}");
         println!();
         if audit {
-            println!("sentinel is in AUDIT mode - logging what WOULD be blocked, but NOT blocking.");
+            println!(
+                "sentinel is in AUDIT mode - logging what WOULD be blocked, but NOT blocking."
+            );
             println!("to enforce: re-run `sentinel install` (enforce is the default),");
             println!("or set mode = \"enforce\" in ~/.sentinel/policy.toml");
         } else {
@@ -59,12 +128,19 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
     } else {
         // write_default_policy skips an existing file: do NOT claim a mode we did
         // not set. An existing audit-mode user upgrading is NOT silently flipped.
-        println!("existing policy preserved at {} (mode unchanged).", policy_path.display());
+        println!(
+            "existing policy preserved at {} (mode unchanged).",
+            policy_path.display()
+        );
         println!("run `sentinel status` to see the active mode; edit the policy to change it.");
     }
 
     println!();
-    println!("done. sentinel is now active.");
+    println!(
+        "done. Sentinel is configured for {}; activation is verified by `sentinel doctor --agent {} --strict`.",
+        target.label(),
+        target.evaluate_agent_arg()
+    );
 
     Ok(())
 }
@@ -99,7 +175,9 @@ fn install_generic(sentinel_path: &Path, audit: bool, agent: &str) -> Result<(),
             println!("Gemini CLI — add to ~/.gemini/settings.json under \"hooks\":");
             println!();
             println!("    \"BeforeTool\": [{{ \"matcher\": \".*\", \"hooks\": [");
-            println!("      {{ \"type\": \"command\", \"command\": \"{bin} evaluate --agent gemini\" }}");
+            println!(
+                "      {{ \"type\": \"command\", \"command\": \"{bin} evaluate --agent gemini\" }}"
+            );
             println!("    ] }}]");
         }
         "crush" => {
@@ -132,20 +210,48 @@ fn install_generic(sentinel_path: &Path, audit: bool, agent: &str) -> Result<(),
         }
     }
     println!();
-    println!("default policy written to {} (mode: {mode}).", policy_path.display());
+    println!(
+        "default policy written to {} (mode: {mode}).",
+        policy_path.display()
+    );
     Ok(())
 }
 
-pub fn run_uninstall() -> Result<(), InstallError> {
-    let settings_path = claude_settings_path();
-    hooks::uninstall_hook(&settings_path)?;
-    println!("removed sentinel hooks from {}", settings_path.display());
+pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
+    let target = AgentTarget::parse(agent)
+        .ok_or_else(|| InstallError::UnsupportedAgent(agent.to_string()))?;
+    match target {
+        AgentTarget::ClaudeCode => {
+            let settings_path = claude_settings_path();
+            hooks::uninstall_hook(&settings_path)?;
+            println!(
+                "removed direct Sentinel hooks from {}; mediated hooks owned by other tools were preserved",
+                settings_path.display()
+            );
+        }
+        AgentTarget::Codex => {
+            let config_path = codex_config_path();
+            hooks::uninstall_codex_hook(&config_path)?;
+            let hooks_path = codex_hooks_path();
+            hooks::uninstall_hook(&hooks_path)?;
+            println!(
+                "removed direct Sentinel hooks from {} and {}",
+                config_path.display(),
+                hooks_path.display()
+            );
+        }
+    }
     println!("policy file preserved at ~/.sentinel/policy.toml");
     Ok(())
 }
 
 fn which_sentinel() -> Result<PathBuf, InstallError> {
-    // check if sentinel is in PATH
+    // The currently running binary is authoritative. Looking in PATH first can
+    // silently install a stale sibling while `cargo run` or a packaged smoke
+    // test is trying to configure the binary under test.
+    if let Ok(path) = std::env::current_exe() {
+        return Ok(path);
+    }
     let output = std::process::Command::new("which")
         .arg("sentinel")
         .output()
@@ -160,12 +266,29 @@ fn which_sentinel() -> Result<PathBuf, InstallError> {
     std::env::current_exe().map_err(|_| InstallError::BinaryNotFound)
 }
 
-fn claude_settings_path() -> PathBuf {
+pub(crate) fn claude_settings_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".claude").join("settings.json")
 }
 
-fn sentinel_dir() -> PathBuf {
+pub(crate) fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".codex")
+        })
+}
+
+pub(crate) fn codex_config_path() -> PathBuf {
+    codex_home().join("config.toml")
+}
+
+pub(crate) fn codex_hooks_path() -> PathBuf {
+    codex_home().join("hooks.json")
+}
+
+pub(crate) fn sentinel_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".sentinel")
 }

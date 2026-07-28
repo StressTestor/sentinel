@@ -11,14 +11,14 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// run attack corpus against an agent in a sandbox
+    /// run the versioned attack corpus against a real agent
     Audit(AuditArgs),
 
-    /// install sentinel hooks into Claude Code + write default policy
+    /// install Sentinel hooks into Claude Code or Codex + write default policy
     Install(InstallArgs),
 
-    /// remove sentinel hooks from Claude Code
-    Uninstall,
+    /// remove direct Sentinel hooks from one host agent
+    Uninstall(UninstallArgs),
 
     /// evaluate a tool call against the policy (called by the PreToolUse hook)
     Evaluate(EvaluateArgs),
@@ -27,15 +27,8 @@ pub enum Command {
     #[command(name = "post-evaluate")]
     PostEvaluate,
 
-    /// wrap an agent process in a pty proxy (generic adapter)
-    Wrap(WrapArgs),
-
-    /// fetch latest attack corpus
-    #[command(name = "corpus-update")]
-    CorpusUpdate,
-
     /// show current config, active hooks, policy summary
-    Status,
+    Status(StatusArgs),
 
     /// dry-run a tool call against the policy and explain the decision (no execution, no logging)
     Check(CheckArgs),
@@ -54,7 +47,11 @@ pub enum Command {
     #[command(name = "policy-lint")]
     PolicyLint(LintArgs),
 
-    /// enumerate configured MCP servers and flag new/changed ones (read-only, TOFU)
+    /// safely migrate a published Sentinel policy to the current bundled revision
+    #[command(name = "policy-migrate")]
+    PolicyMigrate(PolicyMigrateArgs),
+
+    /// discover MCP server configuration and compare it with an explicit trust baseline
     #[command(name = "audit-mcp")]
     AuditMcp(AuditMcpArgs),
 }
@@ -65,7 +62,7 @@ pub struct AuditMcpArgs {
     #[arg(long, default_value_t = false)]
     pub json: bool,
 
-    /// re-snapshot the trusted baseline to the currently-configured server set
+    /// explicitly accept the current discovered server set as the trusted baseline
     #[arg(long, default_value_t = false)]
     pub update: bool,
 
@@ -105,7 +102,32 @@ pub struct PolicyDiffArgs {
 }
 
 #[derive(clap::Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("migration_action")
+        .required(true)
+        .multiple(false)
+        .args(["check", "apply"])
+))]
+pub struct PolicyMigrateArgs {
+    /// report whether migration is needed without writing; exits non-zero when needed
+    #[arg(long, default_value_t = false)]
+    pub check: bool,
+
+    /// migrate atomically after creating a backup and validating the result
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+
+    /// migrate a specific policy instead of ~/.sentinel/policy.toml
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
 pub struct DoctorArgs {
+    /// host agent whose install chain to inspect
+    #[arg(long, default_value = "claude-code")]
+    pub agent: String,
+
     /// exit non-zero if any check fails (for use as a CI/cron gate)
     #[arg(long, default_value_t = false)]
     pub strict: bool,
@@ -143,13 +165,9 @@ pub struct AuditArgs {
     #[arg(long, default_value = "claude")]
     pub agent: AgentType,
 
-    /// path to attack corpus directory
+    /// path to a reviewed attack corpus directory (defaults to the bundled versioned corpus)
     #[arg(long)]
     pub corpus: Option<PathBuf>,
-
-    /// sandbox backend to use (auto-detects if not specified)
-    #[arg(long)]
-    pub sandbox: Option<SandboxType>,
 
     /// output format
     #[arg(long, default_value = "terminal")]
@@ -158,6 +176,14 @@ pub struct AuditArgs {
     /// write JSON report to file
     #[arg(long)]
     pub output: Option<PathBuf>,
+
+    /// DANGEROUS: allow the audited agent to run tools directly on this host without containment
+    #[arg(long, default_value_t = false)]
+    pub unsafe_host: bool,
+
+    /// maximum seconds allowed for each agent turn
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
+    pub timeout_seconds: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -177,39 +203,34 @@ pub struct InstallArgs {
     #[arg(long = "result-scan", default_value_t = false)]
     pub result_scan: bool,
 
-    /// host agent to install for. `claude-code` (default) writes the PreToolUse
-    /// hook into ~/.claude/settings.json. any other name prints the generic
-    /// integration contract (sentinel can't auto-configure an arbitrary agent)
-    /// and writes the default policy.
+    /// host agent to install for. `claude-code` (default) and `codex` are managed
+    /// natively; any other name prints the generic integration contract and
+    /// writes the default policy.
     #[arg(long, default_value = "claude-code")]
     pub agent: String,
 }
 
 #[derive(clap::Args, Debug)]
-pub struct WrapArgs {
-    /// command to wrap (e.g., "claude" or "codex")
-    #[arg(trailing_var_arg = true)]
-    pub agent_command: Vec<String>,
+pub struct UninstallArgs {
+    /// host agent to uninstall from (`claude-code` or `codex`)
+    #[arg(long, default_value = "claude-code")]
+    pub agent: String,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug)]
+#[derive(clap::Args, Debug)]
+pub struct StatusArgs {
+    /// host agent whose install state to report
+    #[arg(long, default_value = "claude-code")]
+    pub agent: String,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
 pub enum AgentType {
     Claude,
     Codex,
-    Openhands,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug)]
-pub enum SandboxType {
-    Docker,
-    #[cfg(target_os = "linux")]
-    Nsjail,
-    #[cfg(target_os = "macos")]
-    MacosSandbox,
-    Degraded,
-}
-
-#[derive(clap::ValueEnum, Clone, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Terminal,
     Json,

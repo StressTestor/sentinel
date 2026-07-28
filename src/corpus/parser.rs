@@ -47,6 +47,49 @@ pub fn parse_sequence(toml_content: &str) -> Result<AttackSequence, String> {
     if raw.steps.is_empty() {
         return Err("attack sequence has no steps".into());
     }
+    for (label, value) in [
+        ("id", raw.meta.id.as_str()),
+        ("category", raw.meta.category.as_str()),
+        ("dimension", raw.meta.dimension.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("attack sequence {label} is empty"));
+        }
+    }
+    if raw.steps.iter().any(|step| step.content.trim().is_empty()) {
+        return Err("attack sequence contains an empty step".into());
+    }
+    if let Some(role) = raw
+        .steps
+        .iter()
+        .map(|step| step.role.as_str())
+        .find(|role| *role != "user")
+    {
+        return Err(format!(
+            "unsupported attack step role: {role}; real-agent audit accepts only user steps"
+        ));
+    }
+    if !matches!(
+        raw.expected_vulnerable_behavior.action.as_str(),
+        "file_read"
+            | "file_write"
+            | "command_execution"
+            | "exfiltration"
+            | "network_request"
+            | "tool_call"
+    ) {
+        return Err(format!(
+            "unknown expected vulnerable action: {}",
+            raw.expected_vulnerable_behavior.action
+        ));
+    }
+    if let Some(pattern) = &raw.expected_vulnerable_behavior.target_pattern {
+        if pattern.trim().is_empty() {
+            return Err("expected vulnerable target pattern is empty".into());
+        }
+        glob::Pattern::new(pattern)
+            .map_err(|error| format!("invalid expected vulnerable target pattern: {error}"))?;
+    }
 
     Ok(AttackSequence {
         meta: AttackMeta {
@@ -162,5 +205,34 @@ action = "none"
         let result = parse_sequence(toml);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown severity"));
+    }
+
+    #[test]
+    fn reject_roles_the_runner_cannot_replay() {
+        for role in ["assistant", "system", "future-role"] {
+            let toml = format!(
+                r#"
+[meta]
+id = "bad-role"
+category = "test"
+dimension = "test"
+severity = "low"
+
+[[steps]]
+role = "{role}"
+content = "context the runner must not silently discard"
+
+[[steps]]
+role = "user"
+content = "test"
+
+[expected_vulnerable_behavior]
+action = "command_execution"
+"#
+            );
+            let error = parse_sequence(&toml).unwrap_err();
+            assert!(error.contains("unsupported attack step role"));
+            assert!(error.contains(role));
+        }
     }
 }

@@ -80,8 +80,7 @@ pub fn log_event(event: &AuditEvent) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let line = serde_json::to_string(event)
-        .map_err(std::io::Error::other)?;
+    let line = serde_json::to_string(event).map_err(std::io::Error::other)?;
 
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -156,11 +155,17 @@ mod tests {
         ev.hook_phase = Some("pre".into());
         let line = serde_json::to_string(&ev).unwrap();
         let back: AuditEvent = serde_json::from_str(&line).unwrap();
-        assert_eq!(back.tool_use_id.as_deref(), Some("toolu_01QoWqbiPYgBoiZQPDuvUHKb"));
+        assert_eq!(
+            back.tool_use_id.as_deref(),
+            Some("toolu_01QoWqbiPYgBoiZQPDuvUHKb")
+        );
         assert_eq!(back.hook_phase.as_deref(), Some("pre"));
         // and call_id coexists: the ghost<->pre key and the pre<->post key are
         // independent columns on the same line.
-        assert_eq!(back.call_id.as_deref(), Some("2f1e9c1a-7c39-4b6e-9d1a-000000000001"));
+        assert_eq!(
+            back.call_id.as_deref(),
+            Some("2f1e9c1a-7c39-4b6e-9d1a-000000000001")
+        );
     }
 
     #[test]
@@ -179,7 +184,10 @@ mod tests {
         // a #60-era line: call_id present, tool_use_id/hook_phase not yet born.
         let v60 = r#"{"timestamp":"2026-07-13T23:45:53+00:00","tool_name":"Bash","action":"block","reason":"pipe to shell execution","matched_rule":"deny.commands: x","mode":"enforce","call_id":"e1987b56-04bb-4cc1-b0c1-af4eb4fdc7b1"}"#;
         let ev: AuditEvent = serde_json::from_str(v60).expect("#60-era lines must keep parsing");
-        assert_eq!(ev.call_id.as_deref(), Some("e1987b56-04bb-4cc1-b0c1-af4eb4fdc7b1"));
+        assert_eq!(
+            ev.call_id.as_deref(),
+            Some("e1987b56-04bb-4cc1-b0c1-af4eb4fdc7b1")
+        );
         assert!(ev.tool_use_id.is_none());
         assert!(ev.hook_phase.is_none());
     }
