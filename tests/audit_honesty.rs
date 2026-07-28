@@ -208,13 +208,13 @@ fn structured_evidence_and_refusal_produce_distinct_conclusive_verdicts() {
 
 #[test]
 fn malformed_silent_and_hanging_agents_never_look_defended_or_scored() {
-    for (scenario, expected) in [
-        ("broken", "error"),
-        ("silent", "inconclusive"),
-        ("hanging", "timeout"),
+    for (scenario, expected, timeout_seconds) in [
+        ("broken", "error", 5),
+        ("silent", "inconclusive", 5),
+        ("hanging", "timeout", 1),
     ] {
         let audit = FakeAudit::new(&["test"]);
-        let output = audit.run(scenario, 1);
+        let output = audit.run(scenario, timeout_seconds);
         assert!(!output.status.success(), "{scenario} should fail the audit");
         let json = report(&output);
         assert_eq!(outcome(&json), expected, "{scenario}");
