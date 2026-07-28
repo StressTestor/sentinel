@@ -137,7 +137,7 @@ call the agent tries to make gets blocked at the hook layer before it runs.</p>
 <pre><code>git clone https://github.com/StressTestor/sentinel
 cd sentinel
 cargo build --release
-./target/release/sentinel install --enforce
+./target/release/sentinel install
 SENTINEL=./target/release/sentinel ./docs/run-attacks.sh</code></pre>
 
 <h2>attacks this page contains</h2>
@@ -165,10 +165,10 @@ SENTINEL=./target/release/sentinel ./docs/run-attacks.sh</code></pre>
 
 <h2>how it works</h2>
 
-<p>Claude Code has a <code>PreToolUse</code> hook system. Every tool call (Bash, Read, Write, Edit)
-passes through the hook before execution. Sentinel installs itself as that hook. The hook
-receives a JSON payload with the tool name and arguments, evaluates it against your policy
-file in &lt;1ms, and returns <code>allow</code> or <code>deny</code> on stdout.</p>
+<p>Claude Code and Codex expose pre-tool hooks. Sentinel can install and reconcile its native
+hook for either agent. Every typed tool call passes through one normalization and policy
+pipeline before execution. The hook receives the agent's structured payload and returns the
+agent's native allow or deny response. Blocks also exit with status 2.</p>
 
 <pre><code>you type a prompt
      │
@@ -180,19 +180,44 @@ file in &lt;1ms, and returns <code>allow</code> or <code>deny</code> on stdout.<
      │
      tool call denied. credentials safe.</code></pre>
 
-<h2>three-tier defense</h2>
+<h2>one deterministic decision path</h2>
 
 <table>
-<thead><tr><th>Tier</th><th>What</th><th>Latency</th></tr></thead>
+<thead><tr><th>Layer</th><th>What</th><th>Status</th></tr></thead>
 <tbody>
-<tr><td>1. Policy</td><td>deterministic deny/allow rules (glob + regex)</td><td>&lt;1ms</td></tr>
-<tr><td>2. Heuristic</td><td>aho-corasick automata from attack corpus</td><td>&lt;10ms</td></tr>
-<tr><td>3. LLM classifier</td><td>secondary model for ambiguous inputs</td><td>100-500ms</td></tr>
+<tr><td>Policy</td><td>typed normalization, path rules, command rules, secret rules, and self-protection</td><td>runs on every call</td></tr>
 </tbody>
 </table>
 
-<p>Tier 1 runs on every tool call. Tiers 2 and 3 add defense-in-depth. Tier 1 alone caught
-every attack on this page.</p>
+<p>No heuristic or model-assisted classifier ships in the enforcement path. Every decision
+comes from a rule you can inspect. The deterministic engine caught every attack replayed by
+this page's demo harness.</p>
+
+<h2>audit the real agent, carefully</h2>
+
+<pre><code>sentinel audit --agent claude --unsafe-host</code></pre>
+
+<p>The audit harness opens a stateful Claude Code or Codex session and correlates structured
+tool, filesystem, and network evidence against the bundled <code>corpus/v1</code> safe
+canaries. It does not run in a sandbox. The explicit <code>--unsafe-host</code> flag is
+required because the selected agent runs on the host and may persist its own session state.
+Ambiguous or malformed evidence is reported as inconclusive or an error, not promoted to a
+clean verdict.</p>
+
+<h2>verify the installed chain</h2>
+
+<pre><code>sentinel status --agent codex
+sentinel doctor --agent codex --strict</code></pre>
+
+<p>The installer owns direct Claude Code and Codex hook entries, removes duplicate Sentinel
+handlers, and preserves a Ghost-mediated Claude hook when Ghost already owns the chain.
+For Codex, status and doctor also distinguish configured hooks from hooks that are enabled
+and trusted. These are point-in-time checks, not proof of continuous enforcement.</p>
+
+<p>MCP baselines are explicit too: <code>sentinel audit-mcp</code> only discovers the current
+set. Review it before <code>sentinel audit-mcp --update</code> accepts salted digests as the
+trusted baseline. Raw server commands, arguments, URLs, headers, environment variables, and
+tokens are not stored.</p>
 
 <footer>
 <p>sentinel is open source. MIT/Apache-2.0 dual licensed. Built by <a href="https://github.com/StressTestor">@StressTestor</a>.</p>
