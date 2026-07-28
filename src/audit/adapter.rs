@@ -107,7 +107,7 @@ impl AgentSession for ClaudeSession {
         }
 
         let stdout = run_child(command, prompt, self.timeout).await?;
-        let record = parse_claude_jsonl(&stdout, &self.session_id)?;
+        let record = parse_claude_jsonl(&stdout, &self.session_id, &self.workspace)?;
         self.started = true;
         Ok(record)
     }
@@ -325,7 +325,11 @@ struct ToolInvocation {
     input: Value,
 }
 
-fn parse_claude_jsonl(stdout: &str, expected_session: &str) -> Result<TurnRecord, AdapterError> {
+fn parse_claude_jsonl(
+    stdout: &str,
+    expected_session: &str,
+    workspace: &Path,
+) -> Result<TurnRecord, AdapterError> {
     let mut evidence = Vec::new();
     let mut pending: HashMap<String, ToolInvocation> = HashMap::new();
     let mut refusal = None;
@@ -409,6 +413,7 @@ fn parse_claude_jsonl(stdout: &str, expected_session: &str) -> Result<TurnRecord
                         &invocation.name,
                         &invocation.input,
                         success,
+                        workspace,
                     )?);
                 }
             }
@@ -557,7 +562,7 @@ fn parse_codex_jsonl(
                             target: Some(command),
                             success,
                         });
-                        evidence.extend(exact_codex_canary_evidence(
+                        evidence.extend(exact_shell_canary_evidence(
                             required_str(item, "command", "Codex command text")?,
                             workspace,
                             completed,
@@ -648,11 +653,11 @@ fn parse_codex_jsonl(
     ))
 }
 
-/// Codex exposes shell activity as `command_execution`, so an exact invocation
-/// of Sentinel's own safe canaries would otherwise be invisible to file/network
-/// corpus cases. Promote only these fixed commands; do not guess arbitrary shell
-/// semantics into filesystem or network evidence.
-fn exact_codex_canary_evidence(
+/// Claude and Codex can expose shell activity only as a generic command, so an
+/// exact invocation of Sentinel's own safe canaries would otherwise be
+/// invisible to file/network corpus cases. Promote only these fixed commands;
+/// do not guess arbitrary shell semantics into filesystem or network evidence.
+fn exact_shell_canary_evidence(
     command: &str,
     workspace: &Path,
     completed: bool,
@@ -764,6 +769,7 @@ fn evidence_for_invocation(
     name: &str,
     input: &Value,
     success: bool,
+    workspace: &Path,
 ) -> Result<Vec<AuditEvidence>, AdapterError> {
     let mut out = Vec::new();
     match name.to_ascii_lowercase().as_str() {
@@ -771,12 +777,18 @@ fn evidence_for_invocation(
         "write" | "edit" | "multiedit" | "notebookedit" => {
             out.push(filesystem_evidence("file_write", input, success)?);
         }
-        "bash" => out.push(AuditEvidence {
-            kind: EvidenceKind::Tool,
-            action: "command_execution".into(),
-            target: Some(required_str(input, "command", "Claude Bash command")?.to_string()),
-            success,
-        }),
+        "bash" => {
+            let command = required_str(input, "command", "Claude Bash command")?;
+            out.push(AuditEvidence {
+                kind: EvidenceKind::Tool,
+                action: "command_execution".into(),
+                target: Some(command.to_string()),
+                success,
+            });
+            out.extend(exact_shell_canary_evidence(
+                command, workspace, true, success,
+            ));
+        }
         "webfetch" | "websearch" => {
             let field = if name.eq_ignore_ascii_case("webfetch") {
                 "url"
@@ -875,11 +887,39 @@ mod tests {
 {{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","is_error":false}}]}},"session_id":"{session}"}}
 {{"type":"result","subtype":"success","is_error":false,"session_id":"{session}","structured_output":{{"audit_status":"completed"}}}}"#
         );
-        let out = parse_claude_jsonl(&stream, session).unwrap();
+        let out = parse_claude_jsonl(&stream, session, Path::new("/tmp/audit")).unwrap();
         assert!(!out.explicit_refusal);
         assert_eq!(out.evidence.len(), 1);
         assert!(out.evidence[0].success);
         assert_eq!(out.evidence[0].kind, EvidenceKind::Filesystem);
+    }
+
+    #[test]
+    fn claude_exact_shell_canaries_emit_specific_evidence() {
+        let session = "00000000-0000-4000-8000-000000000001";
+        let workspace = Path::new("/tmp/sentinel-audit-workspace");
+        let file = workspace.join(AUDIT_FILE_CANARY);
+        let stream = format!(
+            r#"{{"type":"system","subtype":"init","session_id":"{session}"}}
+{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Bash","input":{{"command":"cat {}"}}}},{{"type":"tool_use","id":"t2","name":"Bash","input":{{"command":"curl -sS {}"}}}}]}},"session_id":"{session}"}}
+{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","is_error":false}},{{"type":"tool_result","tool_use_id":"t2","is_error":true}}]}},"session_id":"{session}"}}
+{{"type":"result","subtype":"success","is_error":false,"session_id":"{session}","structured_output":{{"audit_status":"completed"}}}}"#,
+            file.display(),
+            AUDIT_NETWORK_CANARY
+        );
+        let out = parse_claude_jsonl(&stream, session, workspace).unwrap();
+        assert!(out.evidence.iter().any(|item| {
+            item.kind == EvidenceKind::Filesystem
+                && item.action == "file_read"
+                && item.target.as_deref() == Some(AUDIT_FILE_CANARY)
+                && item.success
+        }));
+        assert!(out.evidence.iter().any(|item| {
+            item.kind == EvidenceKind::Network
+                && item.action == "network_request"
+                && item.target.as_deref() == Some(AUDIT_NETWORK_CANARY)
+                && item.success
+        }));
     }
 
     #[test]
@@ -890,7 +930,7 @@ mod tests {
 {{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"missing","is_error":true}}]}},"session_id":"{session}"}}
 {{"type":"result","subtype":"success","is_error":false,"session_id":"{session}","structured_output":{{"audit_status":"refused"}}}}"#
         );
-        assert!(parse_claude_jsonl(&stream, session).is_err());
+        assert!(parse_claude_jsonl(&stream, session, Path::new("/tmp/audit")).is_err());
     }
 
     #[test]
@@ -953,7 +993,7 @@ mod tests {
             "printf sentinel-audit-command-canary",
         ] {
             assert!(
-                exact_codex_canary_evidence(command, workspace, true, true).is_empty(),
+                exact_shell_canary_evidence(command, workspace, true, true).is_empty(),
                 "{command:?} must remain ordinary command evidence"
             );
         }

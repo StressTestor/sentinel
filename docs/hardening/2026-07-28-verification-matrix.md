@@ -69,6 +69,9 @@ independently before remediation.
 | R14 | A hook command such as `sentinel evaluate >/dev/null 2>&1 \|\| true` was treated as owned; Doctor probed only the binary prefix and reported healthy. | Ownership requires exact supported argv and Doctor probes the configured direct or Ghost command. | Wrapped-hook install/self-protect/strict-Doctor regressions. | Fixed |
 | R15 | Claude local-scope `projects.<cwd>.mcpServers` entries were absent from strict MCP audit. | Discover only the canonical current project as the path-free `claude:local` source. | Current/unrelated-project and secret/path non-disclosure integration test. | Fixed |
 | R16 | An injected agent could run `audit-mcp --update` or rewrite `mcp-baseline.json` to approve its own server. | Typed mutations and shell rewrite forms block; agent-triggered update blocks while direct human CLI update remains available. | Shared-pipeline Bash/patch/read-only audit controls and migration tests. | Fixed |
+| R17 | PR review reproduced that custom `CODEX_HOME` installs using either `config.toml` or pre-existing `hooks.json` were outside suffix-only hook self-protection. | Compare mutation identities with both effective installer-managed Codex paths, including canonicalized custom homes. | Fresh subprocess installs under both custom-home layouts; deleting either active config denies with the Codex wire contract. | Fixed |
+| R18 | PR review found that a canonical empty-file Add operation was rejected as malformed. | Preserve the typed Add mutation with `MutationContent::Full(String::new())` so policy checks still inspect its destination. | Zero-byte Add parser regression plus full mutation suite. | Fixed |
+| R19 | PR review reproduced that Claude Bash executions of the file/network canaries emitted only generic command evidence. | Reuse the exact, lookalike-resistant shell-canary classifier for completed Claude and Codex events. | Claude file-read and failed-`.invalid` network-attempt evidence regression plus existing lookalike controls. | Fixed |
 
 ## Before-fix receipts
 
@@ -116,7 +119,7 @@ message: policy: no self-protect rule for ~/.sentinel/policy.toml
 
 ```text
 cargo test --locked --all-targets --all-features -- --test-threads=4
-345 unit + 48 integration passed
+348 unit + 49 integration passed
 
 cargo clippy --locked --all-targets --all-features -- -D warnings
 passed

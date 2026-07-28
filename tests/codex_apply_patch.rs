@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 const POLICY_UPDATE: &str = include_str!("fixtures/hooks/codex-policy-update.json");
@@ -36,6 +37,28 @@ fn assert_codex_deny(home: &TempDir, payload: &str) {
     let json: Value = serde_json::from_slice(&output.stdout).expect("deny stdout is JSON");
     assert_eq!(json["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+fn installed_custom_codex_home(use_hooks_json: bool) -> (TempDir, PathBuf, PathBuf) {
+    let home = TempDir::new().expect("temporary home");
+    let codex_home = home.path().join("custom-codex-home");
+    fs::create_dir_all(&codex_home).expect("create custom CODEX_HOME");
+    if use_hooks_json {
+        fs::write(codex_home.join("hooks.json"), "{}\n").expect("seed hooks.json");
+    }
+    Command::cargo_bin("sentinel")
+        .expect("sentinel binary")
+        .env("HOME", home.path())
+        .env("CODEX_HOME", &codex_home)
+        .args(["install", "--agent", "codex"])
+        .assert()
+        .success();
+    let active_config = if use_hooks_json {
+        codex_home.join("hooks.json")
+    } else {
+        codex_home.join("config.toml")
+    };
+    (home, codex_home, active_config)
 }
 
 fn patch_payload(operation: &str) -> String {
@@ -92,6 +115,34 @@ fn codex_patch_cannot_remove_an_installed_hook_or_inject_autorun() {
 
     assert_codex_deny(&home, HOOK_REMOVAL);
     assert_codex_deny(&home, AUTORUN_INJECTION);
+}
+
+#[test]
+fn custom_codex_home_config_and_hooks_json_cannot_be_removed() {
+    for use_hooks_json in [false, true] {
+        let (home, codex_home, active_config) = installed_custom_codex_home(use_hooks_json);
+        let patch = format!(
+            "*** Begin Patch\n*** Delete File: {}\n*** End Patch",
+            active_config.display()
+        );
+        let mut command = Command::cargo_bin("sentinel").expect("sentinel binary");
+        let output = command
+            .env("HOME", home.path())
+            .env("CODEX_HOME", &codex_home)
+            .args(["evaluate", "--agent", "codex"])
+            .write_stdin(patch_payload(&patch))
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        let json: Value = serde_json::from_slice(&output.stdout).expect("deny stdout is JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "{} must remain self-protected",
+            active_config.display()
+        );
+    }
 }
 
 #[test]

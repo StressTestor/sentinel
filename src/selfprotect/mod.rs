@@ -25,9 +25,10 @@
 
 use crate::evaluate::normalize::{MutationOperation, NormalizedToolCall};
 use crate::install::hooks::{classify_hook_command, HookCommandKind};
+use crate::install::{codex_config_path, codex_hooks_path};
 use crate::policy::{Action, PolicyDecision};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// the marker identifying sentinel's own hook entry. must stay in sync with
 /// `src/install/hooks.rs::SENTINEL_HOOK_MARKER`.
@@ -145,8 +146,8 @@ fn apply_normalized_with(
         }
 
         let protected_before = before.as_ref().filter(|identity| {
-            hook_config_kind(&identity.effective).is_some()
-                && hook_is_installed(&identity.effective)
+            let kind = hook_config_kind(&identity.effective);
+            kind.is_some() && hook_is_installed(&identity.effective)
         });
         let protected_after = after.as_ref().filter(|identity| {
             hook_config_kind(&identity.effective).is_some()
@@ -485,6 +486,9 @@ enum ConfigKind {
 /// self-protected. These are the exact surfaces advertised by `sentinel
 /// install --agent ...`.
 fn hook_config_kind(path: &str) -> Option<ConfigKind> {
+    if let Some(kind) = codex_hook_config_kind(path, &codex_config_path(), &codex_hooks_path()) {
+        return Some(kind);
+    }
     let p = path.trim().to_ascii_lowercase();
     let base = p.rsplit('/').next().unwrap_or(p.as_str());
     if p.ends_with(".codex/config.toml") {
@@ -494,6 +498,31 @@ fn hook_config_kind(path: &str) -> Option<ConfigKind> {
         || p.ends_with(".gemini/settings.json")
         || base == "crush.json";
     is_json.then_some(ConfigKind::Json)
+}
+
+fn codex_hook_config_kind(path: &str, config_path: &Path, hooks_path: &Path) -> Option<ConfigKind> {
+    if same_config_path(path, config_path) {
+        Some(ConfigKind::Toml)
+    } else if same_config_path(path, hooks_path) {
+        Some(ConfigKind::Json)
+    } else {
+        None
+    }
+}
+
+fn same_config_path(path: &str, configured: &Path) -> bool {
+    config_path_identity(expand_home_path(path)) == config_path_identity(configured.to_path_buf())
+}
+
+fn config_path_identity(path: PathBuf) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    };
+    std::fs::canonicalize(&absolute).unwrap_or(absolute)
 }
 
 /// The first carried target path (across ALL Write/Edit/MultiEdit aliases) that
@@ -518,6 +547,9 @@ fn target_hook_config(tool_input: &Value) -> Option<(&str, ConfigKind)> {
 /// one. The deny.commands rules are the real gate; this is just the cheap path
 /// filter that keeps the hot path free of parsing.
 fn autorun_config_kind(path: &str) -> Option<ConfigKind> {
+    if let Some(kind) = codex_hook_config_kind(path, &codex_config_path(), &codex_hooks_path()) {
+        return Some(kind);
+    }
     let p = path.trim().to_ascii_lowercase();
     let base = p.rsplit('/').next().unwrap_or(p.as_str());
     if p.ends_with(".codex/config.toml") {
@@ -1008,6 +1040,32 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
                 "dropping sentinel hook should be blocked: {path}"
             );
         }
+    }
+
+    #[test]
+    fn custom_codex_home_paths_are_recognized_by_exact_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("custom-codex-home");
+        std::fs::create_dir_all(&custom).unwrap();
+        let config = custom.join("config.toml");
+        let hooks = custom.join("hooks.json");
+        std::fs::write(&config, "model = \"test\"\n").unwrap();
+        std::fs::write(&hooks, "{}\n").unwrap();
+
+        assert!(matches!(
+            codex_hook_config_kind(config.to_str().unwrap(), &config, &hooks),
+            Some(ConfigKind::Toml)
+        ));
+        assert!(matches!(
+            codex_hook_config_kind(hooks.to_str().unwrap(), &config, &hooks),
+            Some(ConfigKind::Json)
+        ));
+        assert!(codex_hook_config_kind(
+            dir.path().join("other/hooks.json").to_str().unwrap(),
+            &config,
+            &hooks
+        )
+        .is_none());
     }
 
     // regression: a benign FIRST path alias must not shadow a hook-config path in

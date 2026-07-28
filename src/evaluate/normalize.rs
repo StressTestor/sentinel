@@ -250,14 +250,15 @@ pub fn parse_apply_patch(command: &str) -> Result<Vec<FileMutation>, NormalizeEr
                 content.push(added.to_string());
                 index += 1;
             }
-            if content.is_empty() {
-                return Err(malformed(format!("Add File `{path}` has no content")));
-            }
             mutations.push(FileMutation {
                 operation: MutationOperation::Add,
                 source: None,
                 destination: Some(path),
-                content: MutationContent::Full(join_patch_lines(&content)),
+                content: MutationContent::Full(if content.is_empty() {
+                    String::new()
+                } else {
+                    join_patch_lines(&content)
+                }),
             });
             continue;
         }
@@ -650,6 +651,15 @@ mod tests {
         assert_eq!(parsed[2].source.as_deref(), Some("from.txt"));
         assert_eq!(parsed[2].destination.as_deref(), Some("to.txt"));
         assert_eq!(parsed[3].operation, MutationOperation::Delete);
+    }
+
+    #[test]
+    fn parses_empty_add_as_a_zero_byte_file() {
+        let patch = "*** Begin Patch\n*** Add File: empty.txt\n*** End Patch";
+        let parsed = parse_apply_patch(patch).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].operation, MutationOperation::Add);
+        assert_eq!(parsed[0].content, MutationContent::Full(String::new()));
     }
 
     #[test]
