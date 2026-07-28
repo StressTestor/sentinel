@@ -5,7 +5,9 @@ Date: 2026-07-28
 Starting source: `origin/main` at
 `e4f3333052612f17e3cd8a8c323c553f18952273`.
 
-This file is the live evidence ledger for the empirical-hardening branch.
+This file is the live evidence ledger for the empirical-hardening work merged
+to `main` by PR `#69` at
+`7e8b2ad3d7505aaf5ab96ba74e3ba740490282a7`.
 `Confirmed` means the behavior was reproduced against the starting source.
 `Fixed` is only used after the original reproduction and its controls pass
 against the changed binary. Commands that use a temporary home never inspect or
@@ -39,7 +41,7 @@ modify the operator's real agent configuration.
 | F09 | Fresh-install the bundled policy in a temporary home and run `doctor --json`. | Doctor validates effective protection through the shared decision pipeline. | Doctor recognizes the typed self-protect rule and validates the installed binary with a real known-bad denial canary; truly disarmed policies fail. | Medium | `src/doctor/mod.rs`, `src/policy/mod.rs`, `src/selfprotect/mod.rs` | Fresh Claude/Codex installs and migrated policies pass behavioral canaries; an actually disarmed policy fails. | Fixed |
 | F10 | Point Claude at the supported Ghost-to-Sentinel bridge, then run status/doctor. | A parsed, executable, version-validated bridge is recognized as protected without weakening direct-hook checks. | Exact parsed ownership distinguishes direct Sentinel and Ghost-mediated handlers; doctor invokes the bridge itself and requires a real denial. The operator's Ghost path is healthy. | Medium | `src/install/hooks.rs`, `src/install/mod.rs`, `src/doctor/mod.rs` | Direct, Ghost-bridged, stale binary, wrong binary, wrong version, and untrusted/disabled lifecycle fixtures. | Fixed |
 | F11 | Run `audit-mcp` for the first time, then add/change/remove servers across Claude and Codex configs. | First run is discovery-only until explicit trust; diffs include additions, changes, removals, and both agents with secret-safe fingerprints. | First run is discovery-only; `--update` explicitly writes a private atomic baseline. Claude/Codex additions, changes, and removals use salted canonical digests without raw commands or secrets. | High | `src/audit_mcp/mod.rs`, `src/cli.rs` | Empty-home discovery, explicit trust/update, add/change/remove, Claude/Codex merge, and no-secret-output tests. | Fixed |
-| F12 | Compare Cargo metadata, crates.io metadata/VCS SHA, remote tags/releases, and `main`. | One reviewed merged commit maps to Cargo version, tag, crate VCS source, artifacts, checksums/attestations, and GitHub release. | Candidate is the unused `0.5.0`; release identity gates exact Cargo/tag/main/crates/VCS equality and draft-first artifacts, checksums, SBOMs, and attestations. No tag or publication occurs before merge and credentials. | Critical | `Cargo.toml`, `.github/workflows/release.yml`, `scripts/release-identity.sh`, GitHub releases/tags, crates.io package metadata | Release dry run rejects branch-only source and any identity mismatch; next unused version is chosen immediately before release. | Candidate ready; merge/release pending |
+| F12 | Compare Cargo metadata, crates.io metadata/VCS SHA, remote tags/releases, and `main`. | One reviewed merged commit maps to Cargo version, tag, crate VCS source, artifacts, checksums/attestations, and GitHub release. | The unused `0.5.0` candidate is merged at `7e8b2ad`; release identity gates exact Cargo/tag/main/crates/VCS equality and draft-first artifacts, checksums, SBOMs, and attestations. Hosted [dry run `30352067483`](https://github.com/StressTestor/sentinel/actions/runs/30352067483) passed on the merge SHA. No tag or publication was attempted because `CARGO_REGISTRY_TOKEN` is absent and publication was not authorized. | Critical | `Cargo.toml`, `.github/workflows/release.yml`, `scripts/release-identity.sh`, GitHub releases/tags, crates.io package metadata | Release dry run rejects dirty and branch-only source, accepts the merge SHA, tests the packaged crate, and assembles all four target artifacts with SBOMs and checksums. | Fixed; publication intentionally pending |
 | F13 | Run the documented local gates and inspect CI. | CI gates fmt, locked all-target/all-feature tests and clippy, verifier/migrations, dependency audit, network lint, package/install smoke, MSRV, meaningful macOS behavior, docs, and provenance. | Local gates pass, and PR `#69` passed all 11 GitHub checks: quality, MSRV, package smoke, both platforms, RustSec, cargo-deny, dependency review, and CodeQL for Rust and Actions. | High | `.github/workflows/ci.yml`, other workflows, `Cargo.toml`, `CONTRIBUTING.md` | Green matrix containing every required gate plus a failing provenance-negative test. | Fixed |
 | F14 | Compare README, architecture, changelog, CLI help, verifier case count, Cargo features, and packaged behavior. | Public claims and architecture describe tested behavior and explicitly separate guarantees, heuristics, limits, configuration, trust, and activation. | README, architecture, changelog, and site now match the shipped one-tier pipeline, 45 verifier cases, stateful unsafe-host audit, bundled corpus, lifecycle trust, MCP baseline, and explicit limits. | Medium | `README.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `Cargo.toml` | Documentation assertions plus full manual claim-to-test review. | Fixed |
 | F15 | Inspect direct dependencies and feature use. | Direct dependencies are used and runtime features are minimal. | Unused `anyhow`/`proptest` were removed; Tokio is narrowed to the used process/I/O/time/macros/runtime features; locked all-feature and RustSec gates pass. | Low | `Cargo.toml`, `Cargo.lock`, `src/`, `tests/` | `cargo machete`-equivalent source check, locked all-feature build/test, and dependency audit after removal/narrowing. | Fixed |
@@ -153,10 +155,21 @@ healthy: true; activation: active; hook source: ~/.claude/settings.json; Ghost b
 ### GitHub governance
 
 ```text
-PR #69: 11/11 checks passed
+PR #69: 11/11 checks passed; squash-merged as 7e8b2ad3d7505aaf5ab96ba74e3ba740490282a7
 protect-main ruleset 18708361: PR + resolved conversations + strict required checks; no bypass actor
 protect-release-tags ruleset 19889568: v* update/deletion/non-fast-forward denied; no bypass actor
 immutable releases: enabled
 release environment: required reviewer + v* tag policy; CARGO_REGISTRY_TOKEN absent
 Dependabot PRs #52, #53, #54, #56, #63-#68: closed as superseded by #69
+```
+
+### Post-merge release dry run
+
+```text
+GitHub Actions run 30352067483 on 7e8b2ad3d7505aaf5ab96ba74e3ba740490282a7
+preflight: dirty and unmerged source rejected; canonical merge identity accepted
+verify: fmt, tests, clippy, 45/45 verifier, docs, packaged-source install, RustSec, cargo-deny passed
+build: aarch64/x86_64 Linux musl and aarch64/x86_64 macOS artifacts passed native inspection
+assemble: four target-specific CycloneDX SBOMs, checksums, and artifact upload passed
+publish: skipped by design for workflow_dispatch; no tag, crate, or GitHub release created
 ```
