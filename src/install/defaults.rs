@@ -1,7 +1,7 @@
 use super::InstallError;
 use std::path::Path;
 
-pub const CURRENT_POLICY_REVISION: &str = "2026-07-28.1";
+pub const CURRENT_POLICY_REVISION: &str = "2026-08-07.1";
 
 /// write the default policy.toml with sane deny rules.
 /// does NOT overwrite if the file already exists.

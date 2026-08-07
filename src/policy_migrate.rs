@@ -28,6 +28,7 @@ pub enum PublishedGeneration {
     V0_4_0,
     V0_4_1,
     Draft2026_07_28,
+    Rev2026_07_28_1,
 }
 
 impl fmt::Display for PublishedGeneration {
@@ -36,11 +37,13 @@ impl fmt::Display for PublishedGeneration {
             Self::V0_4_0 => write!(f, "published 0.4.0"),
             Self::V0_4_1 => write!(f, "published 0.4.1"),
             Self::Draft2026_07_28 => write!(f, "draft revision 2026-07-28"),
+            Self::Rev2026_07_28_1 => write!(f, "revision 2026-07-28.1"),
         }
     }
 }
 
 const DRAFT_POLICY_REVISION: &str = "2026-07-28";
+const PRIOR_POLICY_REVISION: &str = "2026-07-28.1";
 
 #[derive(Debug)]
 pub enum MigrationInspection {
@@ -158,6 +161,68 @@ struct RuleChange {
     old_action: Option<&'static str>,
     old_reason: Option<&'static str>,
 }
+
+// the 2026-08 false-positive audit (docs/policy-fp-audit-2026-08.md) split three
+// rules that matched a shape rather than a threat. these two lists reverse that
+// split, and unlike the 0.4.x ladder they apply to EVERY prior generation - the
+// draft included, since it predates the audit.
+const CURRENT_TO_2026_07_28_1: &[RuleChange] = &[
+    RuleChange {
+        section: RuleSection::DenyCommands,
+        current_pattern: r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/+(?:\.{1,2})?(["\x27\s<>;|&]|$|[*?\[{$])"#,
+        old_pattern: r#"rm\s+-rf\s+(?:[^\s]+\s+)*/"#,
+        old_action: None,
+        old_reason: Some("recursive root deletion"),
+    },
+    RuleChange {
+        section: RuleSection::DenyCommands,
+        current_pattern: r#"rm\s+-rf\s+(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.(ssh|aws|gnupg|config|netrc)"#,
+        old_pattern: r#"rm\s+-rf\s+~/\.(ssh|aws|gnupg|config|netrc)"#,
+        old_action: None,
+        old_reason: Some("recursive deletion of credential directory"),
+    },
+    RuleChange {
+        section: RuleSection::DenyCommands,
+        current_pattern: r#"\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{1,2}&?[^\s;&|]*|[({!])\s*)*(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)"#,
+        old_pattern: r#"\b(curl|wget|fetch)\b.*-[oO]\b.*[;&|].*\b(ba|z|da)?sh\b"#,
+        old_action: None,
+        old_reason: Some("staged fetch-then-run (download then execute)"),
+    },
+    RuleChange {
+        section: RuleSection::DenyCommands,
+        current_pattern: r#"(?s)\b(python3?|perl|ruby|node|php|osascript)\b\s+-\w*[ce]\b(?:.*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|\bhttps?\b).*(os\.system|\bexec\b|\beval\b|popen|subprocess|child_process)|.*(os\.system|\bexec\b|\beval\b|popen|subprocess|child_process).*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|\bhttps?\b))"#,
+        old_pattern: r#"\b(python3?|perl|ruby|node|php|osascript)\b\s+-\w*[ce]\b.*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|os\.system|\bexec\b|\beval\b|popen|subprocess|child_process)"#,
+        old_action: None,
+        old_reason: Some("interpreter fetch-exec / inline remote code execution"),
+    },
+];
+
+const ADDED_AFTER_2026_07_28_1: &[(&str, RuleSection)] = &[
+    (
+        r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|usr|etc|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.[^\s;&|"\x27/]*[*?\[]"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[\w.-]*/)*(?:sudo|doas)\s+)?chmod\s+(?:-\S+\s+)*(?:[augo]*\+[rwXst]*x|[0-7]*[1357])"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(urllib|httplib|http\.client|net/http|open-uri|requests\.[A-Za-z_]+\(|socket\.socket\(|socket\.create_connection|Net::HTTP|require\(\s*[\x27"](http|https|net|dgram|tls)[\x27"]\s*\)|import\(\s*[\x27"](http|https|net)[\x27"]|fetch\(\s*[\x27"`]https?://)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(os\.system\(|os\.popen\(|os\.dup2|pty\.spawn|shell\s*=\s*True|child_process|\bexecSync\(|\bexecFileSync\(|\bspawnSync\(|(^|[^.\w])exec\(|(^|[^.\w])eval\(|IO\.popen|(^|[^.\w])system\()"#,
+        RuleSection::DenyCommands,
+    ),
+];
 
 const CURRENT_TO_0_4_1: &[RuleChange] = &[
     RuleChange {
@@ -349,6 +414,10 @@ pub fn inspect_content(content: &str) -> Result<MigrationInspection, MigrationEr
             PublishedGeneration::Draft2026_07_28,
             draft_default("enforce")?,
         ),
+        Some(revision) if revision == PRIOR_POLICY_REVISION => (
+            PublishedGeneration::Rev2026_07_28_1,
+            prior_default("enforce")?,
+        ),
         Some(revision) => return Err(MigrationError::UnsupportedRevision(revision)),
         None => {
             let from = recognize_generation(&local)?;
@@ -512,8 +581,15 @@ fn published_default(
         .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
     policy.remove("revision");
 
-    for (pattern, section) in MCP_TRUST_ADDITIONS.iter().chain(ADDED_AFTER_0_4_1.iter()) {
+    for (pattern, section) in MCP_TRUST_ADDITIONS
+        .iter()
+        .chain(ADDED_AFTER_0_4_1.iter())
+        .chain(ADDED_AFTER_2026_07_28_1.iter())
+    {
         remove_rule(&mut doc, *section, pattern)?;
+    }
+    for change in CURRENT_TO_2026_07_28_1 {
+        reverse_rule_change(&mut doc, *change)?;
     }
     for change in CURRENT_TO_0_4_1 {
         reverse_rule_change(&mut doc, *change)?;
@@ -533,8 +609,32 @@ fn draft_default(mode: &str) -> Result<DocumentMut, MigrationError> {
         .and_then(Item::as_table_mut)
         .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
     policy.insert("revision", value(DRAFT_POLICY_REVISION));
-    for (pattern, section) in MCP_TRUST_ADDITIONS {
+    for (pattern, section) in MCP_TRUST_ADDITIONS
+        .iter()
+        .chain(ADDED_AFTER_2026_07_28_1.iter())
+    {
         remove_rule(&mut doc, *section, pattern)?;
+    }
+    for change in CURRENT_TO_2026_07_28_1 {
+        reverse_rule_change(&mut doc, *change)?;
+    }
+    Ok(doc)
+}
+
+/// the 2026-07-28.1 revision: the current default minus only the FP-audit split.
+/// every other rule is identical, so this is the shallowest baseline in the ladder.
+fn prior_default(mode: &str) -> Result<DocumentMut, MigrationError> {
+    let mut doc = parse_document(&default_policy_content(mode))?;
+    let policy = doc
+        .get_mut("policy")
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
+    policy.insert("revision", value(PRIOR_POLICY_REVISION));
+    for (pattern, section) in ADDED_AFTER_2026_07_28_1 {
+        remove_rule(&mut doc, *section, pattern)?;
+    }
+    for change in CURRENT_TO_2026_07_28_1 {
+        reverse_rule_change(&mut doc, *change)?;
     }
     Ok(doc)
 }
@@ -801,22 +901,40 @@ fn pattern_for_generation(
     section: RuleSection,
     current_pattern: &str,
 ) -> Option<String> {
-    if MCP_TRUST_ADDITIONS
-        .iter()
-        .any(|(pattern, candidate)| *candidate == section && *pattern == current_pattern)
-    {
-        return None;
-    }
-    if generation == PublishedGeneration::Draft2026_07_28 {
-        return Some(current_pattern.to_string());
-    }
-    if ADDED_AFTER_0_4_1
+    // newest layer first: the FP-audit split post-dates every generation here.
+    if ADDED_AFTER_2026_07_28_1
         .iter()
         .any(|(pattern, candidate)| *candidate == section && *pattern == current_pattern)
     {
         return None;
     }
     let mut pattern = current_pattern.to_string();
+    for change in CURRENT_TO_2026_07_28_1 {
+        if change.section == section && change.current_pattern == pattern {
+            pattern = change.old_pattern.to_string();
+            break;
+        }
+    }
+    if generation == PublishedGeneration::Rev2026_07_28_1 {
+        return Some(pattern);
+    }
+    // the MCP trust rules arrived in 2026-07-28.1, so they exist for that
+    // generation and only vanish for the draft and the 0.4.x line.
+    if MCP_TRUST_ADDITIONS
+        .iter()
+        .any(|(mcp, candidate)| *candidate == section && *mcp == current_pattern)
+    {
+        return None;
+    }
+    if generation == PublishedGeneration::Draft2026_07_28 {
+        return Some(pattern);
+    }
+    if ADDED_AFTER_0_4_1
+        .iter()
+        .any(|(added, candidate)| *candidate == section && *added == pattern)
+    {
+        return None;
+    }
     for change in CURRENT_TO_0_4_1 {
         if change.section == section && change.current_pattern == pattern {
             pattern = change.old_pattern.to_string();
@@ -1101,7 +1219,7 @@ mod tests {
     fn default_has_explicit_revision_and_schema_accepts_it() {
         let content = default_policy_content("enforce");
         assert!(content.contains(&format!("revision = \"{CURRENT_POLICY_REVISION}\"")));
-        assert_eq!(CURRENT_POLICY_REVISION, "2026-07-28.1");
+        assert_eq!(CURRENT_POLICY_REVISION, "2026-08-07.1");
         let engine = PolicyEngine::from_toml_str(&content).unwrap();
         assert_eq!(engine.mode(), "enforce");
     }
@@ -1139,7 +1257,10 @@ mod tests {
             .filter_map(|section| tables(&draft, *section))
             .map(ArrayOfTables::len)
             .sum();
-        assert_eq!(current_count - draft_count, MCP_TRUST_ADDITIONS.len());
+        assert_eq!(
+            current_count - draft_count,
+            MCP_TRUST_ADDITIONS.len() + ADDED_AFTER_2026_07_28_1.len()
+        );
     }
 
     #[test]
@@ -1182,7 +1303,7 @@ mod tests {
         assert_eq!(applied.from, PublishedGeneration::Draft2026_07_28);
         assert_eq!(fs::read_to_string(&applied.backup_path).unwrap(), old);
         let migrated = fs::read_to_string(&path).unwrap();
-        assert!(migrated.contains("revision = \"2026-07-28.1\""));
+        assert!(migrated.contains("revision = \"2026-08-07.1\""));
         assert!(migrated.contains("mode = \"audit\""));
         assert!(matches!(
             inspect_content(&migrated).unwrap(),
