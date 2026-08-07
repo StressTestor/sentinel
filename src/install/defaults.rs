@@ -466,15 +466,54 @@ pattern = "~/.config/systemd/user/*.service"
 action = "warn"
 reason = "agent writes a systemd user service (login-persistence unit) - review; devs also script user units"
 
+# recursive-delete rules. these five replaced a single `rm\s+-rf\s+(?:[^\s]+\s+)*/`
+# catch-all that matched ANY token starting with '/', so every temp-dir, worktree
+# and scratchpad cleanup was a block. worse, its token run was unscoped and
+# wandered across `;`/`&&`/`|` onto an unrelated later absolute path. the fix is
+# not to relax the class, it is to name the targets that are actually dangerous.
+# token runs are scoped with [^\s;&|\n] per the guard-tamper rules further down.
+
+# root-equivalent target: /, //, /*, /?*, /[a-z]*, /{{..}}, /.*, /$VAR. the bare
+# `/` form is the least effective attack (rm and SIP refuse it) - the glob forms
+# are the live ones, so the terminator class accepts glob/brace/expansion
+# metacharacters, not just whitespace.
 [[deny.commands]]
-pattern = 'rm\s+-rf\s+(?:[^\s]+\s+)*/'
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/+(?:\.{{1,2}})?(["\x27\s<>;|&]|$|[*?\[{{$])'
 action = "block"
-reason = "recursive root deletion"
+reason = "recursive root deletion (covers /, //, /*, /?*, /[a-z]*, /{{..}}, /.*, /$VAR)"
 
 [[deny.commands]]
-pattern = 'rm\s+-rf\s+~/\.(ssh|aws|gnupg|config|netrc)'
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|usr|etc|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)'
 action = "block"
-reason = "recursive deletion of credential directory"
+reason = "recursive deletion of a system tree"
+
+# whole home / whole volume / top-level tree, at depth 1-2 ONLY. depth >=3 stays
+# allowed - that is what keeps /Volumes/<disk>/<project>, /private/tmp/.../scratchpad
+# and /var/folders/.../T/tmp.* cleanup working. do NOT widen this to any depth,
+# a catch-all absolute-path match is the defect this replaces.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "recursive deletion of an entire home directory, volume, or top-level tree"
+
+# credential dirs in BOTH forms. the absolute /Users/<name>/.ssh form was only
+# ever covered as a side effect of the catch-all, so narrowing without this
+# would have dropped it.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.(ssh|aws|gnupg|config|netrc)'
+action = "block"
+reason = "recursive deletion of credential directory (tilde or absolute home path)"
+
+# wildcard over home dot-entries: `rm -rf ~/.c*` sweeps ~/.claude, ~/.sentinel,
+# ~/.ssh and ~/.aws in one call, and the guard-disarm rules below cannot see it -
+# they need the literal `.claude`/`.sentinel` token and PreToolUse sees the
+# pre-expansion string. scoped to a glob metachar in the dot-entry NAME, so
+# literal deletes (`rm -rf ~/.cargo`) and subpath deletes (`rm -rf ~/.cache/*`)
+# stay allowed.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.[^\s;&|"\x27/]*[*?\[]'
+action = "block"
+reason = "wildcard recursive deletion across home dot-entries (sweeps .ssh/.aws/.claude/.sentinel - guard-disarm)"
 
 [[deny.commands]]
 pattern = 'rm\s+-rf\s+(~|\$HOME)/?(\s|$)'
@@ -502,20 +541,61 @@ pattern = '\$\(\s*(curl|wget|fetch)\b'
 action = "block"
 reason = "command substitution of a remote fetch"
 
+# staged fetch-then-run. the old single rule ended in `\b(ba|z|da)?sh\b`, which
+# matches a FILE EXTENSION (`install.sh`) as readily as a shell command - so
+# `curl -o install.sh URL && wc -l install.sh` blocked. between the separator and
+# the interpreter only enumerated shell constructs are consumable (env
+# assignments, redirections, group-opens, the same wrapper set the pipe-to-shell
+# rule uses), so a bare word like wc/grep/head can never be crossed and a `.sh`
+# extension is unreachable.
 [[deny.commands]]
-pattern = '\b(curl|wget|fetch)\b.*-[oO]\b.*[;&|].*\b(ba|z|da)?sh\b'
+pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{{1,2}}&?[^\s;&|]*|[({{!])\s*)*(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)'
 action = "block"
-reason = "staged fetch-then-run (download then execute)"
+reason = "staged fetch-then-run (download then execute) - shell interpreter at the next command position"
+
+# the dropper prelude the old rule only caught by accident, through the same
+# `.sh` extension match removed above: `curl -o x.sh URL && chmod +x x.sh && ./x.sh`.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[\w.-]*/)*(?:sudo|doas)\s+)?chmod\s+(?:-\S+\s+)*(?:[augo]*\+[rwXst]*x|[0-7]*[1357])'
+action = "block"
+reason = "staged fetch then chmod +x (dropper prelude to direct execution)"
 
 [[deny.commands]]
 pattern = 'base64\s+-{{1,2}}d\w*\b.*\|\s*[a-z/]*sh\b'
 action = "block"
 reason = "base64-decode piped to shell"
 
+# interpreter fetch-exec, split into three rules. the old single OR rule keyed on
+# bare words, so `\bexec\b` fired on the FILENAME `fetch-exec.json`, `subprocess`
+# fired on any list-argv call to a trusted CLI, and `requests` fired on the
+# English word. the two halves stay independent on purpose: A is the only rule in
+# the policy covering raw interpreter network egress (everything else keys on
+# curl/wget/nc/dig/scp), and B is what stops base64/string-split payload
+# laundering, which otherwise bypasses every other deny.commands regex at once.
+
+# (A) fetch side: raw network I/O from an inline script. `requests` must be
+# CALLED, `socket` must be socket.socket()/create_connection - not bare words.
 [[deny.commands]]
-pattern = '\b(python3?|perl|ruby|node|php|osascript)\b\s+-\w*[ce]\b.*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|os\.system|\bexec\b|\beval\b|popen|subprocess|child_process)'
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(urllib|httplib|http\.client|net/http|open-uri|requests\.[A-Za-z_]+\(|socket\.socket\(|socket\.create_connection|Net::HTTP|require\(\s*[\x27"](http|https|net|dgram|tls)[\x27"]\s*\)|import\(\s*[\x27"](http|https|net)[\x27"]|fetch\(\s*[\x27"`]https?://)'
 action = "block"
-reason = "interpreter fetch-exec / inline remote code execution"
+reason = "inline interpreter script performing raw network I/O (fetch / exfil / reverse shell)"
+
+# (B) exec side, dangerous subset only: shell-string execution, fd hijack,
+# dynamic eval. list-argv subprocess.run([...]) to a fixed CLI is deliberately
+# absent, `.exec(` method calls are excluded via [^.\w] so sqlite db.exec() is
+# unaffected, and `exec(` rather than the bare word keeps `docker compose exec`
+# and `codex exec --help` out.
+[[deny.commands]]
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(os\.system\(|os\.popen\(|os\.dup2|pty\.spawn|shell\s*=\s*True|child_process|\bexecSync\(|\bexecFileSync\(|\bspawnSync\(|(^|[^.\w])exec\(|(^|[^.\w])eval\(|IO\.popen|(^|[^.\w])system\()'
+action = "block"
+reason = "inline interpreter script executing a shell string / hijacking fds / evaluating dynamic code (payload laundering)"
+
+# (C) additive: fetch primitive and exec primitive co-occur, catching shapes that
+# slip past A and B individually (bare `requests` plus list-argv subprocess).
+[[deny.commands]]
+pattern = '(?s)\b(python3?|perl|ruby|node|php|osascript)\b\s+-\w*[ce]\b(?:.*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|\bhttps?\b).*(os\.system|\bexec\b|\beval\b|popen|subprocess|child_process)|.*(os\.system|\bexec\b|\beval\b|popen|subprocess|child_process).*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|\bhttps?\b))'
+action = "block"
+reason = "interpreter fetch-exec / inline remote code execution - fetch primitive and exec primitive co-occur"
 
 # interpreter inline-code that READS a credential file via a RUNTIME-ASSEMBLED
 # path. A literal `~/.aws/credentials` in `-c`/`-e` is already mined into
