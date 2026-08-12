@@ -39,6 +39,7 @@ pub struct NormalizedToolCall {
     pub tool_name: String,
     pub command: Option<String>,
     pub paths: Vec<String>,
+    pub shell_expansion_paths: Vec<String>,
     pub content_candidates: Vec<String>,
     pub mutations: Vec<FileMutation>,
     pub cwd: Option<String>,
@@ -52,6 +53,7 @@ impl NormalizedToolCall {
         tool_name: String,
         command: Option<String>,
         paths: Vec<String>,
+        shell_expansion_paths: Vec<String>,
         content_candidates: Vec<String>,
         mutations: Vec<FileMutation>,
         cwd: Option<String>,
@@ -62,6 +64,7 @@ impl NormalizedToolCall {
             tool_name,
             command,
             paths,
+            shell_expansion_paths,
             content_candidates,
             mutations,
             cwd,
@@ -80,6 +83,7 @@ impl NormalizedToolCall {
             tool_name: self.tool_name.clone(),
             command: self.command.clone(),
             paths: self.paths.clone(),
+            shell_expansion_paths: self.shell_expansion_paths.clone(),
             raw_params: self.raw_params.clone(),
         }
     }

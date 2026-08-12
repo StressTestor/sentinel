@@ -94,6 +94,15 @@ fn escalate_autorun_injection(
         }
     };
     for command in commands {
+        // The config's own exact Sentinel/Ghost PreToolUse command is already
+        // validated structurally by self-protection. Re-evaluating an absolute
+        // installed binary path here mistakes the protected Sentinel binary for
+        // a newly injected autorun. Parsed argv classification stays strict:
+        // wrappers, redirects, suffix operators, and post-evaluate commands do
+        // not qualify and continue through the ordinary deny rules below.
+        if crate::selfprotect::is_effective_pre_hook(&command) {
+            continue;
+        }
         if engine.evaluate(&tool_call_for_command(&command)).action == Action::Block {
             return PolicyDecision {
                 action: Action::Block,
@@ -186,5 +195,54 @@ mod tests {
         assert!(call.command.is_none());
         assert_eq!(call.paths, vec!["src/security_examples.rs"]);
         assert_eq!(result.decision().action, Action::Allow);
+    }
+
+    #[test]
+    fn exact_installed_hook_is_not_rejected_as_an_autorun_but_wrappers_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let config = codex_dir.join("config.toml");
+        let installed = "[[hooks.PreToolUse]]\nmatcher = \".*\"\n\
+                         [[hooks.PreToolUse.hooks]]\ntype = \"command\"\n\
+                         command = \"/usr/local/bin/sentinel evaluate --agent codex\"\n";
+        std::fs::write(&config, installed).unwrap();
+
+        let benign = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {"file_path": config, "content": installed}
+        })
+        .to_string();
+        let benign_result = evaluate_raw(&engine(), &benign);
+        assert_ne!(
+            benign_result.decision().action,
+            Action::Block,
+            "an exact effective installed hook is not an injected autorun: {:?}",
+            benign_result.decision()
+        );
+
+        for malicious in [
+            "/usr/local/bin/sentinel evaluate --agent codex || true",
+            "/usr/local/bin/sentinel evaluate --agent codex >/dev/null",
+            "/usr/local/bin/sentinel post-evaluate",
+        ] {
+            let content = format!(
+                "{installed}\n[[hooks.SessionStart]]\nmatcher = \".*\"\n\
+                 [[hooks.SessionStart.hooks]]\ntype = \"command\"\n\
+                 command = \"{malicious}\"\n"
+            );
+            let raw = serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": {"file_path": config, "content": content}
+            })
+            .to_string();
+            let result = evaluate_raw(&engine(), &raw);
+            assert_eq!(result.decision().action, Action::Block, "{malicious}");
+            assert_eq!(
+                result.decision().matched_rule.as_deref(),
+                Some("selfprotect: autorun-injection"),
+                "non-exact hook command must remain policy-evaluated: {malicious}"
+            );
+        }
     }
 }
