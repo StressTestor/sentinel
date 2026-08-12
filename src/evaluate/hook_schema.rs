@@ -100,6 +100,7 @@ impl HookInput {
                 tool_name,
                 None,
                 paths,
+                Vec::new(),
                 candidates,
                 mutations,
                 self.cwd.clone(),
@@ -109,6 +110,7 @@ impl HookInput {
         }
 
         let mut paths = Vec::new();
+        let mut shell_expansion_paths = Vec::new();
 
         // 1. Command extraction — NOT gated on the literal name "Bash". A renamed
         //    Bash tool, a lowercase `bash`, or an MCP shell tool carries its
@@ -121,12 +123,25 @@ impl HookInput {
         let command = extract_command_for_tool(&tool_name, &self.tool_input)
             .or_else(|| self.tool_input.as_str().map(str::to_string));
         if let Some(cmd) = &command {
-            paths.extend(extract_paths_from_command(cmd));
+            for extracted in extract_paths_from_command(cmd) {
+                if extracted.shell_expand_braces && !shell_expansion_paths.contains(&extracted.path)
+                {
+                    shell_expansion_paths.push(extracted.path.clone());
+                }
+                paths.push(extracted.path);
+            }
             // ALSO mine the shell-de-obfuscated form, so a path hidden behind an
             // ANSI-C `$'\x2f...'` quote or `${IFS}` word-split is still seen.
             // Additive: the original tokens are kept; this only adds candidates.
             if let Some(decoded) = crate::common::shell::decode_obfuscation(cmd) {
-                paths.extend(extract_paths_from_command(&decoded));
+                // Brace expansion runs before ANSI-C/parameter expansion. The
+                // decoded view is additive path evidence only; it cannot confer
+                // shell-brace provenance that was absent in the original word.
+                paths.extend(
+                    extract_paths_from_command(&decoded)
+                        .into_iter()
+                        .map(|candidate| candidate.path),
+                );
             }
         }
 
@@ -153,6 +168,7 @@ impl HookInput {
             tool_name,
             command,
             paths,
+            shell_expansion_paths,
             candidates,
             mutations,
             self.cwd.clone(),
@@ -174,6 +190,7 @@ impl HookInput {
                 tool_name: self.tool_name.clone().unwrap_or_else(|| "unknown".into()),
                 command: None,
                 paths: Vec::new(),
+                shell_expansion_paths: Vec::new(),
                 raw_params: self.tool_input.to_string(),
             },
         }
@@ -275,21 +292,28 @@ fn extract_command_from_fields(input: &serde_json::Value, fields: &[&str]) -> Op
 /// or backslash-escaped spaces inside path arguments. Also pulls a path out of a
 /// flag-glued arg (`-T<path>`, `--upload-file=<path>`, `-C<path>`) which an
 /// earlier version skipped wholesale because the token started with `-`.
-fn extract_paths_from_command(cmd: &str) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandPath {
+    path: String,
+    shell_expand_braces: bool,
+}
+
+fn extract_paths_from_command(cmd: &str) -> Vec<CommandPath> {
     let mut paths = Vec::new();
     for raw in shell_tokens(cmd) {
-        if raw.is_empty() {
+        if raw.value.is_empty() {
             continue;
         }
-        for cand in path_candidates(&raw) {
-            // strip ALL quotes, not just surrounding, so `"$HOME"/.ssh` and
-            // `~/'.ssh'` normalize to a matchable path.
-            let stripped = cand.replace(['"', '\''], "");
-            let token = stripped
-                .trim_start_matches('@')
-                .trim_end_matches([',', ';']);
+        for cand in path_candidates(&raw.value) {
+            let token = cand.trim_start_matches('@').trim_end_matches([',', ';']);
             if token.contains('/') || token.starts_with('~') || token.starts_with('.') {
-                paths.push(token.to_string());
+                paths.push(CommandPath {
+                    path: token.to_string(),
+                    shell_expand_braces: raw.unquoted_open_brace
+                        && raw.unquoted_close_brace
+                        && token.contains('{')
+                        && token.contains('}'),
+                });
             }
         }
     }
@@ -300,9 +324,17 @@ fn extract_paths_from_command(cmd: &str) -> Vec<String> {
 /// shell parser), but it must not split a valid shell word at spaces protected
 /// by quotes or backslashes, otherwise deny.path rules containing spaces can be
 /// bypassed through Bash.
-fn shell_tokens(cmd: &str) -> Vec<String> {
+struct ShellToken {
+    value: String,
+    unquoted_open_brace: bool,
+    unquoted_close_brace: bool,
+}
+
+fn shell_tokens(cmd: &str) -> Vec<ShellToken> {
     let mut tokens = Vec::new();
     let mut token = String::new();
+    let mut unquoted_open_brace = false;
+    let mut unquoted_close_brace = false;
     let mut chars = cmd.chars().peekable();
     let mut in_single = false;
     let mut in_double = false;
@@ -320,15 +352,31 @@ fn shell_tokens(cmd: &str) -> Vec<String> {
             '"' if !in_single => in_double = !in_double,
             c if !in_single && !in_double && (c.is_whitespace() || "|&;<>()`".contains(c)) => {
                 if !token.is_empty() {
-                    tokens.push(std::mem::take(&mut token));
+                    tokens.push(ShellToken {
+                        value: std::mem::take(&mut token),
+                        unquoted_open_brace,
+                        unquoted_close_brace,
+                    });
+                    unquoted_open_brace = false;
+                    unquoted_close_brace = false;
                 }
             }
-            _ => token.push(c),
+            _ => {
+                if !in_single && !in_double {
+                    unquoted_open_brace |= c == '{';
+                    unquoted_close_brace |= c == '}';
+                }
+                token.push(c);
+            }
         }
     }
 
     if !token.is_empty() {
-        tokens.push(token);
+        tokens.push(ShellToken {
+            value: token,
+            unquoted_open_brace,
+            unquoted_close_brace,
+        });
     }
     tokens
 }
@@ -472,9 +520,9 @@ mod tests {
     #[test]
     fn extract_paths_from_bash_command() {
         let paths = extract_paths_from_command("cat ~/.aws/credentials /etc/passwd -n");
-        assert!(paths.contains(&"~/.aws/credentials".to_string()));
-        assert!(paths.contains(&"/etc/passwd".to_string()));
-        assert!(!paths.iter().any(|p| p.starts_with('-')));
+        assert!(paths.iter().any(|p| p.path == "~/.aws/credentials"));
+        assert!(paths.iter().any(|p| p.path == "/etc/passwd"));
+        assert!(!paths.iter().any(|p| p.path.starts_with('-')));
     }
 
     #[test]
@@ -485,19 +533,44 @@ mod tests {
             "cat \"~/Library/Application Support/Google/Chrome/Default/Cookies\"",
         );
         assert!(
-            q.contains(&"~/Library/Application Support/Google/Chrome/Default/Cookies".to_string()),
+            q.iter()
+                .any(|p| p.path == "~/Library/Application Support/Google/Chrome/Default/Cookies"),
             "quoted spaced path not reassembled: {q:?}"
         );
         // backslash-escaped spaces are equivalent
         let e =
             extract_paths_from_command("wc -c ~/Library/Application\\ Support/Bitwarden/data.json");
         assert!(
-            e.contains(&"~/Library/Application Support/Bitwarden/data.json".to_string()),
+            e.iter()
+                .any(|p| p.path == "~/Library/Application Support/Bitwarden/data.json"),
             "escaped spaced path not reassembled: {e:?}"
         );
         // single-quoted too
         let s = extract_paths_from_command("cp '/etc/master.passwd' /tmp/x");
-        assert!(s.contains(&"/etc/master.passwd".to_string()));
+        assert!(s.iter().any(|p| p.path == "/etc/master.passwd"));
+    }
+
+    #[test]
+    fn brace_expansion_provenance_requires_unquoted_unescaped_shell_braces() {
+        let direct = tc(r#"{"tool_name":"Read","tool_input":{"file_path":"/tmp/file{1..100}"}}"#);
+        assert!(direct.shell_expansion_paths.is_empty());
+
+        let unquoted =
+            tc(r#"{"tool_name":"Bash","tool_input":{"command":"cat /tmp/file{1..100}"}}"#);
+        assert!(unquoted
+            .shell_expansion_paths
+            .iter()
+            .any(|path| path == "/tmp/file{1..100}"));
+
+        let quoted =
+            tc(r#"{"tool_name":"Bash","tool_input":{"command":"cat \"/tmp/file{1..100}\""}}"#);
+        assert!(quoted.shell_expansion_paths.is_empty());
+        assert!(quoted.paths.iter().any(|path| path == "/tmp/file{1..100}"));
+
+        let escaped =
+            tc(r#"{"tool_name":"Bash","tool_input":{"command":"cat /tmp/file\\{1..100\\}"}}"#);
+        assert!(escaped.shell_expansion_paths.is_empty());
+        assert!(escaped.paths.iter().any(|path| path == "/tmp/file{1..100}"));
     }
 
     // ── extraction completeness (audit PR #2) ──────────────────────────────

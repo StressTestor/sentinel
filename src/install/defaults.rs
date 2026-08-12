@@ -1115,6 +1115,7 @@ mod tests {
             tool_name: "Write".into(),
             command: None,
             paths: vec![path.into()],
+            shell_expansion_paths: vec![],
             raw_params: "{}".into(),
         }
     }
@@ -1124,6 +1125,7 @@ mod tests {
             tool_name: "Write".into(),
             command: None,
             paths: vec![],
+            shell_expansion_paths: vec![],
             raw_params: raw.into(),
         }
     }

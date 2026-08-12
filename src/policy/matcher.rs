@@ -1,17 +1,52 @@
 use regex::{Regex, RegexBuilder};
 
+use crate::common::shell::BraceExpansionError;
+
+/// A deny-path check must keep "did not match" separate from "could not
+/// inspect every shell-expanded runtime path". PolicyEngine applies its
+/// configured failure posture to the latter before consulting a rule action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PathMatch {
+    Match,
+    NoMatch,
+    Uncheckable(BraceExpansionError),
+}
+
 /// Match a path against a **deny** rule. A trailing `/*` covers the whole
 /// subtree + the directory itself (a credential dir can't be dodged with a
 /// nested path or by naming the bare dir). Use this for deny.paths.
 pub fn matches_path(pattern: &str, path: &str) -> bool {
-    matches_path_env(pattern, path, true)
+    matches!(matches_path_checked(pattern, path), PathMatch::Match)
+}
+
+pub(crate) fn matches_path_checked(pattern: &str, path: &str) -> PathMatch {
+    matches_path_env_checked(pattern, path, true)
+}
+
+pub(crate) fn matches_path_literal_checked(pattern: &str, path: &str) -> PathMatch {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    matches_path_resolved_checked_inner(pattern, path, &home, &user, true, false)
 }
 
 /// Match a path against an **allow** rule. A trailing `/*` stays strict
 /// (direct children only) so a narrow allow-list isn't silently widened — use
 /// `/**` for an intentional recursive allow. Use this for allow.paths.
+#[cfg(test)]
 pub fn matches_allow_path(pattern: &str, path: &str) -> bool {
-    matches_path_env_all_expansions(pattern, path, false)
+    matches!(
+        matches_path_env_checked(pattern, path, false),
+        PathMatch::Match
+    )
+}
+
+pub(crate) fn matches_allow_path_literal(pattern: &str, path: &str) -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    matches!(
+        matches_path_resolved_checked_inner(pattern, path, &home, &user, false, false),
+        PathMatch::Match
+    )
 }
 
 /// Match a tool NAME (e.g. `mcp__server__tool`, `Bash`) against a deny.tools
@@ -26,16 +61,10 @@ pub fn matches_tool(pattern: &str, tool_name: &str) -> bool {
     }
 }
 
-fn matches_path_env(pattern: &str, path: &str, recursive_dir: bool) -> bool {
+fn matches_path_env_checked(pattern: &str, path: &str, recursive_dir: bool) -> PathMatch {
     let home = std::env::var("HOME").unwrap_or_default();
     let user = std::env::var("USER").unwrap_or_default();
-    matches_path_resolved(pattern, path, &home, &user, recursive_dir)
-}
-
-fn matches_path_env_all_expansions(pattern: &str, path: &str, recursive_dir: bool) -> bool {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let user = std::env::var("USER").unwrap_or_default();
-    matches_path_resolved_all_expansions(pattern, path, &home, &user, recursive_dir)
+    matches_path_resolved_checked(pattern, path, &home, &user, recursive_dir)
 }
 
 /// Resolve path equivalence, then match against the (home-expanded) glob.
@@ -47,6 +76,7 @@ fn matches_path_env_all_expansions(pattern: &str, path: &str, recursive_dir: boo
 /// file exists, and match case-insensitively (macOS/APFS is case-insensitive).
 /// `recursive_dir` controls whether a trailing `/*` covers the subtree (deny)
 /// or only direct children (allow).
+#[cfg(test)]
 fn matches_path_resolved(
     pattern: &str,
     path: &str,
@@ -54,27 +84,78 @@ fn matches_path_resolved(
     user: &str,
     recursive_dir: bool,
 ) -> bool {
+    matches!(
+        matches_path_resolved_checked(pattern, path, home, user, recursive_dir),
+        PathMatch::Match
+    )
+}
+
+fn matches_path_resolved_checked(
+    pattern: &str,
+    path: &str,
+    home: &str,
+    user: &str,
+    recursive_dir: bool,
+) -> PathMatch {
+    matches_path_resolved_checked_inner(pattern, path, home, user, recursive_dir, true)
+}
+
+fn matches_path_resolved_checked_inner(
+    pattern: &str,
+    path: &str,
+    home: &str,
+    user: &str,
+    recursive_dir: bool,
+    expand_braces: bool,
+) -> PathMatch {
     let expanded_pattern = lexical_normalize(&expand_home(pattern, home, user));
     let regexes = pattern_regexes(&expanded_pattern, pattern, recursive_dir);
     if regexes.is_empty() {
-        return false;
+        return PathMatch::NoMatch;
     }
-    // Deny rules are existential: if any shell-expanded runtime path reaches a
-    // protected target, the rule must match.
-    let expansions = crate::common::shell::brace_expand(path, 64);
-    path_expansions_match_any(
-        &regexes,
-        &expanded_pattern,
-        &expansions,
-        home,
-        user,
-        recursive_dir,
-    )
+    let expansions = if expand_braces {
+        match crate::common::shell::brace_expand_checked(path, 64) {
+            Ok(expansions) => expansions,
+            Err(error) => return PathMatch::Uncheckable(error),
+        }
+    } else {
+        vec![path.to_string()]
+    };
+    let matched = if recursive_dir {
+        // Deny rules are existential: if any shell-expanded runtime path reaches
+        // a protected target, the rule must match.
+        path_expansions_match_any(
+            &regexes,
+            &expanded_pattern,
+            &expansions,
+            home,
+            user,
+            recursive_dir,
+        )
+    } else {
+        // Allow rules are universal: every runtime path must be covered.
+        expansions.iter().all(|p| {
+            path_expansions_match_any(
+                &regexes,
+                &expanded_pattern,
+                std::slice::from_ref(p),
+                home,
+                user,
+                recursive_dir,
+            )
+        })
+    };
+    if matched {
+        PathMatch::Match
+    } else {
+        PathMatch::NoMatch
+    }
 }
 
 /// Allow rules are universal across shell brace expansion: every runtime path
 /// produced by the token must be covered, otherwise one allowed expansion could
 /// hide another path outside a lockdown allow-list.
+#[cfg(test)]
 fn matches_path_resolved_all_expansions(
     pattern: &str,
     path: &str,
@@ -82,22 +163,10 @@ fn matches_path_resolved_all_expansions(
     user: &str,
     recursive_dir: bool,
 ) -> bool {
-    let expanded_pattern = lexical_normalize(&expand_home(pattern, home, user));
-    let regexes = pattern_regexes(&expanded_pattern, pattern, recursive_dir);
-    if regexes.is_empty() {
-        return false;
-    }
-    let expansions = crate::common::shell::brace_expand(path, 64);
-    expansions.iter().all(|p| {
-        path_expansions_match_any(
-            &regexes,
-            &expanded_pattern,
-            std::slice::from_ref(p),
-            home,
-            user,
-            recursive_dir,
-        )
-    })
+    matches!(
+        matches_path_resolved_checked(pattern, path, home, user, recursive_dir),
+        PathMatch::Match
+    )
 }
 
 fn path_expansions_match_any(
@@ -695,6 +764,43 @@ mod tests {
             "/h",
             "u",
             false
+        ));
+    }
+
+    #[test]
+    fn deny_brace_member_past_expansion_cap_cannot_bypass() {
+        let benign: Vec<String> = (0..64).map(|i| format!("/tmp/benign-{i}")).collect();
+        let path = format!("{{{},~/.ssh/id_rsa}}", benign.join(","));
+        assert!(matches!(
+            matches_path_resolved_checked("~/.ssh/*", &path, TH, TU, true),
+            PathMatch::Uncheckable(BraceExpansionError::LimitExceeded { cap: 64 })
+        ));
+    }
+
+    #[test]
+    fn brace_sequence_matches_protected_member_without_broad_block() {
+        // Bash expands this to .ssg, .ssh, and .ssi; the protected middle
+        // member must match normally rather than relying on a global failure.
+        assert_eq!(
+            matches_path_resolved_checked("~/.ssh/*", "~/.ss{g..i}/id_rsa", TH, TU, true),
+            PathMatch::Match
+        );
+        // A complete benign sequence that cannot intersect the rule stays a
+        // proved NoMatch, preserving the default policy's zero-FP BLOCK tier.
+        assert_eq!(
+            matches_path_resolved_checked("~/.ssh/*", "/tmp/file{1..3}", TH, TU, true),
+            PathMatch::NoMatch
+        );
+    }
+
+    #[test]
+    fn nested_brace_list_still_matches_protected_member() {
+        assert!(matches_path_resolved(
+            "~/.ssh/*",
+            "~/{Documents,{.aws,.ssh}}/id_rsa",
+            TH,
+            TU,
+            true
         ));
     }
 

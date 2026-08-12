@@ -6,6 +6,13 @@ versioning.
 
 ## [Unreleased]
 
+### Security
+- Harden deny-path brace analysis, install preflight parsing, hook-event
+  preservation, quoted fetch-to-shell detection, and autorun checks across
+  symlink aliases. Uncheckable path syntax now follows the configured failure
+  posture without suppressing independently proven blocks, while direct and
+  quoted literal paths retain their shell semantics.
+
 ## [0.5.0] - 2026-07-28
 
 ### Added
