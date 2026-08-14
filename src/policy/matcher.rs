@@ -1,6 +1,6 @@
 use regex::{Regex, RegexBuilder};
 
-use crate::common::shell::BraceExpansionError;
+use crate::common::shell::{shell_tokens, BraceExpansionError};
 
 /// A deny-path check must keep "did not match" separate from "could not
 /// inspect every shell-expanded runtime path". PolicyEngine applies its
@@ -512,25 +512,25 @@ pub fn matches_command(pattern: &str, command: &str) -> bool {
     }
 }
 
-/// Canonicalize a command for matching so trivial spelling variants don't dodge
-/// a rule: strip surrounding quotes per token, and rewrite any `rm` invocation
-/// whose flags carry BOTH recursive and force (in any form — `-fr`, `-r -f`,
-/// `--recursive --force`) to the canonical `rm -rf`. Matched alongside the
-/// original, so this only ever adds matches.
+/// Canonicalize runtime-equivalent command spellings for additive matching:
+/// quote-aware words, lexical absolute paths, destructive rm flags, modeled
+/// wrapper operands, and exactly correlated Python network aliases.
 fn normalize_command(cmd: &str) -> String {
-    let tokens: Vec<String> = cmd
-        .split_whitespace()
-        .map(|t| {
-            let unquoted = t.trim_matches(|c| c == '"' || c == '\'').to_string();
-            // Shells resolve lexical dot segments in absolute path operands
-            // before the target is touched. Match that effective spelling too,
-            // so `/./usr`, `/../../etc`, and `/./*` cannot evade destructive-rm
-            // rules that intentionally name the protected target rather than
-            // blocking every absolute path.
-            if unquoted.starts_with('/') {
-                lexical_normalize(&unquoted)
+    let Some(parsed) = shell_tokens(cmd) else {
+        return cmd.to_string();
+    };
+    let tokens: Vec<String> = parsed
+        .into_iter()
+        .map(|token| {
+            // Pathname traversal processes dot segments before the final target
+            // is touched. Match the lexical target too, so /./usr, /../../etc,
+            // and /./* cannot evade protected-target rules. Existing symlinks
+            // may change .. semantics; raw matching remains additive, and
+            // filesystem identity is enforced independently by path rules.
+            if token.starts_with('/') {
+                lexical_normalize(&token)
             } else {
-                unquoted
+                token
             }
         })
         .collect();
@@ -564,7 +564,320 @@ fn normalize_command(cmd: &str) -> String {
             i += 1;
         }
     }
-    out.join(" ")
+    let wrapper_normalized = normalize_wrapper_operands(&out);
+    normalize_python_network_aliases(&wrapper_normalized.join(" "))
+}
+
+fn token_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+fn is_command_separator(token: &str) -> bool {
+    matches!(token, ";" | "|" | "||" | "&&" | "&" | "(")
+}
+
+fn is_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn is_command_prefix(token: &str) -> bool {
+    is_assignment(token)
+        || matches!(token, "!" | "{")
+        || token.starts_with('<')
+        || token.starts_with('>')
+        || (token.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && (token.contains('<') || token.contains('>')))
+}
+
+/// Return whether a modeled wrapper option consumes the following token.
+/// Unknown shapes abort normalization rather than guessing where COMMAND begins.
+fn wrapper_option_takes_operand(wrapper: &str, option: &str) -> Option<bool> {
+    let (operands, flags, accept_other_flags): (&[&str], &[&str], bool) = match wrapper {
+        "timeout" => (
+            &["-s", "-k", "--signal", "--kill-after"],
+            &["-v", "--preserve-status", "--foreground", "--verbose"],
+            false,
+        ),
+        "env" => (
+            &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
+            &[
+                "-i",
+                "--ignore-environment",
+                "-0",
+                "--null",
+                "-v",
+                "--debug",
+            ],
+            false,
+        ),
+        "nice" => (&["-n", "--adjustment"], &[], false),
+        "stdbuf" => (&["-i", "-o", "-e"], &[], false),
+        "sudo" => (
+            &[
+                "-u",
+                "--user",
+                "-g",
+                "--group",
+                "-h",
+                "--host",
+                "-C",
+                "--close-from",
+                "-p",
+                "--prompt",
+                "-r",
+                "--role",
+                "-t",
+                "--type",
+                "-R",
+                "--chroot",
+                "-D",
+                "--chdir",
+            ],
+            &[
+                "-A",
+                "--askpass",
+                "-b",
+                "--background",
+                "-E",
+                "--preserve-env",
+                "-H",
+                "--set-home",
+                "-K",
+                "--remove-timestamp",
+                "-k",
+                "--reset-timestamp",
+                "-n",
+                "--non-interactive",
+                "-P",
+                "--preserve-groups",
+                "-S",
+                "--stdin",
+            ],
+            false,
+        ),
+        "doas" => (&["-u"], &["-n", "-s", "-L"], false),
+        "ionice" => (
+            &[
+                "-c",
+                "--class",
+                "-n",
+                "--classdata",
+                "-p",
+                "--pid",
+                "-P",
+                "--pgid",
+                "-u",
+                "--uid",
+            ],
+            &["-t", "--ignore"],
+            false,
+        ),
+        "xargs" => (
+            &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"],
+            &["-0", "-o", "-p", "-r", "-t", "-x"],
+            false,
+        ),
+        "time" => (
+            &["-f", "--format", "-o", "--output"],
+            &[
+                "-a",
+                "--append",
+                "-p",
+                "--portability",
+                "-v",
+                "--verbose",
+                "-q",
+                "--quiet",
+            ],
+            false,
+        ),
+        "exec" => (&["-a"], &["-c", "-l"], false),
+        "nohup" | "setsid" | "command" => (&[], &[], true),
+        "eval" => (&[], &[], false),
+        _ => return None,
+    };
+    if operands.contains(&option) {
+        return Some(true);
+    }
+    if flags.contains(&option) {
+        return Some(false);
+    }
+    let attached_operand = operands.iter().any(|operand| {
+        option.strip_prefix(operand).is_some_and(|suffix| {
+            if operand.starts_with("--") {
+                suffix.starts_with('=') && suffix.len() > 1
+            } else {
+                !suffix.is_empty()
+            }
+        })
+    });
+    if attached_operand
+        || (wrapper == "nice"
+            && option
+                .strip_prefix('-')
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+    {
+        return Some(false);
+    }
+    accept_other_flags.then_some(false)
+}
+fn normalize_wrapper_operands(tokens: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    let mut command_position = true;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if is_command_separator(token) {
+            out.push(token.clone());
+            command_position = true;
+            i += 1;
+            continue;
+        }
+        if command_position && is_command_prefix(token) {
+            out.push(token.clone());
+            i += 1;
+            continue;
+        }
+        if command_position {
+            let wrapper = token_basename(token);
+            let modeled = matches!(
+                wrapper,
+                "env"
+                    | "nice"
+                    | "nohup"
+                    | "setsid"
+                    | "stdbuf"
+                    | "sudo"
+                    | "doas"
+                    | "time"
+                    | "timeout"
+                    | "ionice"
+                    | "command"
+                    | "exec"
+                    | "xargs"
+                    | "eval"
+            );
+            if modeled {
+                let mut next = i + 1;
+                while next < tokens.len() && tokens[next].starts_with('-') {
+                    if tokens[next] == "--" {
+                        next += 1;
+                        break;
+                    }
+                    let takes_operand = match wrapper_option_takes_operand(wrapper, &tokens[next]) {
+                        Some(takes_operand) => takes_operand,
+                        None => {
+                            next = i;
+                            break;
+                        }
+                    };
+                    next += 1;
+                    if takes_operand {
+                        if next >= tokens.len() || is_command_separator(&tokens[next]) {
+                            next = i;
+                            break;
+                        }
+                        next += 1;
+                    }
+                }
+                if next != i {
+                    if wrapper == "env" {
+                        while next < tokens.len() && is_assignment(&tokens[next]) {
+                            next += 1;
+                        }
+                    } else if wrapper == "timeout" {
+                        // timeout requires DURATION before COMMAND.
+                        next += 1;
+                    }
+                    if next < tokens.len() && !is_command_separator(&tokens[next]) {
+                        out.push(token.clone());
+                        i = next;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(token.clone());
+        command_position = false;
+        i += 1;
+    }
+    out
+}
+
+/// Correlate declared Python network-module aliases with their later calls
+/// before restoring the canonical primitive. This avoids bare-word matching.
+fn normalize_python_network_aliases(command: &str) -> String {
+    let mut out = command.to_string();
+    let import_alias =
+        Regex::new(r"\bimport\s+socket\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let aliases: Vec<String> = import_alias
+        .captures_iter(command)
+        .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string()))
+        .collect();
+    for alias in aliases {
+        let escaped = regex::escape(&alias);
+        let direct = Regex::new(&format!(
+            r"\b{escaped}\s*\.\s*(socket|create_connection)\s*\("
+        ))
+        .expect("escaped alias regex");
+        out = direct.replace_all(&out, "socket.$1(").into_owned();
+        let getattr = Regex::new(&format!(
+            r#"getattr\s*\(\s*{escaped}\s*,\s*['"](socket|create_connection)['"]\s*\)\s*\("#
+        ))
+        .expect("escaped alias regex");
+        out = getattr.replace_all(&out, "socket.$1(").into_owned();
+    }
+
+    let from_import = Regex::new(
+        r"\bfrom\s+socket\s+import\s+(socket|create_connection)(?:\s+as\s+([A-Za-z_]\w*))?",
+    )
+    .expect("static regex");
+    let imports: Vec<(String, String)> = from_import
+        .captures_iter(command)
+        .filter_map(|capture| {
+            let primitive = capture.get(1)?.as_str().to_string();
+            let callable = capture
+                .get(2)
+                .map_or_else(|| primitive.clone(), |alias| alias.as_str().to_string());
+            Some((primitive, callable))
+        })
+        .collect();
+    for (primitive, callable) in imports {
+        let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
+            .expect("escaped alias regex");
+        out = call
+            .replace_all(&out, format!("socket.{primitive}("))
+            .into_owned();
+    }
+
+    let dynamic_import =
+        Regex::new(r#"__import__\s*\(\s*['"]socket['"]\s*\)"#).expect("static regex");
+    out = dynamic_import.replace_all(&out, "socket").into_owned();
+
+    let requests_alias =
+        Regex::new(r"\bimport\s+requests\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let aliases: Vec<String> = requests_alias
+        .captures_iter(command)
+        .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string()))
+        .collect();
+    for alias in aliases {
+        let call = Regex::new(&format!(
+            r"\b{}\s*\.\s*([A-Za-z_]\w*)\s*\(",
+            regex::escape(&alias)
+        ))
+        .expect("escaped alias regex");
+        out = call.replace_all(&out, "requests.$1(").into_owned();
+    }
+    let dynamic_import =
+        Regex::new(r#"__import__\s*\(\s*['"]requests['"]\s*\)"#).expect("static regex");
+    dynamic_import.replace_all(&out, "requests").into_owned()
 }
 
 /// Match raw params against a secret regex pattern, testing BOTH the raw
@@ -880,11 +1193,45 @@ mod tests {
         let root_glob = r"rm\s+-rf\s+/\*";
         assert!(matches_command(system, "rm -rf /./usr"));
         assert!(matches_command(system, "rm -rf /../../etc"));
+        assert!(matches_command(
+            system,
+            "rm -rf \"/tmp/safe dir/../../etc\""
+        ));
         assert!(matches_command(root_glob, "rm -rf /./*"));
         // Normalization must preserve the intentionally allowed deep target.
         assert!(!matches_command(
             system,
             "rm -rf /private/tmp/project/target"
+        ));
+    }
+
+    #[test]
+    fn normalize_correlates_network_aliases_without_bare_word_matching() {
+        let socket = r"socket\.socket\(";
+        assert!(matches_command(
+            socket,
+            "python3 -c \"import socket as s; s.socket()\""
+        ));
+        assert!(matches_command(
+            socket,
+            "python3 -c \"from socket import socket as S; S()\""
+        ));
+        assert!(matches_command(
+            socket,
+            "python3 -c \"__import__('socket').socket()\""
+        ));
+        assert!(!matches_command(
+            socket,
+            "python3 -c \"import socket as s; helper.socket()\""
+        ));
+        let requests = r"requests\.[A-Za-z_]+\(";
+        assert!(matches_command(
+            requests,
+            "python3 -c \"import requests as r; r.get('https://example.com')\""
+        ));
+        assert!(!matches_command(
+            requests,
+            "python3 -c \"import requests as r; db.execute('select 1')\""
         ));
     }
 
