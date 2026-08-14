@@ -520,7 +520,19 @@ pub fn matches_command(pattern: &str, command: &str) -> bool {
 fn normalize_command(cmd: &str) -> String {
     let tokens: Vec<String> = cmd
         .split_whitespace()
-        .map(|t| t.trim_matches(|c| c == '"' || c == '\'').to_string())
+        .map(|t| {
+            let unquoted = t.trim_matches(|c| c == '"' || c == '\'').to_string();
+            // Shells resolve lexical dot segments in absolute path operands
+            // before the target is touched. Match that effective spelling too,
+            // so `/./usr`, `/../../etc`, and `/./*` cannot evade destructive-rm
+            // rules that intentionally name the protected target rather than
+            // blocking every absolute path.
+            if unquoted.starts_with('/') {
+                lexical_normalize(&unquoted)
+            } else {
+                unquoted
+            }
+        })
         .collect();
     let mut out: Vec<String> = Vec::with_capacity(tokens.len());
     let mut i = 0;
@@ -860,6 +872,20 @@ mod tests {
         // a non-recursive or non-force rm must NOT be canonicalized into a match
         assert!(!matches_command(rule, "rm -f /etc/hosts"));
         assert!(!matches_command(rule, "rm file.txt"));
+    }
+
+    #[test]
+    fn normalize_canonicalizes_absolute_command_path_dot_segments() {
+        let system = r"rm\s+-rf\s+/(?:usr|etc)(?:/|\s|$)";
+        let root_glob = r"rm\s+-rf\s+/\*";
+        assert!(matches_command(system, "rm -rf /./usr"));
+        assert!(matches_command(system, "rm -rf /../../etc"));
+        assert!(matches_command(root_glob, "rm -rf /./*"));
+        // Normalization must preserve the intentionally allowed deep target.
+        assert!(!matches_command(
+            system,
+            "rm -rf /private/tmp/project/target"
+        ));
     }
 
     #[test]

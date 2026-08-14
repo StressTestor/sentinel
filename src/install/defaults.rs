@@ -547,9 +547,10 @@ reason = "command substitution of a remote fetch"
 # the interpreter only enumerated shell constructs are consumable (env
 # assignments, redirections, group-opens, the same wrapper set the pipe-to-shell
 # rule uses), so a bare word like wc/grep/head can never be crossed and a `.sh`
-# extension is unreachable.
+# extension is unreachable. timeout is separate because its duration operand
+# sits between its options and the launched command.
 [[deny.commands]]
-pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{{1,2}}&?[^\s;&|]*|[({{!])\s*)*(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)'
+pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{{1,2}}&?[^\s;&|]*|[({{!])\s*)*(?:(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)|(?:(?:[\w.-]*/)*timeout\s+(?:(?:-(?:s|k)|--(?:signal|kill-after))\s+\S+\s+|--(?:signal|kill-after)=\S+\s+|--(?:preserve-status|foreground|verbose)\s+)*[^\s;&|]+\s+))*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)'
 action = "block"
 reason = "staged fetch-then-run (download then execute) - shell interpreter at the next command position"
 
@@ -575,8 +576,10 @@ reason = "base64-decode piped to shell"
 
 # (A) fetch side: raw network I/O from an inline script. `requests` must be
 # CALLED, `socket` must be socket.socket()/create_connection - not bare words.
+# Python import aliases are paired with a later method call so renaming the
+# imported module cannot bypass the rule without restoring bare-word matching.
 [[deny.commands]]
-pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(urllib|httplib|http\.client|net/http|open-uri|requests\.[A-Za-z_]+\(|socket\.socket\(|socket\.create_connection|Net::HTTP|require\(\s*[\x27"](http|https|net|dgram|tls)[\x27"]\s*\)|import\(\s*[\x27"](http|https|net)[\x27"]|fetch\(\s*[\x27"`]https?://)'
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(urllib|httplib|http\.client|net/http|open-uri|requests\.[A-Za-z_]+\(|socket\.socket\(|socket\.create_connection|import\s+requests\s+as\s+[A-Za-z_]\w*.*\b[A-Za-z_]\w*\.[A-Za-z_]+\s*\(|import\s+socket\s+as\s+[A-Za-z_]\w*.*\b[A-Za-z_]\w*\.(?:socket|create_connection)\s*\(|Net::HTTP|require\(\s*[\x27"](http|https|net|dgram|tls)[\x27"]\s*\)|import\(\s*[\x27"](http|https|net)[\x27"]|fetch\(\s*[\x27"`]https?://)'
 action = "block"
 reason = "inline interpreter script performing raw network I/O (fetch / exfil / reverse shell)"
 

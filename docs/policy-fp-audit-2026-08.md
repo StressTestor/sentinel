@@ -118,8 +118,8 @@ every claim below was produced by running the real binary, not by reading regexe
    49 decisions flip: 32 block→allow (all manually confirmed benign: worktree and
    temp cleanup, `node_modules` removal, and one download-then-`wc -l`), 15
    block→block under a renamed rule, 2 block→warn. no allow→block.
-4. **explicit test cases** - 49 attack strings must still block, 22 recovered
-   false-positive payloads must now pass. all 71 pass.
+4. **explicit test cases** - 56 attack strings must still block, 24 recovered
+   false-positive payloads must now pass. all 80 pass.
 
 the harness points `HOME` at a throwaway policy directory, so nothing touches the
 live guard. `~`-prefixed path patterns are rewritten to the literal home path in
