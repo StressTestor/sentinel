@@ -1,17 +1,52 @@
 use regex::{Regex, RegexBuilder};
 
+use crate::common::shell::{shell_tokens, BraceExpansionError};
+
+/// A deny-path check must keep "did not match" separate from "could not
+/// inspect every shell-expanded runtime path". PolicyEngine applies its
+/// configured failure posture to the latter before consulting a rule action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PathMatch {
+    Match,
+    NoMatch,
+    Uncheckable(BraceExpansionError),
+}
+
 /// Match a path against a **deny** rule. A trailing `/*` covers the whole
 /// subtree + the directory itself (a credential dir can't be dodged with a
 /// nested path or by naming the bare dir). Use this for deny.paths.
 pub fn matches_path(pattern: &str, path: &str) -> bool {
-    matches_path_env(pattern, path, true)
+    matches!(matches_path_checked(pattern, path), PathMatch::Match)
+}
+
+pub(crate) fn matches_path_checked(pattern: &str, path: &str) -> PathMatch {
+    matches_path_env_checked(pattern, path, true)
+}
+
+pub(crate) fn matches_path_literal_checked(pattern: &str, path: &str) -> PathMatch {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    matches_path_resolved_checked_inner(pattern, path, &home, &user, true, false)
 }
 
 /// Match a path against an **allow** rule. A trailing `/*` stays strict
 /// (direct children only) so a narrow allow-list isn't silently widened — use
 /// `/**` for an intentional recursive allow. Use this for allow.paths.
+#[cfg(test)]
 pub fn matches_allow_path(pattern: &str, path: &str) -> bool {
-    matches_path_env_all_expansions(pattern, path, false)
+    matches!(
+        matches_path_env_checked(pattern, path, false),
+        PathMatch::Match
+    )
+}
+
+pub(crate) fn matches_allow_path_literal(pattern: &str, path: &str) -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    matches!(
+        matches_path_resolved_checked_inner(pattern, path, &home, &user, false, false),
+        PathMatch::Match
+    )
 }
 
 /// Match a tool NAME (e.g. `mcp__server__tool`, `Bash`) against a deny.tools
@@ -26,16 +61,10 @@ pub fn matches_tool(pattern: &str, tool_name: &str) -> bool {
     }
 }
 
-fn matches_path_env(pattern: &str, path: &str, recursive_dir: bool) -> bool {
+fn matches_path_env_checked(pattern: &str, path: &str, recursive_dir: bool) -> PathMatch {
     let home = std::env::var("HOME").unwrap_or_default();
     let user = std::env::var("USER").unwrap_or_default();
-    matches_path_resolved(pattern, path, &home, &user, recursive_dir)
-}
-
-fn matches_path_env_all_expansions(pattern: &str, path: &str, recursive_dir: bool) -> bool {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let user = std::env::var("USER").unwrap_or_default();
-    matches_path_resolved_all_expansions(pattern, path, &home, &user, recursive_dir)
+    matches_path_resolved_checked(pattern, path, &home, &user, recursive_dir)
 }
 
 /// Resolve path equivalence, then match against the (home-expanded) glob.
@@ -47,6 +76,7 @@ fn matches_path_env_all_expansions(pattern: &str, path: &str, recursive_dir: boo
 /// file exists, and match case-insensitively (macOS/APFS is case-insensitive).
 /// `recursive_dir` controls whether a trailing `/*` covers the subtree (deny)
 /// or only direct children (allow).
+#[cfg(test)]
 fn matches_path_resolved(
     pattern: &str,
     path: &str,
@@ -54,27 +84,78 @@ fn matches_path_resolved(
     user: &str,
     recursive_dir: bool,
 ) -> bool {
+    matches!(
+        matches_path_resolved_checked(pattern, path, home, user, recursive_dir),
+        PathMatch::Match
+    )
+}
+
+fn matches_path_resolved_checked(
+    pattern: &str,
+    path: &str,
+    home: &str,
+    user: &str,
+    recursive_dir: bool,
+) -> PathMatch {
+    matches_path_resolved_checked_inner(pattern, path, home, user, recursive_dir, true)
+}
+
+fn matches_path_resolved_checked_inner(
+    pattern: &str,
+    path: &str,
+    home: &str,
+    user: &str,
+    recursive_dir: bool,
+    expand_braces: bool,
+) -> PathMatch {
     let expanded_pattern = lexical_normalize(&expand_home(pattern, home, user));
     let regexes = pattern_regexes(&expanded_pattern, pattern, recursive_dir);
     if regexes.is_empty() {
-        return false;
+        return PathMatch::NoMatch;
     }
-    // Deny rules are existential: if any shell-expanded runtime path reaches a
-    // protected target, the rule must match.
-    let expansions = crate::common::shell::brace_expand(path, 64);
-    path_expansions_match_any(
-        &regexes,
-        &expanded_pattern,
-        &expansions,
-        home,
-        user,
-        recursive_dir,
-    )
+    let expansions = if expand_braces {
+        match crate::common::shell::brace_expand_checked(path, 64) {
+            Ok(expansions) => expansions,
+            Err(error) => return PathMatch::Uncheckable(error),
+        }
+    } else {
+        vec![path.to_string()]
+    };
+    let matched = if recursive_dir {
+        // Deny rules are existential: if any shell-expanded runtime path reaches
+        // a protected target, the rule must match.
+        path_expansions_match_any(
+            &regexes,
+            &expanded_pattern,
+            &expansions,
+            home,
+            user,
+            recursive_dir,
+        )
+    } else {
+        // Allow rules are universal: every runtime path must be covered.
+        expansions.iter().all(|p| {
+            path_expansions_match_any(
+                &regexes,
+                &expanded_pattern,
+                std::slice::from_ref(p),
+                home,
+                user,
+                recursive_dir,
+            )
+        })
+    };
+    if matched {
+        PathMatch::Match
+    } else {
+        PathMatch::NoMatch
+    }
 }
 
 /// Allow rules are universal across shell brace expansion: every runtime path
 /// produced by the token must be covered, otherwise one allowed expansion could
 /// hide another path outside a lockdown allow-list.
+#[cfg(test)]
 fn matches_path_resolved_all_expansions(
     pattern: &str,
     path: &str,
@@ -82,22 +163,10 @@ fn matches_path_resolved_all_expansions(
     user: &str,
     recursive_dir: bool,
 ) -> bool {
-    let expanded_pattern = lexical_normalize(&expand_home(pattern, home, user));
-    let regexes = pattern_regexes(&expanded_pattern, pattern, recursive_dir);
-    if regexes.is_empty() {
-        return false;
-    }
-    let expansions = crate::common::shell::brace_expand(path, 64);
-    expansions.iter().all(|p| {
-        path_expansions_match_any(
-            &regexes,
-            &expanded_pattern,
-            std::slice::from_ref(p),
-            home,
-            user,
-            recursive_dir,
-        )
-    })
+    matches!(
+        matches_path_resolved_checked(pattern, path, home, user, recursive_dir),
+        PathMatch::Match
+    )
 }
 
 fn path_expansions_match_any(
@@ -428,13 +497,28 @@ fn lexical_normalize(p: &str) -> String {
 /// escapes + `${IFS}` desugaring), so `$'\x72\x6d' -rf /` and `cat${IFS}/etc/...`
 /// can't dodge a rule. Additive: the raw check runs first and is never replaced.
 pub fn matches_command(pattern: &str, command: &str) -> bool {
-    let normalized = normalize_command(command);
-    let decoded = crate::common::shell::decode_obfuscation(command);
     match Regex::new(pattern) {
         Ok(re) => {
-            re.is_match(command)
-                || (normalized != command && re.is_match(&normalized))
-                || decoded.as_deref().is_some_and(|d| re.is_match(d))
+            if re.is_match(command) {
+                return true;
+            }
+            let normalized = normalize_command(command);
+            if normalized != command && re.is_match(&normalized) {
+                return true;
+            }
+            // Filesystem and lexical resolution can intentionally diverge only
+            // for rm operands with dot components. Keep the lexical candidate
+            // additive without doubling normalization work for every ordinary
+            // command/rule pair.
+            if command.contains("rm") && command.contains("/.") {
+                let lexical = normalize_command_inner(command, false);
+                if lexical != command && lexical != normalized && re.is_match(&lexical) {
+                    return true;
+                }
+            }
+            crate::common::shell::decode_obfuscation(command)
+                .as_deref()
+                .is_some_and(|decoded| re.is_match(decoded))
         }
         Err(_) => {
             tracing::warn!("invalid command pattern: {pattern}");
@@ -443,20 +527,23 @@ pub fn matches_command(pattern: &str, command: &str) -> bool {
     }
 }
 
-/// Canonicalize a command for matching so trivial spelling variants don't dodge
-/// a rule: strip surrounding quotes per token, and rewrite any `rm` invocation
-/// whose flags carry BOTH recursive and force (in any form — `-fr`, `-r -f`,
-/// `--recursive --force`) to the canonical `rm -rf`. Matched alongside the
-/// original, so this only ever adds matches.
+/// Canonicalize runtime-equivalent command spellings for additive matching:
+/// quote-aware words, lexical absolute paths, destructive rm flags, modeled
+/// wrapper operands, and exactly correlated Python network aliases.
 fn normalize_command(cmd: &str) -> String {
-    let tokens: Vec<String> = cmd
-        .split_whitespace()
-        .map(|t| t.trim_matches(|c| c == '"' || c == '\'').to_string())
-        .collect();
+    normalize_command_inner(cmd, true)
+}
+
+fn normalize_command_inner(cmd: &str, resolve_filesystem: bool) -> String {
+    let Some(parsed) = shell_tokens(cmd) else {
+        return cmd.to_string();
+    };
+    let mut tokens = parsed;
+    normalize_recursive_rm_paths(&mut tokens, resolve_filesystem);
     let mut out: Vec<String> = Vec::with_capacity(tokens.len());
     let mut i = 0;
     while i < tokens.len() {
-        if tokens[i] == "rm" {
+        if token_basename(&tokens[i]) == "rm" {
             let mut j = i + 1;
             let (mut recursive, mut force) = (false, false);
             while j < tokens.len() && tokens[j].starts_with('-') {
@@ -483,7 +570,864 @@ fn normalize_command(cmd: &str) -> String {
             i += 1;
         }
     }
-    out.join(" ")
+    let mut wrapper_normalized = normalize_wrapper_operands(&out);
+    normalize_staged_direct_exec(&mut wrapper_normalized);
+    let aliases = normalize_python_network_aliases(&wrapper_normalized.join(" "));
+    normalize_dynamic_subprocess_argv(&aliases)
+}
+
+/// Normalize only operands of a recognized recursive-force `rm`. Filesystem
+/// resolution must see the original spelling: resolving `..` lexically first
+/// is wrong when an earlier component is a symlink. If the complete operand is
+/// not present (including a glob tail), resolve the longest existing prefix and
+/// re-append the unresolved components. The lexical fallback preserves coverage
+/// for ordinary nonexistent paths without making unrelated commands depend on
+/// host filesystem state.
+fn normalize_recursive_rm_paths(tokens: &mut [String], resolve_filesystem: bool) {
+    let mut i = 0;
+    while i < tokens.len() {
+        if token_basename(&tokens[i]) != "rm" {
+            i += 1;
+            continue;
+        }
+
+        let mut j = i + 1;
+        let (mut recursive, mut force) = (false, false);
+        while j < tokens.len() && tokens[j].starts_with('-') {
+            let option = &tokens[j];
+            let long = option.starts_with("--");
+            recursive |= (long && option == "--recursive")
+                || (!long && (option.contains('r') || option.contains('R')));
+            force |= (long && option == "--force") || (!long && option.contains('f'));
+            j += 1;
+        }
+
+        if recursive && force {
+            while j < tokens.len() && !is_command_separator(&tokens[j]) {
+                if tokens[j].starts_with('/') {
+                    let normalized = if resolve_filesystem {
+                        canonicalize_existing_path_prefix(&tokens[j])
+                            .unwrap_or_else(|| lexical_normalize(&tokens[j]))
+                    } else {
+                        lexical_normalize(&tokens[j])
+                    };
+                    tokens[j] = protected_top_level_witness(&normalized).unwrap_or(normalized);
+                }
+                j += 1;
+            }
+        }
+        i = j.max(i + 1);
+    }
+}
+
+/// Return a concrete protected witness when a recursive-rm operand's first
+/// path component is a shell pattern that can expand onto one. The existing
+/// deny regexes remain the authority over the resulting depth: for example,
+/// `/var*/folders/project` becomes `/var/folders/project` and stays allowed,
+/// while `/u?r/local` becomes `/usr/local` and blocks.
+fn protected_top_level_witness(path: &str) -> Option<String> {
+    if !path.starts_with('/')
+        || !path
+            .bytes()
+            .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b'{' | b'$' | b'`'))
+    {
+        return None;
+    }
+    let first_component = path.trim_start_matches('/').split('/').next()?;
+    if first_component.contains('$') || first_component.contains('`') {
+        // The hook cannot know the caller's shell variable state. An unset or
+        // empty parameter can splice a protected top-level name back together,
+        // so an unresolved expansion in this component is root-equivalent.
+        return Some("/".to_string());
+    }
+    if path
+        .trim_start_matches('/')
+        .bytes()
+        .next()
+        .is_some_and(|byte| matches!(byte, b'*' | b'?' | b'[' | b'{'))
+    {
+        // Existing root-equivalent rules already cover a metacharacter in the
+        // first position. Preserve that spelling so additive matching sees it.
+        return None;
+    }
+
+    let expansions = match crate::common::shell::brace_expand_checked(path, 64) {
+        Ok(expansions) => expansions,
+        // A recursive delete whose top-level brace expansion cannot be fully
+        // inspected is classified as root-equivalent instead of silently
+        // falling through.
+        Err(_) => return Some("/".to_string()),
+    };
+    const PROTECTED: &[&str] = &[
+        // System trees first: if one pattern can expand to both a bounded tree
+        // and a system tree, the blocking system-tree witness must win.
+        "bin",
+        "sbin",
+        "boot",
+        "lib",
+        "lib64",
+        "usr",
+        "etc",
+        "root",
+        "run",
+        "srv",
+        "proc",
+        "sys",
+        "System",
+        "Library",
+        "Applications",
+        "dev",
+        "cores",
+        "tmp",
+        "Users",
+        "Volumes",
+        "home",
+        "mnt",
+        "media",
+        "var",
+        "private",
+        "opt",
+        "Network",
+    ];
+
+    for protected in PROTECTED {
+        for expansion in &expansions {
+            let without_root = expansion.strip_prefix('/')?;
+            let (component, remainder) = without_root
+                .split_once('/')
+                .map_or((without_root, ""), |(component, rest)| (component, rest));
+            if glob::Pattern::new(component).is_ok_and(|pattern| pattern.matches(protected)) {
+                return Some(if remainder.is_empty() {
+                    format!("/{protected}")
+                } else {
+                    format!("/{protected}/{remainder}")
+                });
+            }
+        }
+    }
+    None
+}
+
+fn canonicalize_existing_path_prefix(path: &str) -> Option<String> {
+    let mut prefix = std::path::Path::new(path);
+    let mut unresolved = Vec::new();
+    loop {
+        if let Ok(mut resolved) = std::fs::canonicalize(prefix) {
+            for component in unresolved.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved.to_str().map(str::to_owned);
+        }
+        unresolved.push(prefix.file_name()?.to_os_string());
+        prefix = prefix.parent()?;
+    }
+}
+
+fn token_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+fn is_command_separator(token: &str) -> bool {
+    matches!(token, ";" | "|" | "||" | "&&" | "&" | "(")
+}
+
+fn is_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn is_command_prefix(token: &str) -> bool {
+    is_assignment(token)
+        || matches!(token, "!" | "{")
+        || token.starts_with('<')
+        || token.starts_with('>')
+        || (token.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && (token.contains('<') || token.contains('>')))
+}
+
+fn is_modeled_wrapper(token: &str) -> bool {
+    matches!(
+        token_basename(token),
+        "env"
+            | "nice"
+            | "nohup"
+            | "setsid"
+            | "stdbuf"
+            | "sudo"
+            | "doas"
+            | "time"
+            | "timeout"
+            | "ionice"
+            | "command"
+            | "exec"
+            | "xargs"
+            | "eval"
+    )
+}
+
+/// Return whether a modeled wrapper option consumes the following token.
+/// Unknown shapes abort normalization rather than guessing where COMMAND begins.
+fn wrapper_option_takes_operand(wrapper: &str, option: &str) -> Option<bool> {
+    let (operands, flags, accept_other_flags): (&[&str], &[&str], bool) = match wrapper {
+        "timeout" => (
+            &["-s", "-k", "--signal", "--kill-after"],
+            &["-v", "--preserve-status", "--foreground", "--verbose"],
+            false,
+        ),
+        "env" => (
+            &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
+            &[
+                "-i",
+                "--ignore-environment",
+                "-0",
+                "--null",
+                "-v",
+                "--debug",
+            ],
+            false,
+        ),
+        "nice" => (&["-n", "--adjustment"], &[], false),
+        "stdbuf" => (&["-i", "-o", "-e"], &[], false),
+        "sudo" => (
+            &[
+                "-u",
+                "--user",
+                "-g",
+                "--group",
+                "-h",
+                "--host",
+                "-C",
+                "--close-from",
+                "-p",
+                "--prompt",
+                "-r",
+                "--role",
+                "-t",
+                "--type",
+                "-R",
+                "--chroot",
+                "-D",
+                "--chdir",
+            ],
+            &[
+                "-A",
+                "--askpass",
+                "-b",
+                "--background",
+                "-E",
+                "--preserve-env",
+                "-H",
+                "--set-home",
+                "-K",
+                "--remove-timestamp",
+                "-k",
+                "--reset-timestamp",
+                "-n",
+                "--non-interactive",
+                "-P",
+                "--preserve-groups",
+                "-S",
+                "--stdin",
+            ],
+            false,
+        ),
+        "doas" => (&["-u"], &["-n", "-s", "-L"], false),
+        "ionice" => (
+            &[
+                "-c",
+                "--class",
+                "-n",
+                "--classdata",
+                "-p",
+                "--pid",
+                "-P",
+                "--pgid",
+                "-u",
+                "--uid",
+            ],
+            &["-t", "--ignore"],
+            false,
+        ),
+        "xargs" => (
+            &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"],
+            &["-0", "-o", "-p", "-r", "-t", "-x"],
+            false,
+        ),
+        "time" => (
+            &["-f", "--format", "-o", "--output"],
+            &[
+                "-a",
+                "--append",
+                "-p",
+                "--portability",
+                "-v",
+                "--verbose",
+                "-q",
+                "--quiet",
+            ],
+            false,
+        ),
+        "exec" => (&["-a"], &["-c", "-l"], false),
+        "nohup" | "setsid" | "command" => (&[], &[], true),
+        "eval" => (&[], &[], false),
+        _ => return None,
+    };
+    if operands.contains(&option) {
+        return Some(true);
+    }
+    if flags.contains(&option) {
+        return Some(false);
+    }
+    let attached_operand = operands.iter().any(|operand| {
+        option.strip_prefix(operand).is_some_and(|suffix| {
+            if operand.starts_with("--") {
+                suffix.starts_with('=') && suffix.len() > 1
+            } else {
+                !suffix.is_empty()
+            }
+        })
+    });
+    if attached_operand
+        || (wrapper == "nice"
+            && option
+                .strip_prefix('-')
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+    {
+        return Some(false);
+    }
+    accept_other_flags.then_some(false)
+}
+fn normalize_wrapper_operands(tokens: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    let mut command_position = true;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if is_command_separator(token) {
+            out.push(token.clone());
+            command_position = true;
+            i += 1;
+            continue;
+        }
+        if command_position && is_command_prefix(token) {
+            out.push(token.clone());
+            i += 1;
+            continue;
+        }
+        if command_position {
+            let wrapper = token_basename(token);
+            if is_modeled_wrapper(token) {
+                let mut next = i + 1;
+                while next < tokens.len() && tokens[next].starts_with('-') {
+                    if tokens[next] == "--" {
+                        next += 1;
+                        break;
+                    }
+                    let takes_operand = match wrapper_option_takes_operand(wrapper, &tokens[next]) {
+                        Some(takes_operand) => takes_operand,
+                        None => {
+                            next = i;
+                            break;
+                        }
+                    };
+                    next += 1;
+                    if takes_operand {
+                        if next >= tokens.len() || is_command_separator(&tokens[next]) {
+                            next = i;
+                            break;
+                        }
+                        next += 1;
+                    }
+                }
+                if next != i {
+                    if wrapper == "env" {
+                        while next < tokens.len() && is_assignment(&tokens[next]) {
+                            next += 1;
+                        }
+                    } else if wrapper == "timeout" {
+                        // timeout requires DURATION before COMMAND.
+                        next += 1;
+                    }
+                    if next < tokens.len() && !is_command_separator(&tokens[next]) {
+                        out.push(token.clone());
+                        i = next;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(token.clone());
+        command_position = false;
+        i += 1;
+    }
+    out
+}
+
+/// A downloaded path may already be executable, so no post-fetch chmod or
+/// explicit interpreter is required. Correlate the fetch output operand with a
+/// later command-position token and rewrite that exact execution to the shell
+/// marker already covered by the staged-fetch policy rule.
+fn normalize_staged_direct_exec(tokens: &mut [String]) {
+    let mut outputs = Vec::new();
+    let mut cwd: Option<String> = None;
+    let mut command_position = true;
+    let mut i = 0;
+    while i < tokens.len() {
+        if is_command_separator(&tokens[i]) {
+            command_position = true;
+            i += 1;
+            continue;
+        }
+        if command_position && is_command_prefix(&tokens[i]) {
+            i += 1;
+            continue;
+        }
+        if command_position && is_modeled_wrapper(&tokens[i]) {
+            i += 1;
+            continue;
+        }
+        if !command_position {
+            i += 1;
+            continue;
+        }
+
+        let fetcher = token_basename(&tokens[i]).to_string();
+        if fetcher == "cd" {
+            let mut target = i + 1;
+            if tokens.get(target).is_some_and(|token| token == "--") {
+                target += 1;
+            }
+            cwd = tokens
+                .get(target)
+                .filter(|target| !is_command_separator(target))
+                .and_then(|target| resolve_literal_directory(target, cwd.as_deref()));
+        } else if matches!(fetcher.as_str(), "curl" | "wget" | "fetch") {
+            let mut curl_remote_name = false;
+            let mut curl_urls = Vec::new();
+            let mut arg = i + 1;
+            while arg < tokens.len() && !is_command_separator(&tokens[arg]) {
+                let option = tokens[arg].clone();
+                if fetcher == "curl" {
+                    curl_remote_name |= matches!(
+                        option.as_str(),
+                        "-O" | "--remote-name" | "--remote-name-all"
+                    ) || (option.starts_with('-')
+                        && !option.starts_with("--")
+                        && option[1..].contains('O'));
+                    if option.starts_with("http://") || option.starts_with("https://") {
+                        curl_urls.push(option.clone());
+                    }
+                }
+                let (separate, attached) = match fetcher.as_str() {
+                    "curl" => (
+                        matches!(option.as_str(), "-o" | "--output"),
+                        option
+                            .strip_prefix("--output=")
+                            .or_else(|| option.strip_prefix("-o").filter(|path| !path.is_empty())),
+                    ),
+                    "wget" => (
+                        matches!(option.as_str(), "-O" | "--output-document"),
+                        option
+                            .strip_prefix("--output-document=")
+                            .or_else(|| option.strip_prefix("-O").filter(|path| !path.is_empty())),
+                    ),
+                    "fetch" => (
+                        matches!(option.as_str(), "-o" | "--output"),
+                        option
+                            .strip_prefix("--output=")
+                            .or_else(|| option.strip_prefix("-o").filter(|path| !path.is_empty())),
+                    ),
+                    _ => unreachable!("fetcher was filtered above"),
+                };
+                let output = attached.map(str::to_owned).or_else(|| {
+                    (separate && arg + 1 < tokens.len() && !is_command_separator(&tokens[arg + 1]))
+                        .then(|| tokens[arg + 1].clone())
+                });
+                if let Some(output) = output {
+                    outputs.push(resolve_execution_path(&output, cwd.as_deref()));
+                    if option.starts_with("--") {
+                        let short = if fetcher == "wget" { "-O" } else { "-o" };
+                        tokens[arg] = if separate {
+                            short.to_string()
+                        } else {
+                            format!("{short}{output}")
+                        };
+                    }
+                }
+                arg += 1;
+            }
+            if curl_remote_name {
+                outputs.extend(
+                    curl_urls
+                        .iter()
+                        .filter_map(|url| remote_url_basename(url))
+                        .map(|output| resolve_execution_path(output, cwd.as_deref())),
+                );
+            }
+        } else {
+            let candidate = resolve_execution_path(&tokens[i], cwd.as_deref());
+            if outputs.iter().any(|output| output == &candidate) {
+                tokens[i] = "sh".into();
+                return;
+            }
+        }
+        command_position = false;
+        i += 1;
+    }
+}
+
+fn resolve_execution_path(path: &str, cwd: Option<&str>) -> String {
+    let lexical = lexical_normalize(path);
+    if lexical.starts_with('/') {
+        lexical
+    } else if let Some(cwd) = cwd {
+        lexical_normalize(&format!("{cwd}/{lexical}"))
+    } else {
+        lexical
+    }
+}
+
+fn resolve_literal_directory(target: &str, cwd: Option<&str>) -> Option<String> {
+    if target == "-"
+        || target.starts_with('~')
+        || target
+            .bytes()
+            .any(|byte| matches!(byte, b'$' | b'`' | b'*' | b'?' | b'[' | b'{'))
+    {
+        return None;
+    }
+    if target.starts_with('/') {
+        Some(lexical_normalize(target))
+    } else {
+        cwd.map(|cwd| lexical_normalize(&format!("{cwd}/{target}")))
+    }
+}
+
+fn remote_url_basename(url: &str) -> Option<&str> {
+    let path = url.split(['?', '#']).next()?.trim_end_matches('/');
+    let basename = path.rsplit('/').next()?;
+    (!basename.is_empty()).then_some(basename)
+}
+
+/// Correlate declared Python network/subprocess aliases with their later calls
+/// before restoring canonical primitives. This avoids bare-word matching.
+fn normalize_python_network_aliases(command: &str) -> String {
+    let mut out = command.to_string();
+    let import_alias =
+        Regex::new(r"\bimport\s+socket\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let aliases: Vec<String> = import_alias
+        .captures_iter(command)
+        .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string()))
+        .collect();
+    for alias in aliases {
+        let escaped = regex::escape(&alias);
+        let direct = Regex::new(&format!(
+            r"\b{escaped}\s*\.\s*(socket|create_connection)\s*\("
+        ))
+        .expect("escaped alias regex");
+        out = direct.replace_all(&out, "socket.$1(").into_owned();
+        let getattr = Regex::new(&format!(
+            r#"getattr\s*\(\s*{escaped}\s*,\s*['"](socket|create_connection)['"]\s*\)\s*\("#
+        ))
+        .expect("escaped alias regex");
+        out = getattr.replace_all(&out, "socket.$1(").into_owned();
+    }
+
+    for (primitive, callable) in python_from_imports(command, "socket")
+        .into_iter()
+        .filter(|(primitive, _)| matches!(primitive.as_str(), "socket" | "create_connection"))
+    {
+        let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
+            .expect("escaped alias regex");
+        out = call
+            .replace_all(&out, format!("socket.{primitive}("))
+            .into_owned();
+    }
+
+    let dynamic_import =
+        Regex::new(r#"__import__\s*\(\s*['"]socket['"]\s*\)"#).expect("static regex");
+    out = dynamic_import.replace_all(&out, "socket").into_owned();
+
+    let requests_alias =
+        Regex::new(r"\bimport\s+requests\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let aliases: Vec<String> = requests_alias
+        .captures_iter(command)
+        .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string()))
+        .collect();
+    for alias in aliases {
+        let call = Regex::new(&format!(
+            r"\b{}\s*\.\s*([A-Za-z_]\w*)\s*\(",
+            regex::escape(&alias)
+        ))
+        .expect("escaped alias regex");
+        out = call.replace_all(&out, "requests.$1(").into_owned();
+        let getattr = Regex::new(&format!(
+            r#"getattr\s*\(\s*{}\s*,\s*['"]([A-Za-z_]\w*)['"]\s*\)\s*\("#,
+            regex::escape(&alias)
+        ))
+        .expect("escaped alias regex");
+        out = getattr.replace_all(&out, "requests.$1(").into_owned();
+    }
+    let dynamic_import =
+        Regex::new(r#"__import__\s*\(\s*['"]requests['"]\s*\)"#).expect("static regex");
+    out = dynamic_import.replace_all(&out, "requests").into_owned();
+
+    for (primitive, callable) in python_from_imports(command, "requests") {
+        let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
+            .expect("escaped alias regex");
+        out = call
+            .replace_all(&out, format!("requests.{primitive}("))
+            .into_owned();
+    }
+    normalize_python_subprocess_aliases(&out)
+}
+
+fn python_from_imports(command: &str, module: &str) -> Vec<(String, String)> {
+    let from_import = Regex::new(&format!(
+        r"\bfrom\s+{}\s+import\s+([^;\n]+)",
+        regex::escape(module)
+    ))
+    .expect("escaped module regex");
+    from_import
+        .captures_iter(command)
+        .filter_map(|capture| capture.get(1))
+        .flat_map(|clause| {
+            clause
+                .as_str()
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .split(',')
+                .filter_map(|entry| {
+                    let words: Vec<&str> = entry.split_whitespace().collect();
+                    let (primitive, callable) = match words.as_slice() {
+                        [primitive] => (*primitive, *primitive),
+                        [primitive, "as", alias] => (*primitive, *alias),
+                        _ => return None,
+                    };
+                    if !is_python_identifier(primitive) || !is_python_identifier(callable) {
+                        return None;
+                    }
+                    Some((primitive.to_string(), callable.to_string()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn normalize_python_subprocess_aliases(command: &str) -> String {
+    const CALLS: &str = "run|Popen|call|check_call|check_output";
+    let dynamic_import =
+        Regex::new(r#"__import__\s*\(\s*['"]subprocess['"]\s*\)"#).expect("static regex");
+    let mut out = dynamic_import
+        .replace_all(command, "subprocess")
+        .into_owned();
+
+    let import_alias =
+        Regex::new(r"\bimport\s+subprocess\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let mut aliases = vec!["subprocess".to_string()];
+    aliases.extend(
+        import_alias
+            .captures_iter(command)
+            .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string())),
+    );
+    for alias in aliases {
+        let escaped = regex::escape(&alias);
+        let direct =
+            Regex::new(&format!(r"\b{escaped}\s*\.\s*({CALLS})\b")).expect("escaped alias regex");
+        out = direct.replace_all(&out, "subprocess.$1").into_owned();
+        let getattr = Regex::new(&format!(
+            r#"getattr\s*\(\s*{escaped}\s*,\s*['"]({CALLS})['"]\s*\)"#
+        ))
+        .expect("escaped alias regex");
+        out = getattr.replace_all(&out, "subprocess.$1").into_owned();
+    }
+
+    let mut callable_aliases: Vec<(String, String)> = python_from_imports(command, "subprocess")
+        .into_iter()
+        .filter(|(primitive, _)| {
+            matches!(
+                primitive.as_str(),
+                "run" | "Popen" | "call" | "check_call" | "check_output"
+            )
+        })
+        .collect();
+    let assigned = Regex::new(&format!(r"\b([A-Za-z_]\w*)\s*=\s*subprocess\.({CALLS})\b"))
+        .expect("static callable regex");
+    let assignment_source = out.clone();
+    callable_aliases.extend(
+        assigned
+            .captures_iter(&assignment_source)
+            .filter_map(|capture| {
+                Some((
+                    capture.get(2)?.as_str().to_string(),
+                    capture.get(1)?.as_str().to_string(),
+                ))
+            }),
+    );
+
+    // Propagate simple callable-assignment chains (`q = r`) to a bounded
+    // fixed point before rewriting calls. Beyond the cap, fail closed by
+    // emitting the dynamic-argv witness handled below.
+    let mut cursor = 0;
+    while cursor < callable_aliases.len() {
+        if callable_aliases.len() >= 64 {
+            out.push_str(" subprocess.run(dynamic_argv)");
+            break;
+        }
+        let (primitive, source) = callable_aliases[cursor].clone();
+        let alias_assignment = Regex::new(&format!(
+            r"\b([A-Za-z_]\w*)\s*=\s*{}\b",
+            regex::escape(&source)
+        ))
+        .expect("escaped callable regex");
+        let alias_source = out.clone();
+        for capture in alias_assignment.captures_iter(&alias_source) {
+            let Some(alias) = capture.get(1).map(|value| value.as_str().to_string()) else {
+                continue;
+            };
+            if alias != source
+                && !callable_aliases
+                    .iter()
+                    .any(|(_, existing)| existing == &alias)
+            {
+                callable_aliases.push((primitive.clone(), alias));
+            }
+        }
+        cursor += 1;
+    }
+    for (primitive, callable) in callable_aliases {
+        let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
+            .expect("escaped alias regex");
+        out = call
+            .replace_all(&out, format!("subprocess.{primitive}("))
+            .into_owned();
+    }
+
+    if Regex::new(r"\bfrom\s+subprocess\s+import\s+\*")
+        .expect("static regex")
+        .is_match(command)
+    {
+        out.push_str(" subprocess.run(dynamic_argv)");
+    }
+    out
+}
+
+fn is_python_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Fixed literal list/tuple argv calls are the narrow false-positive exception.
+/// If argv[0] is assembled at runtime, synthesize a shell-argv witness so the
+/// existing subprocess deny rule retains the broad rule's fail-closed behavior.
+fn normalize_dynamic_subprocess_argv(command: &str) -> String {
+    let call = Regex::new(r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(")
+        .expect("static regex");
+    let dynamic = call.find_iter(command).any(|matched| {
+        let Some(arguments) = python_call_arguments(&command[matched.end()..]) else {
+            return true;
+        };
+        !starts_with_fixed_literal_argv(arguments) || has_dynamic_executable(arguments)
+    });
+    if dynamic {
+        format!("{command} subprocess.run(['sh'])")
+    } else {
+        command.to_string()
+    }
+}
+
+fn python_call_arguments(after_open: &str) -> Option<&str> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, ch) in after_open.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&after_open[..offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn has_dynamic_executable(arguments: &str) -> bool {
+    let executable = Regex::new(r"\bexecutable\s*=\s*").expect("static regex");
+    let dynamic = executable.find_iter(arguments).any(|matched| {
+        let value = arguments[matched.end()..].trim_start();
+        if let Some(rest) = value.strip_prefix("None") {
+            return !rest.trim_start().starts_with(',') && !rest.trim().is_empty();
+        }
+        let Some(closing) = quoted_literal_end(value) else {
+            return true;
+        };
+        let trailing = value[closing..].trim_start();
+        !trailing.is_empty() && !trailing.starts_with(',')
+    });
+    dynamic
+}
+
+fn starts_with_fixed_literal_argv(arguments: &str) -> bool {
+    let mut value = arguments.trim_start();
+    if let Some(after_args) = value.strip_prefix("args") {
+        let after_args = after_args.trim_start();
+        let Some(after_equals) = after_args.strip_prefix('=') else {
+            return false;
+        };
+        value = after_equals.trim_start();
+    }
+    let Some(open) = value.chars().next().filter(|c| matches!(c, '[' | '(')) else {
+        return false;
+    };
+    value = value[open.len_utf8()..].trim_start();
+    let Some(closing) = quoted_literal_end(value) else {
+        return false;
+    };
+    matches!(
+        value[closing..].trim_start().chars().next(),
+        Some(',' | ']' | ')')
+    )
+}
+
+fn quoted_literal_end(value: &str) -> Option<usize> {
+    let quote = value.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+
+    let mut escaped = false;
+    for (offset, ch) in value[quote.len_utf8()..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return Some(quote.len_utf8() + offset + ch.len_utf8());
+        }
+    }
+    None
 }
 
 /// Match raw params against a secret regex pattern, testing BOTH the raw
@@ -699,6 +1643,43 @@ mod tests {
     }
 
     #[test]
+    fn deny_brace_member_past_expansion_cap_cannot_bypass() {
+        let benign: Vec<String> = (0..64).map(|i| format!("/tmp/benign-{i}")).collect();
+        let path = format!("{{{},~/.ssh/id_rsa}}", benign.join(","));
+        assert!(matches!(
+            matches_path_resolved_checked("~/.ssh/*", &path, TH, TU, true),
+            PathMatch::Uncheckable(BraceExpansionError::LimitExceeded { cap: 64 })
+        ));
+    }
+
+    #[test]
+    fn brace_sequence_matches_protected_member_without_broad_block() {
+        // Bash expands this to .ssg, .ssh, and .ssi; the protected middle
+        // member must match normally rather than relying on a global failure.
+        assert_eq!(
+            matches_path_resolved_checked("~/.ssh/*", "~/.ss{g..i}/id_rsa", TH, TU, true),
+            PathMatch::Match
+        );
+        // A complete benign sequence that cannot intersect the rule stays a
+        // proved NoMatch, preserving the default policy's zero-FP BLOCK tier.
+        assert_eq!(
+            matches_path_resolved_checked("~/.ssh/*", "/tmp/file{1..3}", TH, TU, true),
+            PathMatch::NoMatch
+        );
+    }
+
+    #[test]
+    fn nested_brace_list_still_matches_protected_member() {
+        assert!(matches_path_resolved(
+            "~/.ssh/*",
+            "~/{Documents,{.aws,.ssh}}/id_rsa",
+            TH,
+            TU,
+            true
+        ));
+    }
+
+    #[test]
     fn glob_double_star_matches_recursive() {
         assert!(matches_path("./src/**", "./src/main.rs"));
         assert!(matches_path("./src/**", "./src/audit/mod.rs"));
@@ -754,6 +1735,137 @@ mod tests {
         // a non-recursive or non-force rm must NOT be canonicalized into a match
         assert!(!matches_command(rule, "rm -f /etc/hosts"));
         assert!(!matches_command(rule, "rm file.txt"));
+    }
+
+    #[test]
+    fn normalize_canonicalizes_absolute_command_path_dot_segments() {
+        let system = r"rm\s+-rf\s+/(?:usr|etc)(?:/|\s|$)";
+        let root_glob = r"rm\s+-rf\s+/\*";
+        assert!(matches_command(system, "rm -rf /./usr"));
+        assert!(matches_command(system, "rm -rf /../../etc"));
+        assert!(matches_command(
+            system,
+            "rm -rf \"/tmp/safe dir/../../etc\""
+        ));
+        assert!(matches_command(root_glob, "rm -rf /./*"));
+        // Normalization must preserve the intentionally allowed deep target.
+        assert!(!matches_command(
+            system,
+            "rm -rf /private/tmp/project/target"
+        ));
+    }
+
+    #[test]
+    fn normalize_canonicalizes_protected_top_level_shell_patterns() {
+        let system = r"rm\s+-rf\s+/(?:usr|boot)(?:/|\s|$)";
+        let mount = r"rm\s+-rf\s+/mnt(?:/[^/\s]+)?/?(?:\s|$)";
+        let root = r"rm\s+-rf\s+/$";
+        assert!(matches_command(system, "rm -rf /usr*"));
+        assert!(matches_command(system, "rm -rf /bo?t"));
+        assert!(matches_command(system, "rm -rf /usr{,local}"));
+        assert!(matches_command(mount, "rm -rf /mn?"));
+        assert!(matches_command(root, "rm -rf /u${UNSET}sr"));
+        assert!(!matches_command(system, "rm -rf /scratch*"));
+        assert!(!matches_command(mount, "rm -rf /mnt*/volume/project"));
+        assert!(!matches_command(mount, "rm -rf /mnt/${JOB}/project"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_prefers_symlink_resolved_rm_target_over_lexical_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let safe = root.path().join("safe");
+        std::fs::create_dir_all(safe.join("deep")).unwrap();
+        std::fs::create_dir(safe.join("etc")).unwrap();
+        let link = root.path().join("link");
+        symlink(safe.join("deep"), &link).unwrap();
+
+        let normalized = normalize_command(&format!("rm -rf {}/../etc", link.display()));
+        let resolved = std::fs::canonicalize(safe.join("etc")).unwrap();
+        let lexical = root.path().join("etc");
+        assert!(normalized.contains(resolved.to_str().unwrap()));
+        assert!(!normalized.contains(lexical.to_str().unwrap()));
+    }
+
+    #[test]
+    fn normalize_correlates_network_aliases_without_bare_word_matching() {
+        let socket = r"socket\.socket\(";
+        assert!(matches_command(
+            socket,
+            "python3 -c \"import socket as s; s.socket()\""
+        ));
+        assert!(matches_command(
+            socket,
+            "python3 -c \"from socket import socket as S; S()\""
+        ));
+        assert!(matches_command(
+            socket,
+            "python3 -c \"from socket import gethostname, socket as S; S()\""
+        ));
+        assert!(matches_command(
+            socket,
+            "python3 -c \"__import__('socket').socket()\""
+        ));
+        assert!(!matches_command(
+            socket,
+            "python3 -c \"import socket as s; helper.socket()\""
+        ));
+        let requests = r"requests\.[A-Za-z_]+\(";
+        assert!(matches_command(
+            requests,
+            "python3 -c \"import requests as r; r.get('https://example.com')\""
+        ));
+        assert!(matches_command(
+            requests,
+            "python3 -c \"from requests import Session, get; get('https://example.com')\""
+        ));
+        assert!(!matches_command(
+            requests,
+            "python3 -c \"import requests as r; db.execute('select 1')\""
+        ));
+    }
+
+    #[test]
+    fn normalize_blocks_dynamic_but_not_fixed_subprocess_argv() {
+        let marker = "subprocess.run(['sh'])";
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; s='s'+'h'; subprocess.run([s,'-c','id'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"import subprocess; subprocess.run(['git','status'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"import subprocess; subprocess.run(args=('git','status'))\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"from subprocess import run as r; r([name,'status'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"from subprocess import run as r; r(['git','status'])\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; subprocess.run(['git'], executable='/'+'bin/sh')\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; r=subprocess.run; r([name,'status'])\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; r=subprocess.run; q=r; q([name,'status'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"import subprocess; r=subprocess.run; r(['git','status'])\""
+        )
+        .ends_with(marker));
     }
 
     #[test]

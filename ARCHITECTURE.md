@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-07-28
+last updated: 2026-08-14
 
 ## overview
 
@@ -93,6 +93,7 @@ sentinel/
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger
 ├── tests/
+│   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
 │       └── corpus/         test attack sequences (3 TOML files)
 ├── scripts/
@@ -101,6 +102,7 @@ sentinel/
 │   ├── package-smoke.sh    extracted-crate build/install/public-CLI smoke
 │   └── release-identity.sh tag/version/source/registry identity checks
 ├── docs/                   live attack demo + github pages site
+│   ├── policy-fp-audit-2026-08.md  enforcement-data audit behind policy revision 2026-08-07.1
 │   ├── index.html          write-up + attack matrix (published to stresstestor.github.io/sentinel)
 │   ├── target.html         poisoned "CloudSync" docs page with 20+ embedded injections
 │   ├── run-attacks.sh      replays every injection through `sentinel evaluate`
@@ -149,8 +151,14 @@ Host hook payload arrives
            - deny tools: glob over the tool NAME (e.g. `mcp__evil__*`), so an MCP
              server/tool can be blocked/warned by name. opt-in (no default rule).
            - deny paths: glob, with ~ / $HOME / symlink / case canonicalization,
-             recursive directory coverage, glob-candidate de-globbing, and brace
-             expansion ({a,b} -> both real files)
+             recursive directory coverage, glob-candidate de-globbing, and
+             bounded, completeness-aware brace expansion. nested list groups and
+             version-stable numeric/alphabetic sequences are expanded fully;
+             analysis-budget overflow or version-dependent sequence syntax follows
+             the configured on_failure posture instead of accepting a partial result.
+             brace expansion is provenance-gated: only path candidates mined from
+             shell words with unquoted, unescaped brace delimiters are expanded;
+             direct tool paths and quoted or escaped shell words remain literal.
            - deny commands: regex over the raw + an rm-flag-canonicalized form +
              a shell-de-obfuscated form (ANSI-C $'\xHH' escapes, ${IFS} desugar),
              covering pipe-to-shell / fetch-exec / exfil variants
@@ -220,7 +228,11 @@ onto a deny rule's literal prefix and matched, so a candidate the shell would ex
 onto a protected target can't dodge the anchored rule. Hook-removal protection
 (`src/selfprotect/`) runs after policy evaluation: a Write/Edit/MultiEdit to
 `.claude/settings(.local).json` that drops the `sentinel evaluate` hook escalates
-warn → block; hook-preserving edits keep their policy action. The Bash-child form
+warn → block; the same event-aware check covers native Codex `config.toml` and
+`hooks.json`, where command text outside `hooks.PreToolUse` does not count as a
+live guard. Autorun inspection resolves the same effective mutation identity as
+hook preservation, including existing symlink aliases and symlinked parents.
+Hook-preserving edits keep their policy action. The Bash-child form
 of the same disarm (`sed -i`/redirect/`tee` rewriting settings.json) — which
 selfprotect's content check cannot see — is covered by deny.commands rules
 instead. `sentinel check` applies the same `selfprotect` + `preflight` escalations
@@ -234,12 +246,14 @@ process of `npm install`, which never crosses the hook. The one point the hook
 CAN act is when the **agent itself** runs an install-like command. At that moment
 preflight reads the top-level `package.json` in the call's `cwd` and inspects it.
 
-- **trigger** (the only thing that does any I/O): the command is an install-like
-  invocation at a command position — `npm install|i|ci|add`, `pnpm install|i|add`,
-  bare `yarn` / `yarn install|add`, `bun install|add`. NOT `npm run`/`test`/
-  `publish`/`ls`, `npx`, or a package-manager name appearing as an argument
-  (`echo npm install`). `cwd` is plumbed as an explicit field on `HookInput`
-  (Claude Code sends it; it previously only landed in `_extra`).
+- **trigger** (the only thing that does any I/O): a quote-aware shell tokenizer
+  finds an install-like invocation at a command position — `npm install|i|ci|add`,
+  `pnpm install|i|add`, bare `yarn` / `yarn install|add`, `bun install|add` —
+  including quoted or path-qualified package-manager executables, assignment
+  prefixes, and supported cwd flags before or after the verb. NOT `npm run`/
+  `test`/`publish`/`ls`, `npx`, or a package-manager name appearing as an
+  argument (`echo npm install`). `cwd` is plumbed as an explicit field on
+  `HookInput` (Claude Code sends it; it previously only landed in `_extra`).
 - **signals inspected:** ONLY the `scripts` lifecycle values (`preinstall`,
   `install`, `postinstall`, `prepare`, `prepublish`, `prepublishOnly`) and the
   dependency **version specifiers**. NEVER `repository`/`homepage`/`funding`/
@@ -247,7 +261,8 @@ preflight reads the top-level `package.json` in the call's `cwd` and inspects it
   (it did `contains("https://")` over the whole manifest, so any repo URL + a
   postinstall got blocked).
 - **BLOCK** (near-zero FP): a lifecycle script value that fetches-and-executes
-  remote code — `curl|wget|fetch` piped to a shell, `$(curl…)`/backtick-curl,
+  remote code — `curl|wget|fetch` piped to a shell (including quoted or
+  path-qualified shell names), `$(curl…)`/backtick-curl,
   `base64 -d | sh`, an interpreter (`node -e`/`python -c`/…) doing a network
   fetch+exec, `eval` of fetched content, or a fetch from a raw IP. Conceptually
   mirrors the curl/fetch deny.commands in the default policy, but applied ONLY to
@@ -275,7 +290,7 @@ preflight reads the top-level `package.json` in the call's `cwd` and inspects it
 > runs in by following a single literal `cd <dir>` or cwd flag
 > (`--prefix`/`-C`/`--cwd`/`--dir`) off the session cwd. What it will not do is
 > guess at a directory it cannot prove: a non-literal target (a shell variable, a
-> glob, a command substitution) or more than one directory change makes the
+> glob, or command substitution) or more than one directory change makes the
 > install dir ambiguous, so preflight skips rather than inspect a manifest it
 > can't be sure is the right one. Skipping errs toward not blocking a normal
 > install, never toward reading an attacker-chosen manifest. So the residual is
@@ -397,7 +412,7 @@ silently overwritten. writes are atomic and mode 0600 on Unix.
 
 ### policy migration
 
-the bundled default carries revision `2026-07-28`. `policy-migrate --check` is
+the bundled default carries revision `2026-08-07.1`. `policy-migrate --check` is
 read-only and exits nonzero when migration is required. unversioned policies are
 matched only to known published generations; unknown revisions, ambiguous
 generations, and same-field conflicts stop without writing.
@@ -480,7 +495,9 @@ and Scorecard remain separate gates.
 
 ---
 
-last updated: 2026-07-28 by StressTestor. documents the shared typed
+last updated: 2026-08-14 by StressTestor. documents the shared typed
 evaluation pipeline, native Claude Code/Codex lifecycle reconciliation,
 trust-aware health checks, uncontained stateful audit, explicit MCP baselines,
-validated policy migration, and release/package evidence gates.
+validated policy migration, completeness-aware shell matching, package preflight
+parsing, event-aware hook self-protection, policy false-positive regressions,
+and release/package evidence gates.

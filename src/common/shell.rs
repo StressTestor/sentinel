@@ -25,6 +25,100 @@ pub fn decode_obfuscation(cmd: &str) -> Option<String> {
     }
 }
 
+/// Split enough shell syntax for policy classification without executing or
+/// expanding it. Quotes and backslash escapes protect whitespace/separators and
+/// are removed from the resulting word, while real command separators remain
+/// tokens. Malformed quoting returns `None`: such a command is not executable.
+pub(crate) fn shell_tokens(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut token_started = false;
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+
+    let flush = |tokens: &mut Vec<String>, token: &mut String, started: &mut bool| {
+        if *started {
+            tokens.push(std::mem::take(token));
+            *started = false;
+        }
+    };
+
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') => quote = None,
+            (Some('\''), _) => {
+                token.push(c);
+                token_started = true;
+            }
+            (Some('"'), '"') => quote = None,
+            (Some('"'), '\\') => {
+                let next = chars.next()?;
+                match next {
+                    // Inside double quotes, Bash only treats backslash as an
+                    // escape before these characters (and removes a continued
+                    // newline). Before every other character the backslash is
+                    // part of the word and must survive path resolution.
+                    '\n' => {}
+                    '$' | '`' | '"' | '\\' => token.push(next),
+                    _ => {
+                        token.push('\\');
+                        token.push(next);
+                    }
+                }
+                token_started = true;
+            }
+            (Some('"'), _) => {
+                token.push(c);
+                token_started = true;
+            }
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                token_started = true;
+            }
+            (None, '\\') => {
+                let next = chars.next()?;
+                if next != '\n' {
+                    token.push(next);
+                    token_started = true;
+                }
+            }
+            (None, '\n' | '\r') => {
+                flush(&mut tokens, &mut token, &mut token_started);
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if tokens
+                    .last()
+                    .is_none_or(|last| !matches!(last.as_str(), ";" | "|" | "||" | "&&"))
+                {
+                    tokens.push(";".into());
+                }
+            }
+            (None, c) if c.is_whitespace() => {
+                flush(&mut tokens, &mut token, &mut token_started);
+            }
+            (None, c @ (';' | '|' | '&' | '(' | ')')) => {
+                flush(&mut tokens, &mut token, &mut token_started);
+                let mut separator = c.to_string();
+                if matches!(c, '|' | '&') && chars.peek() == Some(&c) {
+                    separator.push(chars.next().expect("peeked separator"));
+                }
+                tokens.push(separator);
+            }
+            (None, _) => {
+                token.push(c);
+                token_started = true;
+            }
+            _ => unreachable!("quotes are exhausted above"),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    flush(&mut tokens, &mut token, &mut token_started);
+    Some(tokens)
+}
+
 /// Replace `${IFS}`, `${IFS:0:1}` (any `${IFS...}`), and a bare `$IFS` (not
 /// followed by another word character, so `$IFSX` is left alone) with a space -
 /// the word-split the shell performs, which an attacker uses to glue a command
@@ -153,33 +247,295 @@ fn hex_escape(rest: &[char], max: usize) -> Option<(String, usize)> {
     Some((c.to_string(), 1 + hex.len()))
 }
 
-/// Expand shell brace lists (`a{b,c}d` -> `abd`, `acd`), capped at `cap` results
-/// so a pathological `{a,b}{c,d}...` can't explode. A brace group with no comma
-/// is left intact (shell does not expand `{x}`). Returns the input itself when
-/// there is nothing to expand.
-pub fn brace_expand(path: &str, cap: usize) -> Vec<String> {
-    if let Some(open) = path.find('{') {
-        if let Some(close_rel) = path[open..].find('}') {
-            let close = open + close_rel;
-            let inner = &path[open + 1..close];
-            if inner.contains(',') {
-                let prefix = &path[..open];
-                let suffix = &path[close + 1..];
-                let mut out = Vec::new();
-                for part in inner.split(',') {
-                    let combined = format!("{prefix}{part}{suffix}");
-                    for e in brace_expand(&combined, cap) {
-                        out.push(e);
-                        if out.len() >= cap {
-                            return out;
-                        }
-                    }
-                }
-                return out;
+/// Why a shell brace token could not be inspected completely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BraceExpansionError {
+    /// Full list expansion would produce more than the bounded result set.
+    LimitExceeded { cap: usize },
+    /// Syntax whose output varies across supported Bash versions.
+    VersionDependentSequence { expression: String },
+}
+
+impl std::fmt::Display for BraceExpansionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LimitExceeded { cap } => {
+                write!(f, "brace expansion exceeds the {cap}-way inspection cap")
+            }
+            Self::VersionDependentSequence { expression } => {
+                write!(f, "version-dependent shell brace sequence {{{expression}}}")
             }
         }
     }
-    vec![path.to_string()]
+}
+
+/// Expand shell brace lists (`a{b,c}d` -> `abd`, `acd`) without silently
+/// truncating. Nested and adjacent list groups are handled with Bash's outer
+/// group ordering, while groups without a top-level comma remain literal.
+/// Version-stable two-endpoint numeric and alphabetic sequences are expanded
+/// exactly. Optional steps and padded/signed-zero endpoints vary across the Bash
+/// versions Sentinel supports, so they are explicit errors. This distinction is
+/// security-critical: a partial or version-dependent expansion is not proof that
+/// a protected path is absent.
+pub fn brace_expand_checked(path: &str, cap: usize) -> Result<Vec<String>, BraceExpansionError> {
+    let mut out = Vec::new();
+    expand_brace_lists(path, cap, &mut out)?;
+    Ok(out)
+}
+
+/// Compatibility wrapper for non-enforcement callers. Security-sensitive code
+/// must use `brace_expand_checked` so an uninspectable token is not confused
+/// with a literal path or a complete partial expansion.
+#[cfg(test)]
+pub fn brace_expand(path: &str, cap: usize) -> Vec<String> {
+    brace_expand_checked(path, cap).unwrap_or_else(|_| vec![path.to_string()])
+}
+
+fn expand_brace_lists(
+    word: &str,
+    cap: usize,
+    out: &mut Vec<String>,
+) -> Result<(), BraceExpansionError> {
+    if let Some(group) = find_expandable_group(word)? {
+        let prefix = &word[..group.open];
+        let suffix = &word[group.close + 1..];
+        match group.members {
+            BraceMembers::List(parts) => {
+                for part in parts {
+                    let combined = format!("{prefix}{part}{suffix}");
+                    expand_brace_lists(&combined, cap, out)?;
+                }
+            }
+            BraceMembers::Sequence(sequence) => {
+                sequence.expand(|part| {
+                    let combined = format!("{prefix}{part}{suffix}");
+                    expand_brace_lists(&combined, cap, out)
+                })?;
+            }
+        }
+        return Ok(());
+    }
+
+    if out.len() >= cap {
+        return Err(BraceExpansionError::LimitExceeded { cap });
+    }
+    out.push(word.to_string());
+    Ok(())
+}
+
+struct BraceGroup<'a> {
+    open: usize,
+    close: usize,
+    members: BraceMembers<'a>,
+}
+
+enum BraceMembers<'a> {
+    List(Vec<&'a str>),
+    Sequence(BraceSequence),
+}
+
+enum BraceSequence {
+    Numeric { start: i64, end: i64 },
+    Alpha { start: u8, end: u8 },
+}
+
+impl BraceSequence {
+    fn expand(
+        &self,
+        mut emit: impl FnMut(String) -> Result<(), BraceExpansionError>,
+    ) -> Result<(), BraceExpansionError> {
+        match self {
+            Self::Numeric { start, end } => {
+                expand_sequence_values(*start as i128, *end as i128, |value| {
+                    emit(value.to_string())
+                })
+            }
+            Self::Alpha { start, end } => {
+                expand_sequence_values(*start as i128, *end as i128, |value| {
+                    emit((value as u8 as char).to_string())
+                })
+            }
+        }
+    }
+}
+
+/// Find the leftmost shell-expandable list group. An outer group with a
+/// top-level comma wins over its nested groups, matching Bash and avoiding
+/// duplicate synthetic expansions for `a{b,{c,d}}`. If an outer pair is
+/// literal, nested expandable groups are still considered (`{x{a,b}}`).
+fn find_expandable_group(word: &str) -> Result<Option<BraceGroup<'_>>, BraceExpansionError> {
+    find_expandable_group_in(word, 0, word.len())
+}
+
+fn find_expandable_group_in(
+    word: &str,
+    start: usize,
+    end: usize,
+) -> Result<Option<BraceGroup<'_>>, BraceExpansionError> {
+    let bytes = word.as_bytes();
+    let mut open = start;
+    while open < end {
+        if bytes[open] != b'{' || open.checked_sub(1).is_some_and(|i| bytes[i] == b'$') {
+            open += 1;
+            continue;
+        }
+        let Some(close) = matching_brace(bytes, open, end) else {
+            // An unmatched brace is a literal in the shell. A later balanced
+            // group may still expand, so continue scanning after this opener.
+            open += 1;
+            continue;
+        };
+        let inner = &word[open + 1..close];
+        if let Some(parts) = split_top_level_commas(inner) {
+            return Ok(Some(BraceGroup {
+                open,
+                close,
+                members: BraceMembers::List(parts),
+            }));
+        }
+        match parse_shell_sequence(inner) {
+            SequenceParse::Stable(sequence) => {
+                return Ok(Some(BraceGroup {
+                    open,
+                    close,
+                    members: BraceMembers::Sequence(sequence),
+                }));
+            }
+            SequenceParse::VersionDependent => {
+                return Err(BraceExpansionError::VersionDependentSequence {
+                    expression: inner.to_string(),
+                });
+            }
+            SequenceParse::Literal => {}
+        }
+        if let Some(nested) = find_expandable_group_in(word, open + 1, close)? {
+            return Ok(Some(nested));
+        }
+        open = close + 1;
+    }
+    Ok(None)
+}
+
+fn matching_brace(bytes: &[u8], open: usize, end: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = open + 1;
+    while i < end {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_top_level_commas(inner: &str) -> Option<Vec<&str>> {
+    let bytes = inner.as_bytes();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut parts = Vec::new();
+    for (i, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        parts.push(&inner[start..]);
+        Some(parts)
+    }
+}
+
+enum SequenceParse {
+    Stable(BraceSequence),
+    VersionDependent,
+    Literal,
+}
+
+/// Expand only the subset whose behavior is stable across Bash 3.2 and current
+/// Bash: two endpoints, both plain decimal integers (an ordinary leading `-` is
+/// allowed, but zero-padded/explicit-plus spellings are not), or two single
+/// ASCII letters in the same case. Optional increments, padding, signed zero,
+/// and cross-case alpha ranges vary by version and are uncheckable.
+fn parse_shell_sequence(inner: &str) -> SequenceParse {
+    let parts: Vec<&str> = inner.split("..").collect();
+    if parts.len() == 3 && valid_endpoint_pair(parts[0], parts[1]) {
+        return SequenceParse::VersionDependent;
+    }
+    if parts.len() != 2 {
+        return SequenceParse::Literal;
+    }
+    if plain_integer(parts[0]) && plain_integer(parts[1]) {
+        let (Ok(start), Ok(end)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) else {
+            return SequenceParse::VersionDependent;
+        };
+        return SequenceParse::Stable(BraceSequence::Numeric { start, end });
+    }
+    if is_single_ascii_alpha(parts[0]) && is_single_ascii_alpha(parts[1]) {
+        let start = parts[0].as_bytes()[0];
+        let end = parts[1].as_bytes()[0];
+        if start.is_ascii_lowercase() == end.is_ascii_lowercase() {
+            return SequenceParse::Stable(BraceSequence::Alpha { start, end });
+        }
+        return SequenceParse::VersionDependent;
+    }
+    if valid_endpoint_pair(parts[0], parts[1]) {
+        SequenceParse::VersionDependent
+    } else {
+        SequenceParse::Literal
+    }
+}
+
+fn is_single_ascii_alpha(value: &str) -> bool {
+    value.len() == 1 && value.as_bytes()[0].is_ascii_alphabetic()
+}
+
+fn plain_integer(value: &str) -> bool {
+    if value == "-0" {
+        return false;
+    }
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    digits == "0" || !digits.starts_with('0')
+}
+
+fn valid_endpoint_pair(start: &str, end: &str) -> bool {
+    (start.parse::<i64>().is_ok() && end.parse::<i64>().is_ok())
+        || (is_single_ascii_alpha(start) && is_single_ascii_alpha(end))
+}
+
+fn expand_sequence_values(
+    start: i128,
+    end: i128,
+    mut emit: impl FnMut(i128) -> Result<(), BraceExpansionError>,
+) -> Result<(), BraceExpansionError> {
+    let ascending = start <= end;
+    let delta = if ascending { 1 } else { -1 };
+    let mut value = start;
+    while if ascending {
+        value <= end
+    } else {
+        value >= end
+    } {
+        emit(value)?;
+        value += delta;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -262,12 +618,73 @@ mod tests {
             brace_expand("/etc/passwd", 64),
             vec!["/etc/passwd".to_string()]
         );
+        // outer-list ordering avoids duplicate expansion and handles nesting
+        assert_eq!(
+            brace_expand("a{b,{c,d}}e", 64),
+            vec!["abe".to_string(), "ace".to_string(), "ade".to_string()]
+        );
+        assert_eq!(
+            brace_expand("{x{a,b}}", 64),
+            vec!["{xa}".to_string(), "{xb}".to_string()]
+        );
     }
 
     #[test]
-    fn brace_expansion_is_capped() {
-        // a wide cartesian product must not explode past the cap
-        let r = brace_expand("{a,b,c}{a,b,c}{a,b,c}{a,b,c}", 10);
-        assert!(r.len() <= 10);
+    fn checked_brace_expansion_reports_cap_instead_of_truncating() {
+        assert_eq!(
+            brace_expand_checked("{a,b,c}{a,b,c}{a,b,c}{a,b,c}", 10),
+            Err(BraceExpansionError::LimitExceeded { cap: 10 })
+        );
+    }
+
+    #[test]
+    fn checked_brace_expansion_matches_version_stable_sequences() {
+        assert_eq!(
+            brace_expand_checked("/tmp/file{1..3}", 64).unwrap(),
+            vec!["/tmp/file1", "/tmp/file2", "/tmp/file3"]
+        );
+        assert_eq!(
+            brace_expand_checked("/tmp/file{3..1}", 64).unwrap(),
+            vec!["/tmp/file3", "/tmp/file2", "/tmp/file1"]
+        );
+        assert_eq!(
+            brace_expand_checked("/tmp/file{c..a}", 64).unwrap(),
+            vec!["/tmp/filec", "/tmp/fileb", "/tmp/filea"]
+        );
+        assert_eq!(
+            brace_expand_checked("~/.ss{g..i}/id_rsa", 64).unwrap(),
+            vec!["~/.ssg/id_rsa", "~/.ssh/id_rsa", "~/.ssi/id_rsa"]
+        );
+    }
+
+    #[test]
+    fn version_dependent_sequences_are_explicitly_uncheckable() {
+        for expression in [
+            "1..5..2", "1..5..-2", "5..1..2", "5..1..-2", "01..03", "-02..02", "+01..+03", "-0..2",
+            "a..e..2", "Z..b",
+        ] {
+            assert_eq!(
+                brace_expand_checked(&format!("/tmp/file{{{expression}}}"), 64),
+                Err(BraceExpansionError::VersionDependentSequence {
+                    expression: expression.into()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn checked_brace_sequence_reports_cap_instead_of_truncating() {
+        assert_eq!(
+            brace_expand_checked("/tmp/file{1..100}", 64),
+            Err(BraceExpansionError::LimitExceeded { cap: 64 })
+        );
+    }
+
+    #[test]
+    fn invalid_sequence_syntax_remains_literal() {
+        assert_eq!(
+            brace_expand_checked("/tmp/{foo..bar}", 64).unwrap(),
+            vec!["/tmp/{foo..bar}".to_string()]
+        );
     }
 }
