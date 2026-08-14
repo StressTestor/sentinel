@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-08-12
+last updated: 2026-08-14
 
 ## overview
 
@@ -93,6 +93,7 @@ sentinel/
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger
 ├── tests/
+│   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
 │       └── corpus/         test attack sequences (3 TOML files)
 ├── scripts/
@@ -101,6 +102,7 @@ sentinel/
 │   ├── package-smoke.sh    extracted-crate build/install/public-CLI smoke
 │   └── release-identity.sh tag/version/source/registry identity checks
 ├── docs/                   live attack demo + github pages site
+│   ├── policy-fp-audit-2026-08.md  enforcement-data audit behind policy revision 2026-08-07.1
 │   ├── index.html          write-up + attack matrix (published to stresstestor.github.io/sentinel)
 │   ├── target.html         poisoned "CloudSync" docs page with 20+ embedded injections
 │   ├── run-attacks.sh      replays every injection through `sentinel evaluate`
@@ -410,7 +412,7 @@ silently overwritten. writes are atomic and mode 0600 on Unix.
 
 ### policy migration
 
-the bundled default carries revision `2026-07-28`. `policy-migrate --check` is
+the bundled default carries revision `2026-08-07.1`. `policy-migrate --check` is
 read-only and exits nonzero when migration is required. unversioned policies are
 matched only to known published generations; unknown revisions, ambiguous
 generations, and same-field conflicts stop without writing.
@@ -493,8 +495,9 @@ and Scorecard remain separate gates.
 
 ---
 
-last updated: 2026-08-12 by StressTestor. documents the shared typed
+last updated: 2026-08-14 by StressTestor. documents the shared typed
 evaluation pipeline, native Claude Code/Codex lifecycle reconciliation,
 trust-aware health checks, uncontained stateful audit, explicit MCP baselines,
 validated policy migration, completeness-aware shell matching, package preflight
-parsing, event-aware hook self-protection, and release/package evidence gates.
+parsing, event-aware hook self-protection, policy false-positive regressions,
+and release/package evidence gates.
