@@ -629,9 +629,16 @@ fn protected_top_level_witness(path: &str) -> Option<String> {
     if !path.starts_with('/')
         || !path
             .bytes()
-            .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b'{'))
+            .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b'{' | b'$' | b'`'))
     {
         return None;
+    }
+    let first_component = path.trim_start_matches('/').split('/').next()?;
+    if first_component.contains('$') || first_component.contains('`') {
+        // The hook cannot know the caller's shell variable state. An unset or
+        // empty parameter can splice a protected top-level name back together,
+        // so an unresolved expansion in this component is root-equivalent.
+        return Some("/".to_string());
     }
     if path
         .trim_start_matches('/')
@@ -968,6 +975,7 @@ fn normalize_wrapper_operands(tokens: &[String]) -> Vec<String> {
 /// marker already covered by the staged-fetch policy rule.
 fn normalize_staged_direct_exec(tokens: &mut [String]) {
     let mut outputs = Vec::new();
+    let mut cwd: Option<String> = None;
     let mut command_position = true;
     let mut i = 0;
     while i < tokens.len() {
@@ -990,7 +998,16 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
         }
 
         let fetcher = token_basename(&tokens[i]).to_string();
-        if matches!(fetcher.as_str(), "curl" | "wget" | "fetch") {
+        if fetcher == "cd" {
+            let mut target = i + 1;
+            if tokens.get(target).is_some_and(|token| token == "--") {
+                target += 1;
+            }
+            cwd = tokens
+                .get(target)
+                .filter(|target| !is_command_separator(target))
+                .and_then(|target| resolve_literal_directory(target, cwd.as_deref()));
+        } else if matches!(fetcher.as_str(), "curl" | "wget" | "fetch") {
             let mut curl_remote_name = false;
             let mut curl_urls = Vec::new();
             let mut arg = i + 1;
@@ -1033,7 +1050,7 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
                         .then(|| tokens[arg + 1].clone())
                 });
                 if let Some(output) = output {
-                    outputs.push(lexical_normalize(&output));
+                    outputs.push(resolve_execution_path(&output, cwd.as_deref()));
                     if option.starts_with("--") {
                         let short = if fetcher == "wget" { "-O" } else { "-o" };
                         tokens[arg] = if separate {
@@ -1050,11 +1067,11 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
                     curl_urls
                         .iter()
                         .filter_map(|url| remote_url_basename(url))
-                        .map(lexical_normalize),
+                        .map(|output| resolve_execution_path(output, cwd.as_deref())),
                 );
             }
         } else {
-            let candidate = lexical_normalize(&tokens[i]);
+            let candidate = resolve_execution_path(&tokens[i], cwd.as_deref());
             if outputs.iter().any(|output| output == &candidate) {
                 tokens[i] = "sh".into();
                 return;
@@ -1062,6 +1079,33 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
         }
         command_position = false;
         i += 1;
+    }
+}
+
+fn resolve_execution_path(path: &str, cwd: Option<&str>) -> String {
+    let lexical = lexical_normalize(path);
+    if lexical.starts_with('/') {
+        lexical
+    } else if let Some(cwd) = cwd {
+        lexical_normalize(&format!("{cwd}/{lexical}"))
+    } else {
+        lexical
+    }
+}
+
+fn resolve_literal_directory(target: &str, cwd: Option<&str>) -> Option<String> {
+    if target == "-"
+        || target.starts_with('~')
+        || target
+            .bytes()
+            .any(|byte| matches!(byte, b'$' | b'`' | b'*' | b'?' | b'[' | b'{'))
+    {
+        return None;
+    }
+    if target.starts_with('/') {
+        Some(lexical_normalize(target))
+    } else {
+        cwd.map(|cwd| lexical_normalize(&format!("{cwd}/{target}")))
     }
 }
 
@@ -1195,17 +1239,17 @@ fn normalize_python_subprocess_aliases(command: &str) -> String {
     );
     for alias in aliases {
         let escaped = regex::escape(&alias);
-        let direct = Regex::new(&format!(r"\b{escaped}\s*\.\s*({CALLS})\s*\("))
-            .expect("escaped alias regex");
-        out = direct.replace_all(&out, "subprocess.$1(").into_owned();
+        let direct =
+            Regex::new(&format!(r"\b{escaped}\s*\.\s*({CALLS})\b")).expect("escaped alias regex");
+        out = direct.replace_all(&out, "subprocess.$1").into_owned();
         let getattr = Regex::new(&format!(
-            r#"getattr\s*\(\s*{escaped}\s*,\s*['"]({CALLS})['"]\s*\)\s*\("#
+            r#"getattr\s*\(\s*{escaped}\s*,\s*['"]({CALLS})['"]\s*\)"#
         ))
         .expect("escaped alias regex");
-        out = getattr.replace_all(&out, "subprocess.$1(").into_owned();
+        out = getattr.replace_all(&out, "subprocess.$1").into_owned();
     }
 
-    for (primitive, callable) in python_from_imports(command, "subprocess")
+    let mut callable_aliases: Vec<(String, String)> = python_from_imports(command, "subprocess")
         .into_iter()
         .filter(|(primitive, _)| {
             matches!(
@@ -1213,7 +1257,52 @@ fn normalize_python_subprocess_aliases(command: &str) -> String {
                 "run" | "Popen" | "call" | "check_call" | "check_output"
             )
         })
-    {
+        .collect();
+    let assigned = Regex::new(&format!(r"\b([A-Za-z_]\w*)\s*=\s*subprocess\.({CALLS})\b"))
+        .expect("static callable regex");
+    let assignment_source = out.clone();
+    callable_aliases.extend(
+        assigned
+            .captures_iter(&assignment_source)
+            .filter_map(|capture| {
+                Some((
+                    capture.get(2)?.as_str().to_string(),
+                    capture.get(1)?.as_str().to_string(),
+                ))
+            }),
+    );
+
+    // Propagate simple callable-assignment chains (`q = r`) to a bounded
+    // fixed point before rewriting calls. Beyond the cap, fail closed by
+    // emitting the dynamic-argv witness handled below.
+    let mut cursor = 0;
+    while cursor < callable_aliases.len() {
+        if callable_aliases.len() >= 64 {
+            out.push_str(" subprocess.run(dynamic_argv)");
+            break;
+        }
+        let (primitive, source) = callable_aliases[cursor].clone();
+        let alias_assignment = Regex::new(&format!(
+            r"\b([A-Za-z_]\w*)\s*=\s*{}\b",
+            regex::escape(&source)
+        ))
+        .expect("escaped callable regex");
+        let alias_source = out.clone();
+        for capture in alias_assignment.captures_iter(&alias_source) {
+            let Some(alias) = capture.get(1).map(|value| value.as_str().to_string()) else {
+                continue;
+            };
+            if alias != source
+                && !callable_aliases
+                    .iter()
+                    .any(|(_, existing)| existing == &alias)
+            {
+                callable_aliases.push((primitive.clone(), alias));
+            }
+        }
+        cursor += 1;
+    }
+    for (primitive, callable) in callable_aliases {
         let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
             .expect("escaped alias regex");
         out = call
@@ -1670,12 +1759,15 @@ mod tests {
     fn normalize_canonicalizes_protected_top_level_shell_patterns() {
         let system = r"rm\s+-rf\s+/(?:usr|boot)(?:/|\s|$)";
         let mount = r"rm\s+-rf\s+/mnt(?:/[^/\s]+)?/?(?:\s|$)";
+        let root = r"rm\s+-rf\s+/$";
         assert!(matches_command(system, "rm -rf /usr*"));
         assert!(matches_command(system, "rm -rf /bo?t"));
         assert!(matches_command(system, "rm -rf /usr{,local}"));
         assert!(matches_command(mount, "rm -rf /mn?"));
+        assert!(matches_command(root, "rm -rf /u${UNSET}sr"));
         assert!(!matches_command(system, "rm -rf /scratch*"));
         assert!(!matches_command(mount, "rm -rf /mnt*/volume/project"));
+        assert!(!matches_command(mount, "rm -rf /mnt/${JOB}/project"));
     }
 
     #[cfg(unix)]
@@ -1760,6 +1852,18 @@ mod tests {
         .ends_with(marker));
         assert!(normalize_command(
             "python3 -c \"import subprocess; subprocess.run(['git'], executable='/'+'bin/sh')\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; r=subprocess.run; r([name,'status'])\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; r=subprocess.run; q=r; q([name,'status'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"import subprocess; r=subprocess.run; r(['git','status'])\""
         )
         .ends_with(marker));
     }
