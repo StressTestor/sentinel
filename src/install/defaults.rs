@@ -487,14 +487,15 @@ pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|boot|lib|lib64|usr|etc|roo
 action = "block"
 reason = "recursive deletion of a system tree"
 
-# whole home / whole volume / top-level tree, at depth 1-2 ONLY. depth >=3 stays
-# allowed - that is what keeps /Volumes/<disk>/<project>, /private/tmp/.../scratchpad
-# and /var/folders/.../T/tmp.* cleanup working. do NOT widen this to any depth,
-# a catch-all absolute-path match is the defect this replaces.
+# whole home / whole volume / mount root / top-level tree, at depth 1-2 ONLY.
+# depth >=3 stays allowed - that is what keeps /Volumes/<disk>/<project>,
+# /mnt/<volume>/<project>, /private/tmp/.../scratchpad and
+# /var/folders/.../T/tmp.* cleanup working. do NOT widen this to any depth, a
+# catch-all absolute-path match is the defect this replaces.
 [[deny.commands]]
-pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)'
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|mnt|media|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)'
 action = "block"
-reason = "recursive deletion of an entire home directory, volume, or top-level tree"
+reason = "recursive deletion of an entire home directory, volume, mount root, or top-level tree"
 
 # credential dirs in BOTH forms. the absolute /Users/<name>/.ssh form was only
 # ever covered as a side effect of the catch-all, so narrowing without this
@@ -592,10 +593,11 @@ pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\
 action = "block"
 reason = "inline interpreter script executing a shell string / hijacking fds / evaluating dynamic code (payload laundering)"
 
-# list-argv subprocess calls stay allowed for fixed trusted CLIs, but a shell as
-# argv[0] is still shell-string execution and restores arbitrary payload parsing.
+# literal list/tuple argv subprocess calls stay allowed for fixed trusted CLIs,
+# but a shell as argv[0] is still shell-string execution and restores arbitrary
+# payload parsing. The optional `args=` spelling is equivalent.
 [[deny.commands]]
-pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*\[\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]'
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*(?:args\s*=\s*)?(?:\[|\()\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]'
 action = "block"
 reason = "inline interpreter subprocess argv launches a shell (payload laundering)"
 

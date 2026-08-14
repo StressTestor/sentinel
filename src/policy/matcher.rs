@@ -497,13 +497,28 @@ fn lexical_normalize(p: &str) -> String {
 /// escapes + `${IFS}` desugaring), so `$'\x72\x6d' -rf /` and `cat${IFS}/etc/...`
 /// can't dodge a rule. Additive: the raw check runs first and is never replaced.
 pub fn matches_command(pattern: &str, command: &str) -> bool {
-    let normalized = normalize_command(command);
-    let decoded = crate::common::shell::decode_obfuscation(command);
     match Regex::new(pattern) {
         Ok(re) => {
-            re.is_match(command)
-                || (normalized != command && re.is_match(&normalized))
-                || decoded.as_deref().is_some_and(|d| re.is_match(d))
+            if re.is_match(command) {
+                return true;
+            }
+            let normalized = normalize_command(command);
+            if normalized != command && re.is_match(&normalized) {
+                return true;
+            }
+            // Filesystem and lexical resolution can intentionally diverge only
+            // for rm operands with dot components. Keep the lexical candidate
+            // additive without doubling normalization work for every ordinary
+            // command/rule pair.
+            if command.contains("rm") && command.contains("/.") {
+                let lexical = normalize_command_inner(command, false);
+                if lexical != command && lexical != normalized && re.is_match(&lexical) {
+                    return true;
+                }
+            }
+            crate::common::shell::decode_obfuscation(command)
+                .as_deref()
+                .is_some_and(|decoded| re.is_match(decoded))
         }
         Err(_) => {
             tracing::warn!("invalid command pattern: {pattern}");
@@ -516,28 +531,19 @@ pub fn matches_command(pattern: &str, command: &str) -> bool {
 /// quote-aware words, lexical absolute paths, destructive rm flags, modeled
 /// wrapper operands, and exactly correlated Python network aliases.
 fn normalize_command(cmd: &str) -> String {
+    normalize_command_inner(cmd, true)
+}
+
+fn normalize_command_inner(cmd: &str, resolve_filesystem: bool) -> String {
     let Some(parsed) = shell_tokens(cmd) else {
         return cmd.to_string();
     };
-    let tokens: Vec<String> = parsed
-        .into_iter()
-        .map(|token| {
-            // Pathname traversal processes dot segments before the final target
-            // is touched. Match the lexical target too, so /./usr, /../../etc,
-            // and /./* cannot evade protected-target rules. Existing symlinks
-            // may change .. semantics; raw matching remains additive, and
-            // filesystem identity is enforced independently by path rules.
-            if token.starts_with('/') {
-                lexical_normalize(&token)
-            } else {
-                token
-            }
-        })
-        .collect();
+    let mut tokens = parsed;
+    normalize_recursive_rm_paths(&mut tokens, resolve_filesystem);
     let mut out: Vec<String> = Vec::with_capacity(tokens.len());
     let mut i = 0;
     while i < tokens.len() {
-        if tokens[i] == "rm" {
+        if token_basename(&tokens[i]) == "rm" {
             let mut j = i + 1;
             let (mut recursive, mut force) = (false, false);
             while j < tokens.len() && tokens[j].starts_with('-') {
@@ -567,6 +573,64 @@ fn normalize_command(cmd: &str) -> String {
     let mut wrapper_normalized = normalize_wrapper_operands(&out);
     normalize_staged_direct_exec(&mut wrapper_normalized);
     normalize_python_network_aliases(&wrapper_normalized.join(" "))
+}
+
+/// Normalize only operands of a recognized recursive-force `rm`. Filesystem
+/// resolution must see the original spelling: resolving `..` lexically first
+/// is wrong when an earlier component is a symlink. If the complete operand is
+/// not present (including a glob tail), resolve the longest existing prefix and
+/// re-append the unresolved components. The lexical fallback preserves coverage
+/// for ordinary nonexistent paths without making unrelated commands depend on
+/// host filesystem state.
+fn normalize_recursive_rm_paths(tokens: &mut [String], resolve_filesystem: bool) {
+    let mut i = 0;
+    while i < tokens.len() {
+        if token_basename(&tokens[i]) != "rm" {
+            i += 1;
+            continue;
+        }
+
+        let mut j = i + 1;
+        let (mut recursive, mut force) = (false, false);
+        while j < tokens.len() && tokens[j].starts_with('-') {
+            let option = &tokens[j];
+            let long = option.starts_with("--");
+            recursive |= (long && option == "--recursive")
+                || (!long && (option.contains('r') || option.contains('R')));
+            force |= (long && option == "--force") || (!long && option.contains('f'));
+            j += 1;
+        }
+
+        if recursive && force {
+            while j < tokens.len() && !is_command_separator(&tokens[j]) {
+                if tokens[j].starts_with('/') {
+                    tokens[j] = if resolve_filesystem {
+                        canonicalize_existing_path_prefix(&tokens[j])
+                            .unwrap_or_else(|| lexical_normalize(&tokens[j]))
+                    } else {
+                        lexical_normalize(&tokens[j])
+                    };
+                }
+                j += 1;
+            }
+        }
+        i = j.max(i + 1);
+    }
+}
+
+fn canonicalize_existing_path_prefix(path: &str) -> Option<String> {
+    let mut prefix = std::path::Path::new(path);
+    let mut unresolved = Vec::new();
+    loop {
+        if let Ok(mut resolved) = std::fs::canonicalize(prefix) {
+            for component in unresolved.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved.to_str().map(str::to_owned);
+        }
+        unresolved.push(prefix.file_name()?.to_os_string());
+        prefix = prefix.parent()?;
+    }
 }
 
 fn token_basename(token: &str) -> &str {
@@ -842,15 +906,46 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
             continue;
         }
 
-        if matches!(token_basename(&tokens[i]), "curl" | "wget" | "fetch") {
+        let fetcher = token_basename(&tokens[i]).to_string();
+        if matches!(fetcher.as_str(), "curl" | "wget" | "fetch") {
             let mut arg = i + 1;
             while arg < tokens.len() && !is_command_separator(&tokens[arg]) {
-                if matches!(tokens[arg].as_str(), "-o" | "-O" | "--output")
-                    && arg + 1 < tokens.len()
-                    && !is_command_separator(&tokens[arg + 1])
-                {
-                    outputs.push(lexical_normalize(&tokens[arg + 1]));
-                    break;
+                let option = tokens[arg].clone();
+                let (separate, attached) = match fetcher.as_str() {
+                    "curl" => (
+                        matches!(option.as_str(), "-o" | "--output"),
+                        option
+                            .strip_prefix("--output=")
+                            .or_else(|| option.strip_prefix("-o").filter(|path| !path.is_empty())),
+                    ),
+                    "wget" => (
+                        matches!(option.as_str(), "-O" | "--output-document"),
+                        option
+                            .strip_prefix("--output-document=")
+                            .or_else(|| option.strip_prefix("-O").filter(|path| !path.is_empty())),
+                    ),
+                    "fetch" => (
+                        matches!(option.as_str(), "-o" | "--output"),
+                        option
+                            .strip_prefix("--output=")
+                            .or_else(|| option.strip_prefix("-o").filter(|path| !path.is_empty())),
+                    ),
+                    _ => unreachable!("fetcher was filtered above"),
+                };
+                let output = attached.map(str::to_owned).or_else(|| {
+                    (separate && arg + 1 < tokens.len() && !is_command_separator(&tokens[arg + 1]))
+                        .then(|| tokens[arg + 1].clone())
+                });
+                if let Some(output) = output {
+                    outputs.push(lexical_normalize(&output));
+                    if option.starts_with("--") {
+                        let short = if fetcher == "wget" { "-O" } else { "-o" };
+                        tokens[arg] = if separate {
+                            short.to_string()
+                        } else {
+                            format!("{short}{output}")
+                        };
+                    }
                 }
                 arg += 1;
             }
@@ -1280,6 +1375,25 @@ mod tests {
             system,
             "rm -rf /private/tmp/project/target"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_prefers_symlink_resolved_rm_target_over_lexical_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let safe = root.path().join("safe");
+        std::fs::create_dir_all(safe.join("deep")).unwrap();
+        std::fs::create_dir(safe.join("etc")).unwrap();
+        let link = root.path().join("link");
+        symlink(safe.join("deep"), &link).unwrap();
+
+        let normalized = normalize_command(&format!("rm -rf {}/../etc", link.display()));
+        let resolved = std::fs::canonicalize(safe.join("etc")).unwrap();
+        let lexical = root.path().join("etc");
+        assert!(normalized.contains(resolved.to_str().unwrap()));
+        assert!(!normalized.contains(lexical.to_str().unwrap()));
     }
 
     #[test]

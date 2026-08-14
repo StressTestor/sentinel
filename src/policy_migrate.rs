@@ -203,7 +203,7 @@ const ADDED_AFTER_2026_07_28_1: &[(&str, RuleSection)] = &[
         RuleSection::DenyCommands,
     ),
     (
-        r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)"#,
+        r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|mnt|media|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)"#,
         RuleSection::DenyCommands,
     ),
     (
@@ -223,7 +223,7 @@ const ADDED_AFTER_2026_07_28_1: &[(&str, RuleSection)] = &[
         RuleSection::DenyCommands,
     ),
     (
-        r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*\[\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]"#,
+        r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*(?:args\s*=\s*)?(?:\[|\()\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]"#,
         RuleSection::DenyCommands,
     ),
 ];
