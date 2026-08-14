@@ -991,9 +991,22 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
 
         let fetcher = token_basename(&tokens[i]).to_string();
         if matches!(fetcher.as_str(), "curl" | "wget" | "fetch") {
+            let mut curl_remote_name = false;
+            let mut curl_urls = Vec::new();
             let mut arg = i + 1;
             while arg < tokens.len() && !is_command_separator(&tokens[arg]) {
                 let option = tokens[arg].clone();
+                if fetcher == "curl" {
+                    curl_remote_name |= matches!(
+                        option.as_str(),
+                        "-O" | "--remote-name" | "--remote-name-all"
+                    ) || (option.starts_with('-')
+                        && !option.starts_with("--")
+                        && option[1..].contains('O'));
+                    if option.starts_with("http://") || option.starts_with("https://") {
+                        curl_urls.push(option.clone());
+                    }
+                }
                 let (separate, attached) = match fetcher.as_str() {
                     "curl" => (
                         matches!(option.as_str(), "-o" | "--output"),
@@ -1032,6 +1045,14 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
                 }
                 arg += 1;
             }
+            if curl_remote_name {
+                outputs.extend(
+                    curl_urls
+                        .iter()
+                        .filter_map(|url| remote_url_basename(url))
+                        .map(lexical_normalize),
+                );
+            }
         } else {
             let candidate = lexical_normalize(&tokens[i]);
             if outputs.iter().any(|output| output == &candidate) {
@@ -1044,8 +1065,14 @@ fn normalize_staged_direct_exec(tokens: &mut [String]) {
     }
 }
 
-/// Correlate declared Python network-module aliases with their later calls
-/// before restoring the canonical primitive. This avoids bare-word matching.
+fn remote_url_basename(url: &str) -> Option<&str> {
+    let path = url.split(['?', '#']).next()?.trim_end_matches('/');
+    let basename = path.rsplit('/').next()?;
+    (!basename.is_empty()).then_some(basename)
+}
+
+/// Correlate declared Python network/subprocess aliases with their later calls
+/// before restoring canonical primitives. This avoids bare-word matching.
 fn normalize_python_network_aliases(command: &str) -> String {
     let mut out = command.to_string();
     let import_alias =
@@ -1068,21 +1095,10 @@ fn normalize_python_network_aliases(command: &str) -> String {
         out = getattr.replace_all(&out, "socket.$1(").into_owned();
     }
 
-    let from_import = Regex::new(
-        r"\bfrom\s+socket\s+import\s+(socket|create_connection)(?:\s+as\s+([A-Za-z_]\w*))?",
-    )
-    .expect("static regex");
-    let imports: Vec<(String, String)> = from_import
-        .captures_iter(command)
-        .filter_map(|capture| {
-            let primitive = capture.get(1)?.as_str().to_string();
-            let callable = capture
-                .get(2)
-                .map_or_else(|| primitive.clone(), |alias| alias.as_str().to_string());
-            Some((primitive, callable))
-        })
-        .collect();
-    for (primitive, callable) in imports {
+    for (primitive, callable) in python_from_imports(command, "socket")
+        .into_iter()
+        .filter(|(primitive, _)| matches!(primitive.as_str(), "socket" | "create_connection"))
+    {
         let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
             .expect("escaped alias regex");
         out = call
@@ -1118,9 +1134,23 @@ fn normalize_python_network_aliases(command: &str) -> String {
         Regex::new(r#"__import__\s*\(\s*['"]requests['"]\s*\)"#).expect("static regex");
     out = dynamic_import.replace_all(&out, "requests").into_owned();
 
-    let from_requests =
-        Regex::new(r"\bfrom\s+requests\s+import\s+([^;\n]+)").expect("static regex");
-    let imports: Vec<(String, String)> = from_requests
+    for (primitive, callable) in python_from_imports(command, "requests") {
+        let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
+            .expect("escaped alias regex");
+        out = call
+            .replace_all(&out, format!("requests.{primitive}("))
+            .into_owned();
+    }
+    normalize_python_subprocess_aliases(&out)
+}
+
+fn python_from_imports(command: &str, module: &str) -> Vec<(String, String)> {
+    let from_import = Regex::new(&format!(
+        r"\bfrom\s+{}\s+import\s+([^;\n]+)",
+        regex::escape(module)
+    ))
+    .expect("escaped module regex");
+    from_import
         .captures_iter(command)
         .filter_map(|capture| capture.get(1))
         .flat_map(|clause| {
@@ -1144,13 +1174,58 @@ fn normalize_python_network_aliases(command: &str) -> String {
                 })
                 .collect::<Vec<_>>()
         })
-        .collect();
-    for (primitive, callable) in imports {
+        .collect()
+}
+
+fn normalize_python_subprocess_aliases(command: &str) -> String {
+    const CALLS: &str = "run|Popen|call|check_call|check_output";
+    let dynamic_import =
+        Regex::new(r#"__import__\s*\(\s*['"]subprocess['"]\s*\)"#).expect("static regex");
+    let mut out = dynamic_import
+        .replace_all(command, "subprocess")
+        .into_owned();
+
+    let import_alias =
+        Regex::new(r"\bimport\s+subprocess\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let mut aliases = vec!["subprocess".to_string()];
+    aliases.extend(
+        import_alias
+            .captures_iter(command)
+            .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string())),
+    );
+    for alias in aliases {
+        let escaped = regex::escape(&alias);
+        let direct = Regex::new(&format!(r"\b{escaped}\s*\.\s*({CALLS})\s*\("))
+            .expect("escaped alias regex");
+        out = direct.replace_all(&out, "subprocess.$1(").into_owned();
+        let getattr = Regex::new(&format!(
+            r#"getattr\s*\(\s*{escaped}\s*,\s*['"]({CALLS})['"]\s*\)\s*\("#
+        ))
+        .expect("escaped alias regex");
+        out = getattr.replace_all(&out, "subprocess.$1(").into_owned();
+    }
+
+    for (primitive, callable) in python_from_imports(command, "subprocess")
+        .into_iter()
+        .filter(|(primitive, _)| {
+            matches!(
+                primitive.as_str(),
+                "run" | "Popen" | "call" | "check_call" | "check_output"
+            )
+        })
+    {
         let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
             .expect("escaped alias regex");
         out = call
-            .replace_all(&out, format!("requests.{primitive}("))
+            .replace_all(&out, format!("subprocess.{primitive}("))
             .into_owned();
+    }
+
+    if Regex::new(r"\bfrom\s+subprocess\s+import\s+\*")
+        .expect("static regex")
+        .is_match(command)
+    {
+        out.push_str(" subprocess.run(dynamic_argv)");
     }
     out
 }
@@ -1169,14 +1244,63 @@ fn is_python_identifier(value: &str) -> bool {
 fn normalize_dynamic_subprocess_argv(command: &str) -> String {
     let call = Regex::new(r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(")
         .expect("static regex");
-    if call
-        .find_iter(command)
-        .any(|matched| !starts_with_fixed_literal_argv(&command[matched.end()..]))
-    {
+    let dynamic = call.find_iter(command).any(|matched| {
+        let Some(arguments) = python_call_arguments(&command[matched.end()..]) else {
+            return true;
+        };
+        !starts_with_fixed_literal_argv(arguments) || has_dynamic_executable(arguments)
+    });
+    if dynamic {
         format!("{command} subprocess.run(['sh'])")
     } else {
         command.to_string()
     }
+}
+
+fn python_call_arguments(after_open: &str) -> Option<&str> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, ch) in after_open.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&after_open[..offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn has_dynamic_executable(arguments: &str) -> bool {
+    let executable = Regex::new(r"\bexecutable\s*=\s*").expect("static regex");
+    let dynamic = executable.find_iter(arguments).any(|matched| {
+        let value = arguments[matched.end()..].trim_start();
+        if let Some(rest) = value.strip_prefix("None") {
+            return !rest.trim_start().starts_with(',') && !rest.trim().is_empty();
+        }
+        let Some(closing) = quoted_literal_end(value) else {
+            return true;
+        };
+        let trailing = value[closing..].trim_start();
+        !trailing.is_empty() && !trailing.starts_with(',')
+    });
+    dynamic
 }
 
 fn starts_with_fixed_literal_argv(arguments: &str) -> bool {
@@ -1192,29 +1316,29 @@ fn starts_with_fixed_literal_argv(arguments: &str) -> bool {
         return false;
     };
     value = value[open.len_utf8()..].trim_start();
-    let Some(quote) = value.chars().next().filter(|c| matches!(c, '\'' | '"')) else {
-        return false;
-    };
-
-    let mut escaped = false;
-    let mut closing = None;
-    for (offset, ch) in value[quote.len_utf8()..].char_indices() {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == quote {
-            closing = Some(quote.len_utf8() + offset + ch.len_utf8());
-            break;
-        }
-    }
-    let Some(closing) = closing else {
+    let Some(closing) = quoted_literal_end(value) else {
         return false;
     };
     matches!(
         value[closing..].trim_start().chars().next(),
         Some(',' | ']' | ')')
     )
+}
+
+fn quoted_literal_end(value: &str) -> Option<usize> {
+    let quote = value.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+
+    let mut escaped = false;
+    for (offset, ch) in value[quote.len_utf8()..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return Some(quote.len_utf8() + offset + ch.len_utf8());
+        }
+    }
+    None
 }
 
 /// Match raw params against a secret regex pattern, testing BOTH the raw
@@ -1586,6 +1710,10 @@ mod tests {
         ));
         assert!(matches_command(
             socket,
+            "python3 -c \"from socket import gethostname, socket as S; S()\""
+        ));
+        assert!(matches_command(
+            socket,
             "python3 -c \"__import__('socket').socket()\""
         ));
         assert!(!matches_command(
@@ -1620,6 +1748,18 @@ mod tests {
         .ends_with(marker));
         assert!(!normalize_command(
             "python3 -c \"import subprocess; subprocess.run(args=('git','status'))\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"from subprocess import run as r; r([name,'status'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"from subprocess import run as r; r(['git','status'])\""
+        )
+        .ends_with(marker));
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; subprocess.run(['git'], executable='/'+'bin/sh')\""
         )
         .ends_with(marker));
     }
