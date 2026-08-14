@@ -1024,6 +1024,12 @@ fn normalize_python_network_aliases(command: &str) -> String {
         ))
         .expect("escaped alias regex");
         out = call.replace_all(&out, "requests.$1(").into_owned();
+        let getattr = Regex::new(&format!(
+            r#"getattr\s*\(\s*{}\s*,\s*['"]([A-Za-z_]\w*)['"]\s*\)\s*\("#,
+            regex::escape(&alias)
+        ))
+        .expect("escaped alias regex");
+        out = getattr.replace_all(&out, "requests.$1(").into_owned();
     }
     let dynamic_import =
         Regex::new(r#"__import__\s*\(\s*['"]requests['"]\s*\)"#).expect("static regex");

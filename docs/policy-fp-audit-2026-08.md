@@ -61,7 +61,7 @@ absolute form, and wildcard sweeps over home dot-entries.
 existing absolute operands are resolved before classification, so a symlinked
 prefix followed by `..` cannot hide the real target. `/mnt` and `/media` use the
 same bounded depth rule as `/Volumes`; project paths below a named mount remain
-allowed.
+allowed. the exact Linux `/tmp` root is protected without matching `/tmp/<job>`.
 
 that last one closes a hole the old policy never covered: `rm -rf ~/.c*` expands
 to `.claude` and `.sentinel` but carries neither literal token, so the
@@ -87,7 +87,8 @@ independent because each is load-bearing alone - the fetch side is the only rule
 in the policy covering raw interpreter network egress, and the exec side is what
 stops base64 payload laundering, which otherwise bypasses every other
 `deny.commands` regex at once. fixed list and tuple argv calls remain allowed;
-either literal form blocks when argv[0] is a shell.
+either literal form blocks when argv[0] is a shell, and a shell-valued Python
+`executable=` override blocks as the same execution primitive.
 
 ### 3. staged fetch-then-run (1 event)
 
@@ -126,8 +127,8 @@ every claim below was produced by running the real binary, not by reading regexe
    49 decisions flip: 32 block→allow (all manually confirmed benign: worktree and
    temp cleanup, `node_modules` removal, and one download-then-`wc -l`), 15
    block→block under a renamed rule, 2 block→warn. no allow→block.
-4. **explicit test cases** - 92 attack cases must still block and 35 benign
-   controls must pass. all 127 pass.
+4. **explicit test cases** - 95 attack cases must still block and 37 benign
+   controls must pass. all 132 pass.
 
 the harness points `HOME` at a throwaway policy directory, so nothing touches the
 live guard. `~`-prefixed path patterns are rewritten to the literal home path in

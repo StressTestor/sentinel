@@ -487,6 +487,13 @@ pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|boot|lib|lib64|usr|etc|roo
 action = "block"
 reason = "recursive deletion of a system tree"
 
+# Linux /tmp is commonly a real root directory; macOS resolves it through
+# /private/tmp. Protect only the root itself so per-job cleanup remains allowed.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/tmp/?(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "recursive deletion of the machine-wide temporary root"
+
 # whole home / whole volume / mount root / top-level tree, at depth 1-2 ONLY.
 # depth >=3 stays allowed - that is what keeps /Volumes/<disk>/<project>,
 # /mnt/<volume>/<project>, /private/tmp/.../scratchpad and
@@ -597,7 +604,7 @@ reason = "inline interpreter script executing a shell string / hijacking fds / e
 # but a shell as argv[0] is still shell-string execution and restores arbitrary
 # payload parsing. The optional `args=` spelling is equivalent.
 [[deny.commands]]
-pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*(?:args\s*=\s*)?(?:\[|\()\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]'
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*(?:(?:args\s*=\s*)?(?:\[|\()\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]|.*?\bexecutable\s*=\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"])'
 action = "block"
 reason = "inline interpreter subprocess argv launches a shell (payload laundering)"
 
