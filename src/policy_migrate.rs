@@ -199,7 +199,7 @@ const CURRENT_TO_2026_07_28_1: &[RuleChange] = &[
 
 const ADDED_AFTER_2026_07_28_1: &[(&str, RuleSection)] = &[
     (
-        r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|usr|etc|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)"#,
+        r#"rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|boot|lib|lib64|usr|etc|root|run|srv|proc|sys|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)"#,
         RuleSection::DenyCommands,
     ),
     (
@@ -220,6 +220,10 @@ const ADDED_AFTER_2026_07_28_1: &[(&str, RuleSection)] = &[
     ),
     (
         r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(os\.system\(|os\.popen\(|os\.dup2|pty\.spawn|shell\s*=\s*True|child_process|\bexecSync\(|\bexecFileSync\(|\bspawnSync\(|(^|[^.\w])exec\(|(^|[^.\w])eval\(|IO\.popen|(^|[^.\w])system\()"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*\[\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]"#,
         RuleSection::DenyCommands,
     ),
 ];

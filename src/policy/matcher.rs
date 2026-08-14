@@ -564,7 +564,8 @@ fn normalize_command(cmd: &str) -> String {
             i += 1;
         }
     }
-    let wrapper_normalized = normalize_wrapper_operands(&out);
+    let mut wrapper_normalized = normalize_wrapper_operands(&out);
+    normalize_staged_direct_exec(&mut wrapper_normalized);
     normalize_python_network_aliases(&wrapper_normalized.join(" "))
 }
 
@@ -594,6 +595,26 @@ fn is_command_prefix(token: &str) -> bool {
         || token.starts_with('>')
         || (token.chars().next().is_some_and(|c| c.is_ascii_digit())
             && (token.contains('<') || token.contains('>')))
+}
+
+fn is_modeled_wrapper(token: &str) -> bool {
+    matches!(
+        token_basename(token),
+        "env"
+            | "nice"
+            | "nohup"
+            | "setsid"
+            | "stdbuf"
+            | "sudo"
+            | "doas"
+            | "time"
+            | "timeout"
+            | "ionice"
+            | "command"
+            | "exec"
+            | "xargs"
+            | "eval"
+    )
 }
 
 /// Return whether a modeled wrapper option consumes the following token.
@@ -747,24 +768,7 @@ fn normalize_wrapper_operands(tokens: &[String]) -> Vec<String> {
         }
         if command_position {
             let wrapper = token_basename(token);
-            let modeled = matches!(
-                wrapper,
-                "env"
-                    | "nice"
-                    | "nohup"
-                    | "setsid"
-                    | "stdbuf"
-                    | "sudo"
-                    | "doas"
-                    | "time"
-                    | "timeout"
-                    | "ionice"
-                    | "command"
-                    | "exec"
-                    | "xargs"
-                    | "eval"
-            );
-            if modeled {
+            if is_modeled_wrapper(token) {
                 let mut next = i + 1;
                 while next < tokens.len() && tokens[next].starts_with('-') {
                     if tokens[next] == "--" {
@@ -809,6 +813,57 @@ fn normalize_wrapper_operands(tokens: &[String]) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// A downloaded path may already be executable, so no post-fetch chmod or
+/// explicit interpreter is required. Correlate the fetch output operand with a
+/// later command-position token and rewrite that exact execution to the shell
+/// marker already covered by the staged-fetch policy rule.
+fn normalize_staged_direct_exec(tokens: &mut [String]) {
+    let mut outputs = Vec::new();
+    let mut command_position = true;
+    let mut i = 0;
+    while i < tokens.len() {
+        if is_command_separator(&tokens[i]) {
+            command_position = true;
+            i += 1;
+            continue;
+        }
+        if command_position && is_command_prefix(&tokens[i]) {
+            i += 1;
+            continue;
+        }
+        if command_position && is_modeled_wrapper(&tokens[i]) {
+            i += 1;
+            continue;
+        }
+        if !command_position {
+            i += 1;
+            continue;
+        }
+
+        if matches!(token_basename(&tokens[i]), "curl" | "wget" | "fetch") {
+            let mut arg = i + 1;
+            while arg < tokens.len() && !is_command_separator(&tokens[arg]) {
+                if matches!(tokens[arg].as_str(), "-o" | "-O" | "--output")
+                    && arg + 1 < tokens.len()
+                    && !is_command_separator(&tokens[arg + 1])
+                {
+                    outputs.push(lexical_normalize(&tokens[arg + 1]));
+                    break;
+                }
+                arg += 1;
+            }
+        } else {
+            let candidate = lexical_normalize(&tokens[i]);
+            if outputs.iter().any(|output| output == &candidate) {
+                tokens[i] = "sh".into();
+                return;
+            }
+        }
+        command_position = false;
+        i += 1;
+    }
 }
 
 /// Correlate declared Python network-module aliases with their later calls
@@ -877,7 +932,29 @@ fn normalize_python_network_aliases(command: &str) -> String {
     }
     let dynamic_import =
         Regex::new(r#"__import__\s*\(\s*['"]requests['"]\s*\)"#).expect("static regex");
-    dynamic_import.replace_all(&out, "requests").into_owned()
+    out = dynamic_import.replace_all(&out, "requests").into_owned();
+
+    let from_requests =
+        Regex::new(r"\bfrom\s+requests\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?")
+            .expect("static regex");
+    let imports: Vec<(String, String)> = from_requests
+        .captures_iter(command)
+        .filter_map(|capture| {
+            let primitive = capture.get(1)?.as_str().to_string();
+            let callable = capture
+                .get(2)
+                .map_or_else(|| primitive.clone(), |alias| alias.as_str().to_string());
+            Some((primitive, callable))
+        })
+        .collect();
+    for (primitive, callable) in imports {
+        let call = Regex::new(&format!(r"\b{}\s*\(", regex::escape(&callable)))
+            .expect("escaped alias regex");
+        out = call
+            .replace_all(&out, format!("requests.{primitive}("))
+            .into_owned();
+    }
+    out
 }
 
 /// Match raw params against a secret regex pattern, testing BOTH the raw

@@ -483,7 +483,7 @@ action = "block"
 reason = "recursive root deletion (covers /, //, /*, /?*, /[a-z]*, /{{..}}, /.*, /$VAR)"
 
 [[deny.commands]]
-pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|usr|etc|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)'
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|boot|lib|lib64|usr|etc|root|run|srv|proc|sys|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)'
 action = "block"
 reason = "recursive deletion of a system tree"
 
@@ -591,6 +591,13 @@ reason = "inline interpreter script performing raw network I/O (fetch / exfil / 
 pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(os\.system\(|os\.popen\(|os\.dup2|pty\.spawn|shell\s*=\s*True|child_process|\bexecSync\(|\bexecFileSync\(|\bspawnSync\(|(^|[^.\w])exec\(|(^|[^.\w])eval\(|IO\.popen|(^|[^.\w])system\()'
 action = "block"
 reason = "inline interpreter script executing a shell string / hijacking fds / evaluating dynamic code (payload laundering)"
+
+# list-argv subprocess calls stay allowed for fixed trusted CLIs, but a shell as
+# argv[0] is still shell-string execution and restores arbitrary payload parsing.
+[[deny.commands]]
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*\[\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]'
+action = "block"
+reason = "inline interpreter subprocess argv launches a shell (payload laundering)"
 
 # (C) additive: fetch primitive and exec primitive co-occur, catching shapes that
 # slip past A and B individually (bare `requests` plus list-argv subprocess).
