@@ -29,6 +29,7 @@
 //! unit-testable without the filesystem, and an [`apply`] wrapper that does the
 //! cwd read only when the command is actually install-like.
 
+use crate::common::shell::shell_tokens;
 use crate::policy::{Action, PolicyDecision};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -107,100 +108,6 @@ fn is_shell_assignment(token: &str) -> bool {
         .next()
         .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
-/// Split enough shell syntax to classify commands without executing or
-/// expanding it. Quotes and backslash escapes protect whitespace/separators and
-/// are removed from the resulting word, while real command separators remain
-/// tokens. Malformed quoting returns `None`: such a command is not executable.
-fn shell_tokens(command: &str) -> Option<Vec<String>> {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut token_started = false;
-    let mut chars = command.chars().peekable();
-    let mut quote = None;
-
-    let flush = |tokens: &mut Vec<String>, token: &mut String, started: &mut bool| {
-        if *started {
-            tokens.push(std::mem::take(token));
-            *started = false;
-        }
-    };
-
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some('\''), '\'') => quote = None,
-            (Some('\''), _) => {
-                token.push(c);
-                token_started = true;
-            }
-            (Some('"'), '"') => quote = None,
-            (Some('"'), '\\') => {
-                let next = chars.next()?;
-                match next {
-                    // Inside double quotes, Bash only treats backslash as an
-                    // escape before these characters (and removes a continued
-                    // newline). Before every other character the backslash is
-                    // part of the word and must survive path resolution.
-                    '\n' => {}
-                    '$' | '`' | '"' | '\\' => token.push(next),
-                    _ => {
-                        token.push('\\');
-                        token.push(next);
-                    }
-                }
-                token_started = true;
-            }
-            (Some('"'), _) => {
-                token.push(c);
-                token_started = true;
-            }
-            (None, '\'' | '"') => {
-                quote = Some(c);
-                token_started = true;
-            }
-            (None, '\\') => {
-                let next = chars.next()?;
-                if next != '\n' {
-                    token.push(next);
-                    token_started = true;
-                }
-            }
-            (None, '\n' | '\r') => {
-                flush(&mut tokens, &mut token, &mut token_started);
-                if c == '\r' && chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                if tokens
-                    .last()
-                    .is_none_or(|last| !matches!(last.as_str(), ";" | "|" | "||" | "&&"))
-                {
-                    tokens.push(";".into());
-                }
-            }
-            (None, c) if c.is_whitespace() => {
-                flush(&mut tokens, &mut token, &mut token_started);
-            }
-            (None, c @ (';' | '|' | '&' | '(' | ')')) => {
-                flush(&mut tokens, &mut token, &mut token_started);
-                let mut separator = c.to_string();
-                if matches!(c, '|' | '&') && chars.peek() == Some(&c) {
-                    separator.push(chars.next().expect("peeked separator"));
-                }
-                tokens.push(separator);
-            }
-            (None, _) => {
-                token.push(c);
-                token_started = true;
-            }
-            _ => unreachable!("quotes are exhausted above"),
-        }
-    }
-    if quote.is_some() {
-        return None;
-    }
-    flush(&mut tokens, &mut token, &mut token_started);
-    Some(tokens)
 }
 
 fn package_manager_name(token: &str) -> Option<&str> {
