@@ -572,7 +572,8 @@ fn normalize_command_inner(cmd: &str, resolve_filesystem: bool) -> String {
     }
     let mut wrapper_normalized = normalize_wrapper_operands(&out);
     normalize_staged_direct_exec(&mut wrapper_normalized);
-    normalize_python_network_aliases(&wrapper_normalized.join(" "))
+    let aliases = normalize_python_network_aliases(&wrapper_normalized.join(" "));
+    normalize_dynamic_subprocess_argv(&aliases)
 }
 
 /// Normalize only operands of a recognized recursive-force `rm`. Filesystem
@@ -604,18 +605,100 @@ fn normalize_recursive_rm_paths(tokens: &mut [String], resolve_filesystem: bool)
         if recursive && force {
             while j < tokens.len() && !is_command_separator(&tokens[j]) {
                 if tokens[j].starts_with('/') {
-                    tokens[j] = if resolve_filesystem {
+                    let normalized = if resolve_filesystem {
                         canonicalize_existing_path_prefix(&tokens[j])
                             .unwrap_or_else(|| lexical_normalize(&tokens[j]))
                     } else {
                         lexical_normalize(&tokens[j])
                     };
+                    tokens[j] = protected_top_level_witness(&normalized).unwrap_or(normalized);
                 }
                 j += 1;
             }
         }
         i = j.max(i + 1);
     }
+}
+
+/// Return a concrete protected witness when a recursive-rm operand's first
+/// path component is a shell pattern that can expand onto one. The existing
+/// deny regexes remain the authority over the resulting depth: for example,
+/// `/var*/folders/project` becomes `/var/folders/project` and stays allowed,
+/// while `/u?r/local` becomes `/usr/local` and blocks.
+fn protected_top_level_witness(path: &str) -> Option<String> {
+    if !path.starts_with('/')
+        || !path
+            .bytes()
+            .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b'{'))
+    {
+        return None;
+    }
+    if path
+        .trim_start_matches('/')
+        .bytes()
+        .next()
+        .is_some_and(|byte| matches!(byte, b'*' | b'?' | b'[' | b'{'))
+    {
+        // Existing root-equivalent rules already cover a metacharacter in the
+        // first position. Preserve that spelling so additive matching sees it.
+        return None;
+    }
+
+    let expansions = match crate::common::shell::brace_expand_checked(path, 64) {
+        Ok(expansions) => expansions,
+        // A recursive delete whose top-level brace expansion cannot be fully
+        // inspected is classified as root-equivalent instead of silently
+        // falling through.
+        Err(_) => return Some("/".to_string()),
+    };
+    const PROTECTED: &[&str] = &[
+        // System trees first: if one pattern can expand to both a bounded tree
+        // and a system tree, the blocking system-tree witness must win.
+        "bin",
+        "sbin",
+        "boot",
+        "lib",
+        "lib64",
+        "usr",
+        "etc",
+        "root",
+        "run",
+        "srv",
+        "proc",
+        "sys",
+        "System",
+        "Library",
+        "Applications",
+        "dev",
+        "cores",
+        "tmp",
+        "Users",
+        "Volumes",
+        "home",
+        "mnt",
+        "media",
+        "var",
+        "private",
+        "opt",
+        "Network",
+    ];
+
+    for protected in PROTECTED {
+        for expansion in &expansions {
+            let without_root = expansion.strip_prefix('/')?;
+            let (component, remainder) = without_root
+                .split_once('/')
+                .map_or((without_root, ""), |(component, rest)| (component, rest));
+            if glob::Pattern::new(component).is_ok_and(|pattern| pattern.matches(protected)) {
+                return Some(if remainder.is_empty() {
+                    format!("/{protected}")
+                } else {
+                    format!("/{protected}/{remainder}")
+                });
+            }
+        }
+    }
+    None
 }
 
 fn canonicalize_existing_path_prefix(path: &str) -> Option<String> {
@@ -1036,16 +1119,30 @@ fn normalize_python_network_aliases(command: &str) -> String {
     out = dynamic_import.replace_all(&out, "requests").into_owned();
 
     let from_requests =
-        Regex::new(r"\bfrom\s+requests\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?")
-            .expect("static regex");
+        Regex::new(r"\bfrom\s+requests\s+import\s+([^;\n]+)").expect("static regex");
     let imports: Vec<(String, String)> = from_requests
         .captures_iter(command)
-        .filter_map(|capture| {
-            let primitive = capture.get(1)?.as_str().to_string();
-            let callable = capture
-                .get(2)
-                .map_or_else(|| primitive.clone(), |alias| alias.as_str().to_string());
-            Some((primitive, callable))
+        .filter_map(|capture| capture.get(1))
+        .flat_map(|clause| {
+            clause
+                .as_str()
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .split(',')
+                .filter_map(|entry| {
+                    let words: Vec<&str> = entry.split_whitespace().collect();
+                    let (primitive, callable) = match words.as_slice() {
+                        [primitive] => (*primitive, *primitive),
+                        [primitive, "as", alias] => (*primitive, *alias),
+                        _ => return None,
+                    };
+                    if !is_python_identifier(primitive) || !is_python_identifier(callable) {
+                        return None;
+                    }
+                    Some((primitive.to_string(), callable.to_string()))
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     for (primitive, callable) in imports {
@@ -1056,6 +1153,68 @@ fn normalize_python_network_aliases(command: &str) -> String {
             .into_owned();
     }
     out
+}
+
+fn is_python_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Fixed literal list/tuple argv calls are the narrow false-positive exception.
+/// If argv[0] is assembled at runtime, synthesize a shell-argv witness so the
+/// existing subprocess deny rule retains the broad rule's fail-closed behavior.
+fn normalize_dynamic_subprocess_argv(command: &str) -> String {
+    let call = Regex::new(r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(")
+        .expect("static regex");
+    if call
+        .find_iter(command)
+        .any(|matched| !starts_with_fixed_literal_argv(&command[matched.end()..]))
+    {
+        format!("{command} subprocess.run(['sh'])")
+    } else {
+        command.to_string()
+    }
+}
+
+fn starts_with_fixed_literal_argv(arguments: &str) -> bool {
+    let mut value = arguments.trim_start();
+    if let Some(after_args) = value.strip_prefix("args") {
+        let after_args = after_args.trim_start();
+        let Some(after_equals) = after_args.strip_prefix('=') else {
+            return false;
+        };
+        value = after_equals.trim_start();
+    }
+    let Some(open) = value.chars().next().filter(|c| matches!(c, '[' | '(')) else {
+        return false;
+    };
+    value = value[open.len_utf8()..].trim_start();
+    let Some(quote) = value.chars().next().filter(|c| matches!(c, '\'' | '"')) else {
+        return false;
+    };
+
+    let mut escaped = false;
+    let mut closing = None;
+    for (offset, ch) in value[quote.len_utf8()..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            closing = Some(quote.len_utf8() + offset + ch.len_utf8());
+            break;
+        }
+    }
+    let Some(closing) = closing else {
+        return false;
+    };
+    matches!(
+        value[closing..].trim_start().chars().next(),
+        Some(',' | ']' | ')')
+    )
 }
 
 /// Match raw params against a secret regex pattern, testing BOTH the raw
@@ -1383,6 +1542,18 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn normalize_canonicalizes_protected_top_level_shell_patterns() {
+        let system = r"rm\s+-rf\s+/(?:usr|boot)(?:/|\s|$)";
+        let mount = r"rm\s+-rf\s+/mnt(?:/[^/\s]+)?/?(?:\s|$)";
+        assert!(matches_command(system, "rm -rf /usr*"));
+        assert!(matches_command(system, "rm -rf /bo?t"));
+        assert!(matches_command(system, "rm -rf /usr{,local}"));
+        assert!(matches_command(mount, "rm -rf /mn?"));
+        assert!(!matches_command(system, "rm -rf /scratch*"));
+        assert!(!matches_command(mount, "rm -rf /mnt*/volume/project"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn normalize_prefers_symlink_resolved_rm_target_over_lexical_target() {
@@ -1426,10 +1597,31 @@ mod tests {
             requests,
             "python3 -c \"import requests as r; r.get('https://example.com')\""
         ));
+        assert!(matches_command(
+            requests,
+            "python3 -c \"from requests import Session, get; get('https://example.com')\""
+        ));
         assert!(!matches_command(
             requests,
             "python3 -c \"import requests as r; db.execute('select 1')\""
         ));
+    }
+
+    #[test]
+    fn normalize_blocks_dynamic_but_not_fixed_subprocess_argv() {
+        let marker = "subprocess.run(['sh'])";
+        assert!(normalize_command(
+            "python3 -c \"import subprocess; s='s'+'h'; subprocess.run([s,'-c','id'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"import subprocess; subprocess.run(['git','status'])\""
+        )
+        .ends_with(marker));
+        assert!(!normalize_command(
+            "python3 -c \"import subprocess; subprocess.run(args=('git','status'))\""
+        )
+        .ends_with(marker));
     }
 
     #[test]
