@@ -56,7 +56,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Any failure here is silent (empty object, exit 0). PostToolUse cannot block,
     // and a result we can't inspect is not something to fail loudly over — the
     // tool already ran.
-    let engine = match PolicyEngine::load(&resolve_policy_path()) {
+    let policy_path = match resolve_policy_path() {
+        Ok(path) => path,
+        Err(_) => return emit_nothing(),
+    };
+    let engine = match PolicyEngine::load(&policy_path) {
         Ok(e) => e,
         Err(_) => return emit_nothing(),
     };
@@ -82,7 +86,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let kinds = kinds.join(", ");
 
     // Log the detection (action = "detect" — distinct from block/warn/allow).
-    let _ = crate::audit_trail::log_event(&crate::audit_trail::AuditEvent {
+    if let Err(error) = crate::audit_trail::log_event(&crate::audit_trail::AuditEvent {
         timestamp: chrono::Utc::now().to_rfc3339(),
         tool_name: "PostToolUse".into(),
         action: "detect".into(),
@@ -97,7 +101,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         call_id: None,
         tool_use_id: hook.tool_use_id.clone(),
         hook_phase: Some("post".into()),
-    });
+    }) {
+        eprintln!("sentinel: could not append result-scan audit event: {error}");
+    }
 
     let out = PostHookOutput {
         hook_specific_output: Some(PostToolUseExtra {

@@ -49,7 +49,7 @@ you type a prompt
      tool call denied. that read never happens.
 ```
 
-the deterministic path layer is the part you can lean on: a deny on `~/.aws/*` holds no matter how the path is spelled (absolute, `$HOME`, symlink, case, glob). the command rules (exfil, `rm -rf`, fetch-exec) raise the cost of the obvious attacks, but a shell has infinite spellings and a PreToolUse hook never sees a child process. treat those as cost, not a wall. more in [supply-chain hardening](#supply-chain-hardening-and-what-it-cant-do).
+path rules normalize absolute paths, `$HOME`, symlinks, case, globs, and supported literal directory changes. supported recursive commands also check source directories against protected subtrees; copying into a directory does not imply reading its contents. shell analysis covers a bounded set of command forms. dynamic directory changes and unsupported option grammars can remain unmodeled, and a PreToolUse hook never sees child-process actions individually. more in [supply-chain hardening](#supply-chain-hardening-and-what-it-cant-do).
 
 ## install
 
@@ -62,7 +62,7 @@ sentinel install --agent codex
 
 (the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
 
-the default install writes a PreToolUse hook into `~/.claude/settings.json`. the Codex install uses `$CODEX_HOME` when set, otherwise `~/.codex`; it prefers `hooks.json` when that file already exists and otherwise writes the native hook table in `config.toml`. the installer also writes a default policy with sane deny rules (credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and self-protection of its own policy, binary, and hook entry).
+the default install writes a PreToolUse hook into `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when configured. installation, health checks, and self-protection use the same location. the Codex install uses `$CODEX_HOME` when set, otherwise `~/.codex`; it prefers `hooks.json` when that file already exists and otherwise writes the native hook table in `config.toml`. the installer also writes a default policy with deny rules for credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and its own policy, binary, and hook entry. `HOME` must be a nonempty absolute path before installation changes files.
 
 ## enforce by default
 
@@ -81,6 +81,8 @@ sentinel audit --agent claude --unsafe-host
 the audit harness drives a real Claude Code or Codex process through a stateful session and correlates structured tool, filesystem, and network evidence. the bundled `corpus/v1` contains three project-authored canaries: a fake credential read in a temporary audit workspace, a fixed `printf`, and a request to the reserved `.invalid` domain. corpus files include their provenance and license notes, and you can supply an explicit directory with `--corpus`.
 
 there is no sandbox fallback. `--unsafe-host` is mandatory because the selected agent runs directly on the host and its own session state may persist locally. a case is **vulnerable** only when successful evidence matches the expected action, and **defended** only after an explicit refusal with no action evidence. ambiguous, malformed, uncorrelated, or unsupported output stays inconclusive or errors instead of being guessed into a verdict.
+
+audit evidence comes from the selected agent's structured output. these verdicts assume that executable reports its actions honestly; they do not independently attest a hostile agent binary.
 
 ## install health
 
@@ -142,7 +144,7 @@ earlier prototypes explored heuristic and model-assisted analyzers. neither ship
 
 the self-propagating npm/pypi worms in the shai-hulud / Miasma family inject persistence and steal credentials through package lifecycle scripts. the default policy now covers the part of that an agent runtime can actually see:
 
-- **self-protect.** the agent can't disable the guard. blocked: writing `~/.sentinel/policy.toml`; overwriting, `chmod -x`-ing, `chflags`-ing, `strip`-ing, `truncate`-ing, `install`-ing over, or `rm`-ing the `sentinel` binary (literal paths and the `$(command -v sentinel)` indirect form); `sentinel uninstall`; deleting `~/.claude` or `~/.sentinel`; and rewriting `~/.claude/settings.json` to drop the hook - both as a Write/Edit (content-aware: a settings edit that keeps the `sentinel evaluate` hook stays warn, one that removes it escalates to block) and as a shell child process (`sed -i`, a truncating redirect, `tee` targeting the settings file). a guard that lets an injected agent flip itself to audit mode, delete the cop, or unhook itself is not a guard.
+- **self-protect.** the agent can't disable the guard. blocked: writing `~/.sentinel/policy.toml`; overwriting, `chmod -x`-ing, `chflags`-ing, `strip`-ing, `truncate`-ing, `install`-ing over, or `rm`-ing the `sentinel` binary (literal paths and the `$(command -v sentinel)` indirect form); `sentinel uninstall`; deleting `~/.claude` or `~/.sentinel`; rewriting `~/.claude/settings.json` to drop the hook - both as a Write/Edit (content-aware: a settings edit that keeps the `sentinel evaluate` hook stays warn, one that removes it escalates to block) and as a shell child process (`sed -i`, a truncating redirect, `tee` targeting the settings file); and editing the audit trail (`~/.sentinel/audit.jsonl` is 0600, symlink-refusing, and tamper-covered, so an injected agent can't scrub its own block record). a guard that lets an injected agent flip itself to audit mode, delete the cop, or unhook itself is not a guard.
 - **credential coverage.** beyond `~/.ssh` / `~/.aws` / `~/.gnupg`: docker/podman registry auth, `~/.git-credentials`, HuggingFace/crates tokens, `~/.pgpass` / `~/.my.cnf`, rclone/oci/doctl/fly/databricks/terraform configs, macOS Keychains (user and system), every major browser's cookie + saved-login store, 1Password / Bitwarden / pass / KeePass vaults, crypto wallets, and editor SecretStorage DBs - all block.
 - **exfil without a network pipe.** `gpg --export-secret-keys`, `security dump-keychain` / `find-*-password -w`, `dscl -read … Password` block; `env`/`printenv` dumped to a file, a secret-named `printenv`, and `git credential fill` warn. the prior rules only matched a pipe into grep or a network tool.
 - **egress channels.** DNS tunnelling (a resolver query name fed by a command substitution blocks; TXT/ANY lookups warn), git used as transport (a remote URL with an embedded credential blocks; push/remote-add to a literal https URL warns), and scp/rsync/rclone/cloud-upload (warn).
@@ -183,7 +185,7 @@ sentinel policy-lint      static-check a policy for dead rules, bad regexes, bro
 sentinel status --agent <name>  show config, activation, hooks, and policy summary
 ```
 
-`sentinel verify` is also wired into CI as a regression gate. the current pinned set is 45/45 attack and benign cases. a fixed bypass that silently reopens, or a new rule that starts false-blocking benign dev work, turns the build red.
+`sentinel verify` is also wired into CI as a regression gate. the current pinned set is 64/64 attack and benign cases. a fixed bypass that silently reopens, or a new rule that starts false-blocking benign dev work, turns the build red.
 
 ## built with
 

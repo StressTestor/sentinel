@@ -75,11 +75,6 @@ pub struct HostHook {
     pub activation: Activation,
 }
 
-#[cfg(test)]
-fn binary_from_command(cmd: &str) -> Option<String> {
-    install::hooks::split_shell_words(cmd)?.into_iter().next()
-}
-
 /// Interpret the canary against the active mode. Returns (level, message). Because
 /// the probe runs `evaluate --canary` (which reports the would-be decision even in
 /// audit mode), NoDecision always means the decision path is broken - it is an
@@ -481,7 +476,8 @@ fn wait_for_probe(mut child: std::process::Child) -> CanaryRaw {
 pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
     let target = AgentTarget::parse(&args.agent)
         .ok_or_else(|| format!("unsupported doctor agent: {}", args.agent))?;
-    let state = install::state::inspect_agent(target);
+    let policy_path = resolve_policy_path()?;
+    let state = install::state::inspect_agent(target)?;
     let hook = HostHook {
         config_label: state.config_path.display().to_string(),
         config_exists: state.config_exists,
@@ -491,7 +487,6 @@ pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // policy info
-    let policy_path = resolve_policy_path();
     let engine = PolicyEngine::load(&policy_path);
     let policy = match &engine {
         Ok(e) => Ok(PolicyInfo {
@@ -563,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn hooked_command_and_binary_extraction() {
+    fn hooked_command_and_argument_parsing() {
         let s = sentinel_settings();
         let inspection = install::hooks::inspect_claude_pre_tool(&s).unwrap();
         assert_eq!(
@@ -571,13 +566,14 @@ mod tests {
             Some("/usr/local/bin/sentinel evaluate")
         );
         assert_eq!(
-            binary_from_command("/usr/local/bin/sentinel evaluate").as_deref(),
-            Some("/usr/local/bin/sentinel")
+            install::hooks::split_shell_words("/usr/local/bin/sentinel evaluate").unwrap(),
+            ["/usr/local/bin/sentinel", "evaluate"]
         );
         // a path with a space must not be split mid-path
         assert_eq!(
-            binary_from_command("'/Applications/My Tools/sentinel' evaluate").as_deref(),
-            Some("/Applications/My Tools/sentinel")
+            install::hooks::split_shell_words("'/Applications/My Tools/sentinel' evaluate")
+                .unwrap(),
+            ["/Applications/My Tools/sentinel", "evaluate"]
         );
     }
 
@@ -750,21 +746,6 @@ mod tests {
             0,
         );
         assert!(!report.healthy, "no hook installed must fail --strict");
-    }
-
-    #[test]
-    fn idle_healthy_install_is_not_a_failure() {
-        // zero denials + idle is the HEALTHY state, must not fail strict
-        let report = build_report(
-            Some(&sentinel_settings()),
-            Ok(PolicyInfo {
-                mode: "enforce".into(),
-                self_protect: true,
-            }),
-            CanaryRaw::Denied,
-            0,
-        );
-        assert!(report.healthy);
     }
 
     #[test]

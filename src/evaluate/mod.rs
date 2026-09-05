@@ -95,7 +95,10 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
     let format = AgentFormat::from_name(agent);
     // Load the policy FIRST, so a degraded input (empty / unparseable stdin) can
     // honor the policy's on_failure posture instead of a hard-coded allow.
-    let policy_path = resolve_policy_path();
+    let policy_path = match resolve_policy_path() {
+        Ok(path) => path,
+        Err(error) => deny_and_exit(format!("policy path unavailable: {error}"), format),
+    };
     let engine = match PolicyEngine::load(&policy_path) {
         Ok(e) => e,
         Err(e) => {
@@ -141,12 +144,10 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
             return Ok(());
         }
     };
-    let tool_call = call.to_tool_call();
-
     // log to audit trail
-    let _ = audit_trail::log_event(&audit_trail::AuditEvent {
+    if let Err(error) = audit_trail::log_event(&audit_trail::AuditEvent {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        tool_name: tool_call.tool_name.clone(),
+        tool_name: call.tool_name.clone(),
         action: decision.action.to_string(),
         reason: decision.reason.clone(),
         matched_rule: decision.matched_rule.clone(),
@@ -159,9 +160,11 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         // line(s) — same value in both phases' payloads. telemetry only.
         tool_use_id: call.tool_use_id.clone(),
         hook_phase: Some("pre".into()),
-    });
+    }) {
+        eprintln!("sentinel: could not append audit event: {error}");
+    }
 
-    emit_live_decision(&decision, &tool_call.tool_name, format, &engine);
+    emit_live_decision(&decision, &call.tool_name, format, &engine);
 
     Ok(())
 }
@@ -234,9 +237,10 @@ fn deny_and_exit(reason: impl Into<String>, format: AgentFormat) -> ! {
 
 /// The policy path the hook reads on every call. Shared with `sentinel check`
 /// so the dry-run can never drift from what the live hook actually evaluates.
-pub(crate) fn resolve_policy_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".sentinel").join("policy.toml")
+///
+/// An unavailable or relative HOME is an explicit error, never a cwd fallback.
+pub(crate) fn resolve_policy_path() -> io::Result<PathBuf> {
+    Ok(crate::common::home_dir()?.join(".sentinel/policy.toml"))
 }
 
 #[cfg(test)]

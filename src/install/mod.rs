@@ -16,6 +16,8 @@ pub enum InstallError {
     BinaryNotFound,
     #[error("unsupported agent: {0}")]
     UnsupportedAgent(String),
+    #[error("invalid configuration directory: {0}")]
+    ConfigDirectory(#[from] std::io::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,7 @@ impl AgentTarget {
 }
 
 pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), InstallError> {
+    let policy_path = sentinel_dir()?.join("policy.toml");
     // verify sentinel binary is in PATH
     let sentinel_path = which_sentinel()?;
     println!("sentinel binary: {}", sentinel_path.display());
@@ -59,7 +62,7 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
 
     match target {
         AgentTarget::ClaudeCode => {
-            let settings_path = claude_settings_path();
+            let settings_path = claude_settings_path()?;
             hooks::install_hook(&settings_path, &sentinel_path)?;
             println!(
                 "configured PreToolUse protection in {}",
@@ -71,12 +74,12 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
             }
         }
         AgentTarget::Codex => {
-            let hooks_path = codex_hooks_path();
+            let hooks_path = codex_hooks_path()?;
             if hooks_path.exists() {
                 hooks::install_codex_json_hook(&hooks_path, &sentinel_path)?;
                 // Reconcile a prior inline install so Codex does not load the
                 // same protection from both config.toml and hooks.json.
-                hooks::uninstall_codex_hook(&codex_config_path())?;
+                hooks::uninstall_codex_hook(&codex_config_path()?)?;
                 println!(
                     "configured PreToolUse protection in {}",
                     hooks_path.display()
@@ -86,7 +89,7 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
                     println!("configured PostToolUse result-scan hook (detection only)");
                 }
             } else {
-                let config_path = codex_config_path();
+                let config_path = codex_config_path()?;
                 hooks::install_codex_hook(&config_path, &sentinel_path)?;
                 println!(
                     "configured PreToolUse protection in {}",
@@ -106,7 +109,6 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
     // write default policy. ENFORCE is the default: a security tool that ships in
     // log-only mode protects nobody, and the most direct attack on a guard you
     // can disable is to just leave it disabled. `--audit` opts back into log-only.
-    let policy_path = sentinel_dir().join("policy.toml");
     let mode = if audit { "audit" } else { "enforce" };
     let wrote = defaults::write_default_policy(&policy_path, mode)?;
 
@@ -150,7 +152,7 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
 /// engine is agent-agnostic; any agent that runs a command hook and honors exit
 /// codes can drive it via `sentinel evaluate --agent generic`.
 fn install_generic(sentinel_path: &Path, audit: bool, agent: &str) -> Result<(), InstallError> {
-    let policy_path = sentinel_dir().join("policy.toml");
+    let policy_path = sentinel_dir()?.join("policy.toml");
     let mode = if audit { "audit" } else { "enforce" };
     defaults::write_default_policy(&policy_path, mode)?;
     let bin = sentinel_path.display();
@@ -160,17 +162,6 @@ fn install_generic(sentinel_path: &Path, audit: bool, agent: &str) -> Result<(),
     // so the user pastes a known-good snippet rather than risk a corrupted config.
     println!();
     match agent {
-        "codex" => {
-            println!("OpenAI Codex CLI — add to ~/.codex/config.toml:");
-            println!();
-            println!("    [[hooks.PreToolUse]]");
-            println!("    matcher = \".*\"");
-            println!("    [[hooks.PreToolUse.hooks]]");
-            println!("    type = \"command\"");
-            println!("    command = \"{bin} evaluate --agent codex\"");
-            println!();
-            println!("(Codex's PreToolUse output contract matches sentinel's exactly.)");
-        }
         "gemini" => {
             println!("Gemini CLI — add to ~/.gemini/settings.json under \"hooks\":");
             println!();
@@ -218,11 +209,12 @@ fn install_generic(sentinel_path: &Path, audit: bool, agent: &str) -> Result<(),
 }
 
 pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
+    crate::common::home_dir()?;
     let target = AgentTarget::parse(agent)
         .ok_or_else(|| InstallError::UnsupportedAgent(agent.to_string()))?;
     match target {
         AgentTarget::ClaudeCode => {
-            let settings_path = claude_settings_path();
+            let settings_path = claude_settings_path()?;
             hooks::uninstall_hook(&settings_path)?;
             println!(
                 "removed direct Sentinel hooks from {}; mediated hooks owned by other tools were preserved",
@@ -230,9 +222,9 @@ pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
             );
         }
         AgentTarget::Codex => {
-            let config_path = codex_config_path();
+            let config_path = codex_config_path()?;
             hooks::uninstall_codex_hook(&config_path)?;
-            let hooks_path = codex_hooks_path();
+            let hooks_path = codex_hooks_path()?;
             hooks::uninstall_hook(&hooks_path)?;
             println!(
                 "removed direct Sentinel hooks from {} and {}",
@@ -248,47 +240,47 @@ pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
 fn which_sentinel() -> Result<PathBuf, InstallError> {
     // The currently running binary is authoritative. Looking in PATH first can
     // silently install a stale sibling while `cargo run` or a packaged smoke
-    // test is trying to configure the binary under test.
-    if let Ok(path) = std::env::current_exe() {
-        return Ok(path);
-    }
-    let output = std::process::Command::new("which")
-        .arg("sentinel")
-        .output()
-        .map_err(|_| InstallError::BinaryNotFound)?;
-
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok(PathBuf::from(path));
-    }
-
-    // fallback: use current executable path
+    // test is trying to configure the binary under test — and a PATH-resolved
+    // `which` is an exec vector whose stdout would be baked into the hook
+    // command, so it must never be consulted (2026-08-14 audit, F-6).
     std::env::current_exe().map_err(|_| InstallError::BinaryNotFound)
 }
 
-pub(crate) fn claude_settings_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".claude").join("settings.json")
+/// Claude Code's user-level settings file. `CLAUDE_CONFIG_DIR` relocates the
+/// whole config dir (same relationship as `CODEX_HOME` for Codex); when set,
+/// Claude Code ignores `~/.claude/settings.json` entirely, so installing or
+/// health-checking the default path would silently guard nothing.
+pub(crate) fn claude_settings_path() -> std::io::Result<PathBuf> {
+    Ok(claude_config_dir()?.join("settings.json"))
 }
 
-pub(crate) fn codex_home() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".codex")
-        })
+pub(crate) fn claude_config_dir() -> std::io::Result<PathBuf> {
+    configured_dir("CLAUDE_CONFIG_DIR", ".claude")
 }
 
-pub(crate) fn codex_config_path() -> PathBuf {
-    codex_home().join("config.toml")
+fn configured_dir(variable: &str, default: &str) -> std::io::Result<PathBuf> {
+    match std::env::var_os(variable) {
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        Some(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{variable} must not be empty"),
+        )),
+        None => Ok(crate::common::home_dir()?.join(default)),
+    }
 }
 
-pub(crate) fn codex_hooks_path() -> PathBuf {
-    codex_home().join("hooks.json")
+pub(crate) fn codex_home() -> std::io::Result<PathBuf> {
+    configured_dir("CODEX_HOME", ".codex")
 }
 
-pub(crate) fn sentinel_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".sentinel")
+pub(crate) fn codex_config_path() -> std::io::Result<PathBuf> {
+    Ok(codex_home()?.join("config.toml"))
+}
+
+pub(crate) fn codex_hooks_path() -> std::io::Result<PathBuf> {
+    Ok(codex_home()?.join("hooks.json"))
+}
+
+pub(crate) fn sentinel_dir() -> std::io::Result<PathBuf> {
+    Ok(crate::common::home_dir()?.join(".sentinel"))
 }

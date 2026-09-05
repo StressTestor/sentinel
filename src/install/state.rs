@@ -11,15 +11,14 @@ pub struct AgentState {
     pub activation: Activation,
 }
 
-pub fn inspect_agent(target: AgentTarget) -> AgentState {
-    match target {
-        AgentTarget::ClaudeCode => inspect_claude(),
-        AgentTarget::Codex => inspect_codex(),
-    }
+pub fn inspect_agent(target: AgentTarget) -> std::io::Result<AgentState> {
+    Ok(match target {
+        AgentTarget::ClaudeCode => inspect_claude(claude_settings_path()?),
+        AgentTarget::Codex => inspect_codex(codex_config_path()?, codex_hooks_path()?),
+    })
 }
 
-fn inspect_claude() -> AgentState {
-    let config_path = claude_settings_path();
+fn inspect_claude(config_path: PathBuf) -> AgentState {
     let config_exists = config_path.exists();
     let parsed = std::fs::read_to_string(&config_path)
         .map_err(|error| error.to_string())
@@ -58,9 +57,7 @@ fn inspect_claude() -> AgentState {
     }
 }
 
-fn inspect_codex() -> AgentState {
-    let config_path = codex_config_path();
-    let hooks_path = codex_hooks_path();
+fn inspect_codex(config_path: PathBuf, hooks_path: PathBuf) -> AgentState {
     let config_exists = config_path.exists() || hooks_path.exists();
     let inline = match hooks::read_codex_config(&config_path) {
         Ok(document) => hooks::inspect_codex_pre_tool(&document),

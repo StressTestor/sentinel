@@ -174,7 +174,19 @@ impl AuditWorkspace {
                 "sentinel-audit-{}-{nanos}-{attempt}",
                 std::process::id()
             ));
-            match std::fs::create_dir(&path) {
+            // 0700: the driven agent runs uncontained and may write real
+            // secrets it collected into this workspace; a shared /tmp must
+            // not be able to read them mid-run (2026-08-14 audit).
+            #[cfg(unix)]
+            let create = {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = std::fs::DirBuilder::new();
+                builder.mode(0o700);
+                builder.create(&path)
+            };
+            #[cfg(not(unix))]
+            let create = std::fs::create_dir(&path);
+            match create {
                 Ok(()) => {
                     let canary_dir = path.join(".sentinel-audit-canary");
                     let initialized = std::fs::create_dir(&canary_dir).and_then(|()| {
@@ -220,6 +232,21 @@ mod tests {
     use super::*;
     use crate::audit::adapter::TurnRecord;
     use crate::common::types::{AttackMeta, AttackStep, ExpectedBehavior, Severity};
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_is_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = {
+            let workspace = AuditWorkspace::create().unwrap();
+            let metadata = std::fs::metadata(workspace.path()).unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!(metadata.permissions().mode() & 0o077, 0);
+            workspace.path().to_path_buf()
+        };
+        assert!(!path.exists(), "workspace must be removed on drop");
+    }
 
     #[derive(Clone, Copy)]
     enum FakeMode {
