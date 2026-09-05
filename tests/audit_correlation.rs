@@ -112,6 +112,47 @@ fn env_var_absent_keeps_the_audit_line_in_the_old_format() {
     );
 }
 
+#[test]
+fn audit_write_errors_are_visible_without_changing_hook_responses() {
+    for (phase, payload) in [
+        ("evaluate", BENIGN),
+        (
+            "post-evaluate",
+            r#"{"tool_name":"Read","tool_response":{"stdout":"PRIVATE_FIXTURE"}}"#,
+        ),
+    ] {
+        let home = home_with_policy();
+        fs::write(
+            home.path().join(".sentinel/policy.toml"),
+            "[policy]\nmode = 'enforce'\n[[deny.secrets]]\npattern = 'PRIVATE_FIXTURE'\naction = 'block'\nreason = 'test marker'\n",
+        )
+        .unwrap();
+        let run = || {
+            Command::cargo_bin("sentinel")
+                .unwrap()
+                .arg(phase)
+                .env("HOME", home.path())
+                .env_remove("RUST_LOG")
+                .write_stdin(payload)
+                .output()
+                .unwrap()
+        };
+        let normal = run();
+        let log = home.path().join(".sentinel/audit.jsonl");
+        fs::remove_file(&log).unwrap();
+        fs::create_dir(&log).unwrap();
+        let failed_log = run();
+        assert!(normal.status.success());
+        assert_eq!(failed_log.status.code(), normal.status.code());
+        assert_eq!(failed_log.stdout, normal.stdout);
+        serde_json::from_slice::<serde_json::Value>(&failed_log.stdout).unwrap();
+        let diagnostic = String::from_utf8(failed_log.stderr).unwrap();
+        assert!(diagnostic.contains("could not append"), "{diagnostic}");
+        assert!(!diagnostic.contains("PRIVATE_FIXTURE"));
+        assert!(log.is_dir());
+    }
+}
+
 /// A live AWS-key-shaped string, assembled at runtime so this test file never
 /// trips a live sentinel hook when written/edited (same trick as post_tooluse.rs).
 fn aws_key() -> String {

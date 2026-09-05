@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASELINE_VERSION: u32 = 1;
 
@@ -51,8 +52,8 @@ enum CurrentStatus {
 }
 
 pub fn run(args: AuditMcpArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home = crate::common::home_dir()?;
+    let cwd = std::env::current_dir()?;
     let servers = collect_servers(&home, &cwd)?;
     let baseline_path = home.join(".sentinel").join("mcp-baseline.json");
     let baseline_state = load_baseline(&baseline_path)?;
@@ -491,9 +492,15 @@ fn save_baseline(path: &Path, baseline: &Baseline) -> Result<(), String> {
         .ok_or_else(|| "MCP baseline path has no parent".to_string())?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create MCP baseline directory: {error}"))?;
-    let temp = parent.join(format!(".mcp-baseline.{}.tmp", std::process::id()));
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // attempt-suffixed + AlreadyExists retry: a predictable pid-only temp name
+    // lets a pre-created file wedge every future --update (2026-08-14 audit).
     let content = serde_json::to_vec_pretty(baseline)
         .map_err(|error| format!("failed to encode MCP baseline: {error}"))?;
+    let mut staged: Option<std::path::PathBuf> = None;
     let result = (|| -> Result<(), String> {
         let mut options = std::fs::OpenOptions::new();
         options.create_new(true).write(true);
@@ -502,19 +509,39 @@ fn save_baseline(path: &Path, baseline: &Baseline) -> Result<(), String> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options
-            .open(&temp)
-            .map_err(|error| format!("failed to stage MCP baseline: {error}"))?;
+        let mut file = None;
+        for attempt in 0..1000_u32 {
+            let candidate = parent.join(format!(
+                ".mcp-baseline.{}.{stamp}.{attempt}.tmp",
+                std::process::id()
+            ));
+            match options.open(&candidate) {
+                Ok(opened) => {
+                    staged = Some(candidate);
+                    file = Some(opened);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("failed to stage MCP baseline: {error}")),
+            }
+        }
+        let Some(mut file) = file else {
+            return Err("could not allocate a unique baseline temp file".into());
+        };
         file.write_all(&content)
             .map_err(|error| format!("failed to stage MCP baseline: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("failed to sync MCP baseline: {error}"))?;
-        std::fs::rename(&temp, path)
+        let temp = staged.as_deref().expect("a successful open stages a temp");
+        std::fs::rename(temp, path)
             .map_err(|error| format!("failed to atomically replace MCP baseline: {error}"))?;
+        staged = None; // renamed away: nothing left to clean up
         Ok(())
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        if let Some(temp) = staged {
+            let _ = std::fs::remove_file(temp);
+        }
     }
     result
 }

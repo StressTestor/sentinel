@@ -39,7 +39,8 @@ fn post_eval(home: &std::path::Path, payload: &str) -> (Option<i32>, serde_json:
         .output()
         .unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let json = serde_json::from_str(stdout.trim()).unwrap_or(serde_json::json!({}));
+    let json = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("invalid hook JSON: {error}; stdout: {stdout:?}"));
     (out.status.code(), json)
 }
 

@@ -196,13 +196,32 @@ impl PolicyEngine {
         }
 
         // check deny.paths
+        // Only actual recursive source operands receive ancestor matching.
+        // Other paths retain their normal rule semantics, including copy
+        // destinations and paths mentioned in unrelated command segments.
+        let traversal_sources = tool_call
+            .command
+            .as_deref()
+            .map(matcher::recursive_traversal_sources)
+            .unwrap_or_default();
         for rule in &self.config.deny_paths {
-            for path in &tool_call.paths {
+            for (path, recursive_source) in tool_call
+                .paths
+                .iter()
+                .map(|path| (path, false))
+                .chain(traversal_sources.iter().map(|path| (path, true)))
+            {
                 let shell_expands = tool_call
                     .shell_expansion_paths
                     .iter()
                     .any(|candidate| candidate == path);
-                let path_match = if shell_expands {
+                let path_match = if recursive_source {
+                    if matcher::matches_recursive_traversal(&rule.pattern, path) {
+                        PathMatch::Match
+                    } else {
+                        continue;
+                    }
+                } else if shell_expands {
                     matches_path_checked(&rule.pattern, path)
                 } else {
                     matches_path_literal_checked(&rule.pattern, path)
@@ -399,6 +418,60 @@ fn parse_action(s: &str) -> Action {
 mod tests {
     use super::*;
     use schema::*;
+
+    #[test]
+    fn recursive_ancestor_rules_only_apply_to_traversed_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().display().to_string();
+        let pattern = format!("{root}/private/*");
+        let engine = PolicyEngine::from_toml_str(&format!(
+            "[policy]\nmode='enforce'\n[[deny.paths]]\npattern={pattern:?}\naction='block'\nreason='private project data'\n"
+        ))
+        .unwrap();
+        for (command, expected) in [
+            (format!("cp -r '{root}/public' '{root}'"), Action::Allow),
+            (
+                format!("printf '%s' '{root}'; cp -r '{root}/public' '{root}/backup'"),
+                Action::Allow,
+            ),
+            (
+                format!("grep -r -e '{root}' '{root}/public'"),
+                Action::Allow,
+            ),
+            (format!("tar -xf content.tar -C '{root}'"), Action::Allow),
+            (
+                format!("false && cd '{root}'; cat ./private/report.txt"),
+                Action::Allow,
+            ),
+            (
+                format!("false && cd '{root}' && printf done; cp -r . ./backup"),
+                Action::Allow,
+            ),
+            (
+                format!("cd '{root}' && cat ./private/report.txt"),
+                Action::Block,
+            ),
+            (
+                format!("cd '{root}' && printf done; cat ./private/report.txt"),
+                Action::Block,
+            ),
+            (
+                format!("false && cd /example; cd '{root}'; cat ./private/report.txt"),
+                Action::Block,
+            ),
+            (format!("cp -r '{root}' '{root}/backup'"), Action::Block),
+        ] {
+            let input: crate::evaluate::hook_schema::HookInput = serde_json::from_value(
+                serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}}),
+            )
+            .unwrap();
+            let decision = engine.evaluate(&input.normalize().unwrap().to_tool_call());
+            assert_eq!(decision.action, expected, "{command}");
+            if expected == Action::Block {
+                assert_eq!(decision.reason.as_deref(), Some("private project data"));
+            }
+        }
+    }
 
     fn test_engine() -> PolicyEngine {
         PolicyEngine::from_config(PolicyConfig::new(

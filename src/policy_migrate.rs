@@ -487,7 +487,10 @@ pub fn apply_path(path: &Path) -> Result<Option<AppliedMigration>, MigrationErro
 }
 
 pub fn run(args: PolicyMigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let path = args.policy.unwrap_or_else(resolve_policy_path);
+    let path = match args.policy {
+        Some(path) => path,
+        None => resolve_policy_path()?,
+    };
     if args.check {
         match inspect_path(&path)? {
             MigrationInspection::Current => {

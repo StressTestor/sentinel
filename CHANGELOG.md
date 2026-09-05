@@ -7,6 +7,62 @@ versioning.
 ## [Unreleased]
 
 ### Security
+- **Close the cd-relative path bypass (audit F-1).** A relative operand after a
+  literal `cd` (`cd ~ && cat .ssh/id_rsa`) never reached a `~/.ssh/*` rule
+  because candidates were only mined, never resolved against the directory the
+  shell had moved to. Relative candidates are now joined onto the tracked `cd`
+  target (literal, `$HOME`, or `~`; ambiguous targets stop tracking), including
+  successive relative directory changes and `sh -c` payloads. Quoted newlines
+  remain part of their argument. A command-position-aware walk keeps arguments
+  from being mistaken for a directory change.
+  Directory changes on conditional branches do not leak into subsequent
+  unconditional commands.
+- **Close the recursive-traversal bypass (audit F-2).** `cp -r ~ /tmp`,
+  `tar czf x.tgz ~`, `rsync -a ~/ /dst`, `grep -r AKIA ~`, `ditto`, and `find`
+  read every protected subtree under the operand while mining only the bare
+  home dir as a candidate. A subtree rule now fires when a recursive tool's
+  source operand covers the rule's protected directory. Destinations, option
+  values, and paths in unrelated command segments do not inherit that status.
+  tar counts only in create mode; archive filenames are not mode flags.
+  cp/rsync/grep require an explicit recursive flag.
+- **Exclusive temporary-file creation for install writes (audit F-3).** `atomic_write` used a
+  predictable `<target>.tmp` opened without `O_EXCL`, so a planted symlink
+  could redirect an install/uninstall write into any file. Temp files are now
+  uniquely named and `create_new`-opened with retry, file fsync and best-effort
+  parent-directory sync, mirroring the policy-migrate pattern.
+- **Audit-trail tamper discipline (audit F-4).** `audit.jsonl` and its
+  directory are created 0600/0700 on Unix. Existing paths are checked through opened
+  handles before permissions are tightened; symlinks and unsupported file
+  types are refused. Advisory locking keeps complete records together across
+  cooperating Sentinel writers. Logging failures produce stderr diagnostics
+  without changing the hook decision. Write/Edit/MultiEdit on the trail is
+  blocked by self-protect.
+  Protection follows the live audit path and its resolved aliases, so unrelated
+  project fixtures with the same filename remain writable.
+- **Honor `CLAUDE_CONFIG_DIR` (audit F-5).** With the variable set, Claude
+  Code ignores `~/.claude/settings.json`; install/status/doctor and
+  self-protection now share the configured settings paths.
+- **PATH hardening (audit F-6).** The dead `which` fallback in install is
+  removed (a hijacked `which` stdout would have been baked into the hook
+  command), and the Codex activation probe selects a usable `codex`
+  executable in common absolute install locations before falling
+  back to PATH. The fallback still trusts the caller's executable environment.
+- **Reject flag-shaped Codex thread ids (audit F-7).** An agent-reported
+  thread id that starts with `-` or contains whitespace is argv injection
+  into the next `codex exec resume` and now fails the schema instead of being
+  reused.
+- **Reject invalid HOME.** Missing, empty, and relative values produce an
+  explicit error instead of resolving Sentinel state against the working
+  directory. Installation checks this before changing files; evaluation uses
+  its closed-failure response and logging refuses the invalid location.
+- Audit workspaces are created 0700; the MCP baseline temp name is
+  attempt-suffixed with `AlreadyExists` retry so a pre-created file cannot
+  wedge `audit-mcp --update`; `.gitignore` now covers `.env*`.
+- `sentinel verify` grows from 45 to 64 pinned cases: ten regression cases
+  (cd-relative, recursive traversal) plus nine benign guards
+  (`tar xzf -C ~`, project-scoped recursion, cd-decoys) so these classes stay
+  closed.
+
 - Harden deny-path brace analysis, install preflight parsing, hook-event
   preservation, quoted fetch-to-shell detection, and autorun checks across
   symlink aliases. Uncheckable path syntax now follows the configured failure

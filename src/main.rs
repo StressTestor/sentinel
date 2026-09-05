@@ -63,7 +63,8 @@ fn run_status(agent: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let target = install::AgentTarget::parse(agent)
         .ok_or_else(|| format!("unsupported status agent: {agent}"))?;
-    let state = install::state::inspect_agent(target);
+    let home = common::home_dir()?;
+    let state = install::state::inspect_agent(target)?;
     println!("agent:    {}", target.label());
     println!("config:   {}", state.config_path.display());
     println!("hook:     {:?}", state.hook.ownership);
@@ -72,13 +73,12 @@ fn run_status(agent: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("detail:   {detail}");
     }
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let policy_path = format!("{home}/.sentinel/policy.toml");
-    let audit_path = format!("{home}/.sentinel/audit.jsonl");
+    let policy_path = home.join(".sentinel/policy.toml");
+    let audit_path = home.join(".sentinel/audit.jsonl");
 
-    let engine = policy::PolicyEngine::load(std::path::Path::new(&policy_path))
-        .map_err(|error| format!("policy at {policy_path} cannot load: {error}"))?;
-    println!("policy:   {} ({})", policy_path, engine.mode());
+    let engine = policy::PolicyEngine::load(&policy_path)
+        .map_err(|error| format!("policy at {} cannot load: {error}", policy_path.display()))?;
+    println!("policy:   {} ({})", policy_path.display(), engine.mode());
 
     if std::path::Path::new(&audit_path).exists() {
         let line_count = std::fs::read_to_string(&audit_path)?.lines().count();

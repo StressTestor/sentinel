@@ -298,7 +298,7 @@ fn is_suspicious_spec(spec: &str) -> bool {
 
 // ── apply wrapper: the only place that touches the filesystem ─────────────────
 
-/// the evaluate-pipeline entry point. wired AFTER `selfprotect::apply`, it
+/// the evaluate-pipeline entry point. wired AFTER `selfprotect::apply_normalized`, it
 /// escalates the decision when the install-like command's cwd manifest carries
 /// the worm TTP. an existing Block is never downgraded; the manifest read
 /// happens ONLY when the command is install-like, so the hot path (every other

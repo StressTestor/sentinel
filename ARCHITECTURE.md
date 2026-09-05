@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-08-14
+last updated: 2026-09-04
 
 ## overview
 
@@ -30,7 +30,8 @@ acknowledge uncontained host execution with `--unsafe-host`.
 | error handling | thiserror | 2.x |
 | hashing and random salt | sha2, getrandom | 0.10 / 0.3 |
 | logging | tracing + tracing-subscriber | 0.1 / 0.3 |
-| testing | built-in + assert_cmd, tempfile, predicates | - |
+| Unix file handles and advisory locks | libc | 0.2 |
+| testing | built-in + assert_cmd, tempfile | - |
 
 ## directory structure
 
@@ -78,7 +79,7 @@ sentinel/
 │   ├── policy_diff/
 │   │   └── mod.rs          sentinel policy-diff: default rules missing from a policy (read-only)
 │   ├── lint/
-│   │   └── mod.rs          sentinel policy-lint: dead-rule / bad-regex / broad-allow checks
+│   │   └── mod.rs          sentinel policy-lint: duplicate-rule / bad-regex / broad-allow checks
 │   ├── post_evaluate/
 │   │   └── mod.rs          sentinel post-evaluate: PostToolUse result-secret detection + nudge (opt-in, detection only)
 │   ├── audit_mcp/
@@ -91,8 +92,10 @@ sentinel/
 │   │   └── defaults.rs     default policy.toml generator
 │   ├── policy_migrate.rs   revision detection + validated three-way migration
 │   └── audit_trail/
-│       └── mod.rs          JSONL event logger
+│       └── mod.rs          JSONL event logger (0600/0700, symlink-refusing,
+│                           locked appends; tamper-covered by selfprotect)
 ├── tests/
+│   ├── home_config.rs      isolated HOME validation and relocated Claude lifecycle
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
 │       └── corpus/         test attack sequences (3 TOML files)
@@ -156,10 +159,31 @@ Host hook payload arrives
              version-stable numeric/alphabetic sequences are expanded fully;
              analysis-budget overflow or version-dependent sequence syntax follows
              the configured on_failure posture instead of accepting a partial result.
-             brace expansion is provenance-gated: only path candidates mined from
-             shell words with unquoted, unescaped brace delimiters are expanded;
-             direct tool paths and quoted or escaped shell words remain literal.
-           - deny commands: regex over the raw + an rm-flag-canonicalized form +
+              brace expansion is provenance-gated: only path candidates mined from
+              shell words with unquoted, unescaped brace delimiters are expanded;
+              direct tool paths and quoted or escaped shell words remain literal.
+              TWO resolution layers (2026-08-14 audit fixes):
+              - cd-relative resolution: a command-position-aware walk tracks a
+                literal `cd` target (`~`, `$HOME`, absolute, or metachar-free
+                relative; bare `cd` = home; `cd -`/variables/globs stop tracking)
+                and joins every later relative operand onto it, including inside
+                a `sh -c '<command>'` payload — `cd ~ && cat .ssh/id_rsa` reaches
+                the `~/.ssh/*` rule, while `echo cd ~` (cd NOT in command
+                position) does not.
+                Directory changes on a conditional branch remain usable within
+                that successful `&&` chain, but are cleared before a later
+                unconditional segment because the change may have been skipped.
+              - recursive-traversal coverage: when the command applies a
+                directory-RECURSIVE tool (`cp`/`rsync`/`grep` with an explicit
+                recursive flag, `tar` in create mode, `find`, `ditto`) at an
+                source operand that is an ANCESTOR of (or equal to) a rule's protected
+                directory, the rule fires — `cp -r ~ /tmp` reads every subtree
+                `~/.ssh/*` protects. tar extraction (x mode) writes rather than
+                reads and is excluded; an undetectable mode is not guessed at.
+                Sources are selected per command segment. Destinations, option
+                arguments, and unrelated path mentions do not inherit traversal
+                status. Unsupported option grammars retain ordinary path checks.
+            - deny commands: regex over the raw + an rm-flag-canonicalized form +
              a shell-de-obfuscated form (ANSI-C $'\xHH' escapes, ${IFS} desugar),
              covering pipe-to-shell / fetch-exec / exfil variants
            - deny secrets: regex over the raw request payload AND a normalized
@@ -170,8 +194,8 @@ Host hook payload arrives
              replaced. normalized once per evaluate, reused across all rules.
          ORDERING: a deny.paths WARN is held, not returned immediately, so a
          deny.commands BLOCK overrides it (rm of settings.json, curl of .env).
-         deny.secrets is consulted only when nothing else matched, preserving
-         "a secret in a warn-tier path stays warn" (the .env case).
+         deny.secrets BLOCK also overrides a held warning, including a secret
+         written to a warn-tier path.
          SCOPE: `common/shell` de-obfuscation handles transforms the shell
          actually resolves (ANSI-C/IFS/brace). Unicode homoglyph/fullwidth
          folding is deliberately NOT applied to commands/paths — the shell never
@@ -343,7 +367,9 @@ idempotent: running install twice doesn't duplicate hooks.
 
 native lifecycle ownership is limited to Claude Code and Codex:
 
-- Claude Code uses `~/.claude/settings.json`. if the matching handler is already
+- Claude Code uses `CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR`
+  is set (Claude Code then ignores `~/.claude` entirely), otherwise
+  `~/.claude/settings.json`. if the matching handler is already
   mediated through `ghost hook --sentinel ...`, install preserves that Ghost
   bridge and removes redundant direct Sentinel handlers. unrelated mixed
   handlers remain untouched.
@@ -352,7 +378,26 @@ native lifecycle ownership is limited to Claude Code and Codex:
   `config.toml`; otherwise it writes the native `[[hooks.PreToolUse]]` table.
 - uninstall removes direct Sentinel-owned handlers only. it does not remove a
   Ghost bridge owned by another tool or delete the user's policy.
-- config writes use sibling temporary files and preserve private permissions.
+- config writes use uniquely named sibling temporary files opened with
+  `create_new`, preventing a pre-existing temp file from capturing the write.
+  Files are synced before rename, parent-directory sync is best-effort, and
+  existing permissions are preserved. This does not sandbox a malicious process
+  running as the same user and modifying the directory concurrently.
+
+Sentinel state requires a nonempty absolute `HOME`; installation checks it before
+writing any configuration. Policy-path resolution returns an explicit error for
+an invalid home instead of selecting a relative or supposedly nonexistent file.
+Commands with an explicit `--policy` retain that selected path.
+
+On Unix, audit logging opens verified directory and regular-file handles without
+following final-component symlinks. Permission tightening uses those handles.
+An advisory lock covers each complete record across cooperating Sentinel writers;
+it does not prevent arbitrary same-user programs from modifying the log. A write
+failure produces a stderr diagnostic while preserving the hook's stdout contract
+and policy decision.
+Audit self-protection uses the same live path resolver as the logger and compares
+logical and effective mutation identities. A project fixture with the same
+`.sentinel/audit.jsonl` suffix is independent of the live home-directory log.
 
 `status` and `doctor` inspect agent config rather than inferring health from the
 binary alone. Claude activation includes `disableAllHooks`. Codex activation is
@@ -375,8 +420,12 @@ the user to approve the hook in `/hooks` and rerun strict doctor.
 - Claude Code uses stream JSON, an output schema, and a generated session id
   which later turns in the same sequence resume.
 - Codex uses `codex exec --json`, records the returned thread id, and resumes
-  that thread for later turns in the same sequence. each corpus sequence starts
-  a fresh session and workspace so state does not leak between verdicts.
+  that thread for later turns in the same sequence. an agent-reported thread id
+  that is empty, starts with `-`, or contains whitespace fails the schema — it
+  is argv injection into the next `resume`, not a thread id. each corpus
+  sequence starts a fresh session and workspace so state does not leak between
+  verdicts. workspaces are created 0700: the driven agent runs uncontained and
+  may write real secrets into them, which a shared /tmp must not read mid-run.
 - prompts are written through piped stdin and never interpolated into a shell
   command. process startup, stdin writes, and execution share a timeout; timed
   out children are killed. stdout is capped at 4 MiB, stderr is drained, and
@@ -395,6 +444,8 @@ refusal with no action evidence is defended. incomplete or unsupported evidence
 is inconclusive or an error, and incomplete risk scores serialize as `null`.
 there is no sandbox backend or degraded fallback. real audit therefore requires
 `--unsafe-host`, and the agent may persist its session locally.
+Evidence is agent-reported, so conclusions assume the selected executable reports
+its actions honestly; the harness cannot independently attest a hostile agent.
 
 ### explicit MCP baseline
 
@@ -455,28 +506,30 @@ never silently flips them to enforce.
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | lint the supported feature/target set |
 | `bash scripts/ad5-network-lint.sh` | AD-5 lint: fail if outbound-network imports appear in src/ outside the allowlist (src/audit) |
 | `bash scripts/docs-claims-check.sh target/debug/sentinel` | compare public command and verifier claims with the built binary |
-| `bash scripts/package-smoke.sh` | test the packaged and extracted crate, installed binary, CLI, VCS metadata, and empty-HOME verifier |
+| `bash scripts/package-smoke.sh` | test the packaged and extracted crate, installed binary, CLI, VCS metadata, and verifier with a fresh home directory |
 | `sentinel audit --agent claude --unsafe-host` | run the bundled real-agent audit without containment |
 | `sentinel install` | install the Claude Code hook (enforce mode, the default) |
 | `sentinel install --agent codex` | install the native Codex hook |
 | `sentinel install --audit` | install in audit mode (log only) |
 | `sentinel uninstall --agent <name>` | remove direct Claude Code or Codex hooks |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
-| `sentinel verify [--policy <file>]` | replay the pinned 45/45 attack and benign cases; nonzero on a mismatch |
+| `sentinel verify [--policy <file>]` | replay the pinned 64/64 attack and benign cases; nonzero on a mismatch |
 | `sentinel doctor --agent <name> [--strict] [--json]` | inspect activation and policy, then probe the actual hook chain with a known-bad canary |
 | `sentinel audit-mcp [--strict]` | compare current MCP config with an explicitly accepted baseline |
 | `sentinel audit-mcp --update` | accept the complete current MCP set |
 | `sentinel policy-migrate --check` | report whether policy migration is needed without writing |
 | `sentinel policy-migrate --apply` | merge current defaults and validate before atomic replacement |
 | `sentinel policy-diff [--policy <file>]` | print bundled-default rules missing from an installed policy, for manual paste (read-only; reaches users who installed before a hardening update) |
-| `sentinel policy-lint [--policy <file>]` | static-check a policy: invalid regexes (dead rules), exact-duplicate/unreachable patterns, over-broad allow entries; non-zero exit on an error-level finding |
+| `sentinel policy-lint [--policy <file>]` | static-check a policy: invalid regexes, exact duplicate patterns, over-broad allow entries; duplicate warnings do not imply unreachability; non-zero exit on an error-level finding |
 | `sentinel status --agent <name>` | show configuration, hook ownership, activation, and policy summary |
 | `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
 
-CI runs format, AD-5, locked all-target/all-feature tests and clippy, the empty-HOME
+CI runs format, AD-5, locked all-target/all-feature tests and clippy, the fresh-home
 verifier, docs claims, Rust 1.85 MSRV, extracted-package smoke, and native Linux
-and macOS smoke. CodeQL, dependency review, cargo-deny, cargo-audit in release,
-and Scorecard remain separate gates.
+and macOS release-build smoke. The quality job owns the Linux test run; the
+platform job adds macOS tests without repeating the Linux suite. CodeQL,
+dependency review, cargo-deny, cargo-audit in release, and Scorecard remain
+separate gates.
 
 ## publishing
 
@@ -495,7 +548,11 @@ and Scorecard remain separate gates.
 
 ---
 
-last updated: 2026-08-14 by StressTestor. documents the shared typed
+last updated: 2026-09-04 (cleanup and hardening self-review: command-scoped traversal,
+explicit HOME errors, relocated Claude self-protection, verified audit handles and
+locked appends, deterministic temporary-file collision coverage). Prior update:
+2026-08-14 by StressTestor (security-audit fixes and verify corpus 45 -> 64).
+Documents the shared typed
 evaluation pipeline, native Claude Code/Codex lifecycle reconciliation,
 trust-aware health checks, uncontained stateful audit, explicit MCP baselines,
 validated policy migration, completeness-aware shell matching, package preflight

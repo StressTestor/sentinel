@@ -1,11 +1,11 @@
 //! `sentinel policy-lint` - static checks on a policy file. Catches the mistakes
 //! that quietly weaken a policy: a regex that doesn't compile (a dead rule), a
-//! duplicate pattern shadowed by an earlier rule (first-match-wins), and an
+//! repeated pattern whose actions and ordering warrant review, and an
 //! over-broad allow-list entry that widens a lockdown.
 //!
 //! It deliberately does NOT flag two rules that can both match the same input
 //! (e.g. the intentional private-key-before-gcp_sa ordering in the defaults) -
-//! that's design, not a bug. Only exact (section, pattern) duplicates are dead.
+//! that's design, not a bug. Only exact (section, pattern) duplicates are flagged.
 //!
 //! Best-effort warnings, not a proof of correctness: duplicate detection is
 //! byte-exact (won't catch case- or trailing-slash-equivalent rules), broad-allow
@@ -52,16 +52,16 @@ pub fn lint_engine(engine: &PolicyEngine) -> Vec<Finding> {
         }
     }
 
-    // 2. exact (section, pattern) duplicates - first match wins, so the later one
-    //    is dead. (Two DIFFERENT patterns that can both match is intentional and
-    //    not flagged.)
+    // 2. Exact (section, pattern) duplicates. A warning holds its decision while
+    //    evaluation continues, so a later blocking duplicate can still matter.
+    //    Report repetition without claiming the later rule is unreachable.
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
     for r in &rules {
         if !seen.insert((r.section, r.pattern)) {
             findings.push(Finding {
                 error: false,
                 message: format!(
-                    "{}: duplicate pattern {:?} is unreachable (an earlier rule with the same pattern already matches)",
+                    "{}: duplicate pattern {:?}; review the actions and ordering before removing either rule",
                     r.section, r.pattern
                 ),
             });
@@ -86,7 +86,10 @@ pub fn lint_engine(engine: &PolicyEngine) -> Vec<Finding> {
 }
 
 pub fn run(args: LintArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let path = args.policy.clone().unwrap_or_else(resolve_policy_path);
+    let path = match args.policy {
+        Some(path) => path,
+        None => resolve_policy_path()?,
+    };
     let engine = PolicyEngine::load(&path).map_err(|e| {
         format!(
             "could not load policy at {}: {e}\n(run 'sentinel install' first)",
@@ -146,16 +149,29 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_pattern_is_an_unreachable_warning() {
-        let e = engine(
-            "[policy]\nmode=\"enforce\"\n\
-             [[deny.paths]]\npattern=\"~/.ssh/*\"\naction=\"block\"\nreason=\"a\"\n\
-             [[deny.paths]]\npattern=\"~/.ssh/*\"\naction=\"warn\"\nreason=\"b\"\n",
-        );
-        let findings = lint_engine(&e);
-        assert!(findings
-            .iter()
-            .any(|f| !f.error && f.message.contains("unreachable")));
+    fn duplicate_warning_does_not_claim_a_reachable_block_is_dead() {
+        for (first, second) in [("block", "warn"), ("warn", "block")] {
+            let e = engine(&format!(
+                "[policy]\nmode=\"enforce\"\n\
+                 [[deny.commands]]\npattern='example'\naction='{first}'\nreason='{first}'\n\
+                 [[deny.commands]]\npattern='example'\naction='{second}'\nreason='{second}'\n"
+            ));
+            let decision = e.evaluate(&crate::policy::ToolCall {
+                tool_name: "Bash".into(),
+                command: Some("example".into()),
+                paths: Vec::new(),
+                shell_expansion_paths: Vec::new(),
+                raw_params: String::new(),
+            });
+            assert_eq!(decision.action, crate::policy::Action::Block);
+            assert_eq!(decision.reason.as_deref(), Some("block"));
+
+            let findings = lint_engine(&e);
+            assert_eq!(findings.len(), 1);
+            assert!(!findings[0].error);
+            assert!(findings[0].message.contains("duplicate pattern"));
+            assert!(!findings[0].message.contains("unreachable"));
+        }
     }
 
     #[test]

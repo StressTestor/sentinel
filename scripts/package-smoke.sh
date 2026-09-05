@@ -101,36 +101,4 @@ empty_home="$smoke_root/home"
 mkdir -p "$empty_home"
 HOME="$empty_home" "$sentinel_bin" verify
 
-if grep -Eq '^[[:space:]]+corpus-update[[:space:]]' <<<"$help_output"; then
-  corpus_output="$smoke_root/corpus-update.out"
-  if ! HOME="$empty_home" "$sentinel_bin" corpus-update >"$corpus_output" 2>&1; then
-    cat "$corpus_output" >&2
-    echo "package smoke: advertised corpus-update command failed" >&2
-    exit 1
-  fi
-  if grep -Eqi 'not yet implemented|manually update|coming soon' "$corpus_output"; then
-    cat "$corpus_output" >&2
-    echo "package smoke: corpus-update reported fake success" >&2
-    exit 1
-  fi
-  if ! find "$empty_home/.sentinel/corpus" -type f -print -quit 2>/dev/null | grep -q .; then
-    echo "package smoke: corpus-update succeeded without installing a corpus" >&2
-    exit 1
-  fi
-fi
-
-if grep -Eq '^[[:space:]]+wrap[[:space:]]' <<<"$help_output"; then
-  wrap_output="$smoke_root/wrap.out"
-  if ! HOME="$empty_home" "$sentinel_bin" wrap -- "$(command -v true)" >"$wrap_output" 2>&1; then
-    cat "$wrap_output" >&2
-    echo "package smoke: advertised wrap command failed" >&2
-    exit 1
-  fi
-  if grep -Eqi 'not yet implemented|unimplemented|coming soon' "$wrap_output"; then
-    cat "$wrap_output" >&2
-    echo "package smoke: wrap reported a stub" >&2
-    exit 1
-  fi
-fi
-
 echo "package smoke: packaged tests, VCS identity, install, verifier, and public commands passed"

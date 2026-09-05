@@ -29,6 +29,378 @@ pub(crate) fn matches_path_literal_checked(pattern: &str, path: &str) -> PathMat
     matches_path_resolved_checked_inner(pattern, path, &home, &user, true, false)
 }
 
+/// Whether a command applies a directory-RECURSIVE tool whose operand COVERS
+/// the rule's protected directory — an ancestor directory (or the dir itself).
+/// `cp -r ~ /tmp`, `tar czf x.tgz ~`, `rsync -a ~/ /dst`, and `grep -r s ~`
+/// read every protected subtree under the operand in one call, so a subtree
+/// rule (`~/.ssh/*`) must fire even though no single mined path names a
+/// protected file: the only candidate the command yields is the bare home dir.
+pub(crate) fn matches_recursive_traversal(pattern: &str, path: &str) -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    let expanded_pattern = lexical_normalize(&expand_home(pattern, &home, &user));
+    let protected = rule_literal_prefix(&expanded_pattern);
+    if protected.is_empty() {
+        return false;
+    }
+    candidate_forms(path, &home, &user).iter().any(|form| {
+        let form = lexical_normalize(form);
+        !form.is_empty()
+            && (protected == form
+                || protected.starts_with(&format!("{}/", form.trim_end_matches('/'))))
+    })
+}
+
+/// Literal source directories traversed by supported commands. Operands retain
+/// their command's scope: destinations, patterns, option values, and paths in
+/// unrelated commands never inherit a recursive flag. This is intentionally an
+/// argv classifier, not a shell evaluator. Unknown options, wrapper options,
+/// dynamic operands, and file-list/filter modes do not acquire ancestor matches;
+/// ordinary path and command policy checks still apply to the original input.
+pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
+    let Some(tokens) = shell_tokens(command) else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    let mut cwd = Some(".".to_string());
+    let mut pipeline = false;
+    let mut conditional = false;
+    let mut conditional_cd = false;
+    let mut parents = Vec::new();
+    let mut start = 0;
+    for end in 0..=tokens.len() {
+        if end < tokens.len() && !is_command_separator(&tokens[end]) && tokens[end] != ")" {
+            continue;
+        }
+        let before = cwd.clone();
+        let mut args = &tokens[start..end];
+        while args
+            .first()
+            .is_some_and(|word| is_assignment(word) || is_modeled_wrapper(word))
+        {
+            args = &args[1..];
+        }
+        if let Some((tool, args)) = args.split_first() {
+            if tool == "cd" {
+                conditional_cd |= conditional;
+                let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
+                cwd = match args {
+                    [] => traversal_source_path("~", cwd.as_deref()),
+                    [target] if !target.is_empty() && !target.starts_with('-') => {
+                        traversal_source_path(target, cwd.as_deref())
+                    }
+                    _ => None,
+                };
+            } else if let Some(found) =
+                traversal_operands(token_basename(tool), args, cwd.as_deref())
+            {
+                sources.extend(found);
+            }
+        }
+        if let Some(separator) = tokens.get(end) {
+            match separator.as_str() {
+                "(" => {
+                    parents.push((cwd.clone(), pipeline, conditional, conditional_cd));
+                    pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
+                }
+                ")" => {
+                    (cwd, pipeline, conditional, conditional_cd) =
+                        parents.pop().unwrap_or((None, false, false, false))
+                }
+                "|" => {
+                    cwd = before;
+                    pipeline = true;
+                }
+                "&" => {
+                    cwd = if conditional_cd { None } else { before };
+                    pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
+                }
+                ";" | "&&" | "||" => {
+                    // Shell lastpipe behavior varies, so a completed pipeline
+                    // cannot establish a proven directory for later commands.
+                    if pipeline || separator == "||" || (separator == ";" && conditional_cd) {
+                        cwd = None;
+                    }
+                    conditional = separator != ";";
+                    if !conditional {
+                        conditional_cd = false;
+                    }
+                    pipeline = false;
+                }
+                _ => {}
+            }
+        }
+        start = end + 1;
+    }
+    sources
+}
+
+fn traversal_source_path(path: &str, cwd: Option<&str>) -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    let expanded = expand_home(path, &home, &user);
+    resolve_literal_directory(&expanded, cwd)
+}
+
+#[derive(Clone, Copy)]
+enum TraversalOption {
+    Flag,
+    Value,
+    Recursive,
+    Create,
+    OtherMode,
+    Destination,
+    Pattern,
+    Directory,
+}
+
+/// Each accepted option declares whether it consumes an argument. Unknown
+/// options abort this extra classification rather than turning their values
+/// into alleged source directories. Filtering/file-list options are omitted
+/// because they do not establish that an entire source subtree is visited.
+fn traversal_option(tool: &str, option: &str) -> Option<TraversalOption> {
+    use TraversalOption::*;
+    let spec = match (tool, option) {
+        ("cp", "-r" | "-R" | "-a" | "--recursive" | "--archive")
+        | ("rsync", "-r" | "-a" | "--recursive" | "--archive")
+        | ("grep", "-r" | "-R" | "--recursive" | "--dereference-recursive") => Recursive,
+        ("cp", "-t" | "--target-directory") => Destination,
+        ("cp", "-S" | "--suffix") => Value,
+        (
+            "cp",
+            "-f"
+            | "-i"
+            | "-n"
+            | "-p"
+            | "-P"
+            | "-L"
+            | "-H"
+            | "-v"
+            | "-T"
+            | "--force"
+            | "--interactive"
+            | "--no-clobber"
+            | "--preserve"
+            | "--verbose"
+            | "--no-target-directory"
+            | "--parents",
+        ) => Flag,
+        ("rsync", "-e" | "--rsh" | "--port" | "--bwlimit" | "--timeout" | "--chmod") => Value,
+        (
+            "rsync",
+            "-v" | "-z" | "-p" | "-t" | "-g" | "-o" | "-D" | "-l" | "-H" | "-A" | "-X" | "-R"
+            | "-h" | "--verbose" | "--compress" | "--delete" | "--progress" | "--relative",
+        ) => Flag,
+        ("grep", "-e" | "-f" | "--regexp" | "--file") => Pattern,
+        (
+            "grep",
+            "-m" | "-A" | "-B" | "-C" | "--max-count" | "--after-context" | "--before-context"
+            | "--context" | "--label" | "--color" | "--colour",
+        ) => Value,
+        (
+            "grep",
+            "-i" | "-v" | "-n" | "-h" | "-H" | "-l" | "-L" | "-c" | "-o" | "-w" | "-x" | "-E"
+            | "-F" | "-G" | "-P" | "-a" | "-I" | "-s" | "-b" | "-z" | "-Z" | "--ignore-case"
+            | "--line-number" | "--fixed-strings" | "--extended-regexp",
+        ) => Flag,
+        ("tar", "-c" | "--create") => Create,
+        (
+            "tar",
+            "-x" | "-t" | "-r" | "-u" | "-A" | "-d" | "--extract" | "--get" | "--list" | "--append"
+            | "--update" | "--concatenate" | "--diff",
+        ) => OtherMode,
+        ("tar", "-C" | "--directory") => Directory,
+        ("tar", "-f" | "--file" | "--format" | "--owner" | "--group" | "--mtime") => Value,
+        (
+            "tar",
+            "-z" | "-j" | "-J" | "-v" | "-p" | "-h" | "--gzip" | "--bzip2" | "--xz" | "--verbose"
+            | "--dereference" | "--numeric-owner",
+        ) => Flag,
+        (
+            "ditto",
+            "-v" | "-V" | "-c" | "-k" | "--rsrc" | "--extattr" | "--acl" | "--keepParent"
+            | "--sequesterRsrc" | "--norsrc" | "--noextattr" | "--noacl",
+        ) => Flag,
+        _ => return None,
+    };
+    Some(spec)
+}
+
+fn traversal_operands(tool: &str, args: &[String], cwd: Option<&str>) -> Option<Vec<String>> {
+    // Redirection targets belong to the shell, not the tool's source argv.
+    // The lightweight lexer keeps attached redirects together and separates
+    // `2>&1` at `&`; neither form should promote an output path to a source.
+    let mut command_args = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let redirect = arg.trim_start_matches(|ch: char| ch.is_ascii_digit());
+        if redirect.starts_with(['<', '>']) {
+            if redirect.trim_start_matches(['<', '>']).is_empty() {
+                index += 1;
+            }
+        } else {
+            command_args.push(arg.clone());
+        }
+        index += 1;
+    }
+    let args = command_args.as_slice();
+    if tool == "find" {
+        let args = args
+            .strip_prefix(&["-H".into()])
+            .or_else(|| args.strip_prefix(&["-L".into()]))
+            .or_else(|| args.strip_prefix(&["-P".into()]))
+            .unwrap_or(args);
+        // Depth/pruning and explicit actions can restrict the walk or consume
+        // command operands. Keep these out of whole-subtree classification.
+        if args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-maxdepth" | "-prune" | "-quit" | "-exec" | "-execdir" | "-ok" | "-okdir"
+            )
+        }) {
+            return None;
+        }
+        let roots: Vec<_> = args
+            .iter()
+            .take_while(|arg| !arg.starts_with('-') && !matches!(arg.as_str(), "!" | "(" | ")"))
+            .collect();
+        return if roots.is_empty() {
+            Some(traversal_source_path(".", cwd).into_iter().collect())
+        } else {
+            Some(
+                roots
+                    .into_iter()
+                    .filter_map(|root| traversal_source_path(root, cwd))
+                    .collect(),
+            )
+        };
+    }
+    if !matches!(tool, "cp" | "rsync" | "grep" | "tar" | "ditto") {
+        return None;
+    }
+    let mut recursive = tool == "ditto";
+    let mut tar_mode = None;
+    let mut target_directory = false;
+    let mut explicit_pattern = false;
+    let mut operands = Vec::new();
+    let mut cwd = cwd.map(str::to_owned);
+    let mut options = true;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if options && arg == "--" {
+            options = false;
+            i += 1;
+            continue;
+        }
+        let old_tar_options = tool == "tar" && i == 0 && !arg.starts_with('-');
+        if options && (arg.starts_with('-') && arg != "-" || old_tar_options) {
+            let options_in_word: Vec<(String, Option<String>)> = if let Some(long) =
+                arg.strip_prefix("--")
+            {
+                let (name, value) = long.split_once('=').map_or((long, None), |(name, value)| {
+                    (name, Some(value.to_string()))
+                });
+                vec![(format!("--{name}"), value)]
+            } else {
+                let short = if old_tar_options {
+                    arg.as_str()
+                } else {
+                    &arg[1..]
+                };
+                let mut parsed = Vec::new();
+                for (offset, ch) in short.char_indices() {
+                    let name = format!("-{ch}");
+                    let spec = traversal_option(tool, &name)?;
+                    let takes_value = matches!(
+                        spec,
+                        TraversalOption::Value
+                            | TraversalOption::Destination
+                            | TraversalOption::Pattern
+                            | TraversalOption::Directory
+                    );
+                    let rest = &short[offset + ch.len_utf8()..];
+                    let attached = (!old_tar_options && takes_value && !rest.is_empty())
+                        .then(|| rest.to_string());
+                    let stop = attached.is_some();
+                    parsed.push((name, attached));
+                    if stop {
+                        break;
+                    }
+                }
+                parsed
+            };
+            for (name, attached) in options_in_word {
+                use TraversalOption::*;
+                let spec = traversal_option(tool, &name)?;
+                let takes_value = matches!(spec, Value | Destination | Pattern | Directory);
+                let value = if takes_value {
+                    Some(match attached {
+                        Some(value) => value,
+                        None => {
+                            i += 1;
+                            args.get(i)?.clone()
+                        }
+                    })
+                } else {
+                    if attached.is_some() {
+                        return None;
+                    }
+                    None
+                };
+                match spec {
+                    Recursive => recursive = true,
+                    Create | OtherMode => {
+                        let create = matches!(spec, Create);
+                        if tar_mode.is_some_and(|mode| mode != create) {
+                            return None;
+                        }
+                        tar_mode = Some(create);
+                    }
+                    Destination => target_directory = true,
+                    Pattern => explicit_pattern = true,
+                    Directory => cwd = traversal_source_path(value.as_deref()?, cwd.as_deref()),
+                    Flag | Value => {}
+                }
+            }
+        } else {
+            operands.push((arg.clone(), cwd.clone()));
+        }
+        i += 1;
+    }
+    match tool {
+        "tar" if tar_mode != Some(true) => return None,
+        "cp" | "rsync" | "grep" if !recursive => return None,
+        _ => {}
+    }
+    if matches!(tool, "rsync" | "ditto") || tool == "cp" && !target_directory {
+        if operands.len() < 2 {
+            return None;
+        }
+        operands.pop(); // destination is not a recursively-read source
+    }
+    if tool == "grep" && !explicit_pattern {
+        if operands.is_empty() {
+            return None;
+        }
+        operands.remove(0); // positional search pattern
+    }
+    if tool == "grep" && operands.is_empty() {
+        operands.push((".".into(), cwd));
+    }
+    Some(
+        operands
+            .into_iter()
+            .filter_map(|(path, cwd)| traversal_source_path(&path, cwd.as_deref()))
+            .collect(),
+    )
+}
+
 /// Match a path against an **allow** rule. A trailing `/*` stays strict
 /// (direct children only) so a narrow allow-list isn't silently widened — use
 /// `/**` for an intentional recursive allow. Use this for allow.paths.
@@ -1526,6 +1898,79 @@ fn glob_body(pattern: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recursive_sources_exclude_destinations_patterns_and_option_values() {
+        for command in [
+            "cp -r /example/src /example/out",
+            "cp -r /example/src /example/out > /example/log",
+            "cp -r /example/src /example/out >/example/log",
+            "cp -rt /example/out /example/src",
+            "cp --recursive --target-directory=/example/out /example/src",
+            "rsync -a -e 'ssh -p 2222' /example/src /example/out",
+            "grep -r -e /example/pattern /example/src",
+            "grep -r /example/pattern /example/src",
+            "tar -czf content.tar -C /example src",
+            "tar czf content.tar -C /example src",
+            "tar -c -f /example/output.tar /example/src",
+            "find /example/src -name '*.rs'",
+            "find /example/src > /example/list",
+            "ditto /example/src /example/out",
+        ] {
+            assert_eq!(
+                recursive_traversal_sources(command),
+                ["/example/src"],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_sources_do_not_infer_modes_from_filenames_or_unknown_options() {
+        for command in [
+            "tar -xf content.tar -C /example src",
+            "tar --extract --file content.tar -C /example",
+            "tar xzf content.tar -C /example",
+            "grep -- -r /example/src",
+            "cp -r --not-modeled /example/option /example/src /example/out",
+            "find /example/src -maxdepth 0",
+            "rsync -a --files-from /example/list /example/src /example/out",
+        ] {
+            assert!(recursive_traversal_sources(command).is_empty(), "{command}");
+        }
+    }
+
+    #[test]
+    fn recursive_sources_keep_command_scope_and_chained_cd_context() {
+        assert_eq!(
+            recursive_traversal_sources(
+                "printf /example/a; cp -r /example/src /example/out; printf /example/b"
+            ),
+            ["/example/src"]
+        );
+        assert_eq!(
+            recursive_traversal_sources("cd /example && cd project && cp -r ./src ./out"),
+            ["/example/project/src"]
+        );
+        assert_eq!(
+            recursive_traversal_sources("cd /example; (cd /other); cp -r ./src ./out"),
+            ["/example/src"]
+        );
+        for command in [
+            "cd /example; printf x | cd /other; cp -r ./src ./out",
+            "cd /example; cd /other | printf x; cp -r ./src ./out",
+            "cd /example; cd child extra; cp -r ./src ./out",
+            "cd /example; cd -P /other; cp -r ./src ./out",
+            "cd /example; cd ''; cp -r ./src ./out",
+            "false && cd /example; cp -r ./src ./out",
+            "false && cd /example && printf done; cp -r ./src ./out",
+            "false && cd /example && (printf done); cp -r ./src ./out",
+            "false && cd /example & cp -r ./src ./out",
+            "cd /example; false && cd /other; cd child; cp -r ./src ./out",
+        ] {
+            assert!(recursive_traversal_sources(command).is_empty(), "{command}");
+        }
+    }
 
     /// test-only single-shot form: normalize and delegate, exactly what
     /// `PolicyEngine::evaluate` does once per payload before its rule loop

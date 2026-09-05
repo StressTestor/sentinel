@@ -51,7 +51,7 @@ pub fn claude_activation(settings: &Value) -> Activation {
 /// Ask Codex's public app-server `hooks/list` API for the effective host state.
 /// Config presence alone cannot prove trust or activation.
 pub fn query_codex_activation(command: &str) -> Activation {
-    let mut child = match Command::new("codex")
+    let mut child = match Command::new(codex_binary())
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -129,6 +129,41 @@ pub fn query_codex_activation(command: &str) -> Activation {
     })
 }
 
+/// Prefer usable executables at common install paths. PATH remains a
+/// compatibility fallback; this preference does not authenticate the binary.
+fn codex_binary() -> std::path::PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(home) = crate::common::home_dir() {
+        candidates.push(home.join(".local/bin/codex"));
+    }
+    candidates.extend([
+        std::path::PathBuf::from("/opt/homebrew/bin/codex"),
+        std::path::PathBuf::from("/usr/local/bin/codex"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|path| is_executable_file(path))
+        .unwrap_or_else(|| std::path::PathBuf::from("codex"))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 pub fn activation_from_hooks_list(response: &Value, configured_command: &str) -> Activation {
     if let Some(error) = response.get("error") {
         return Activation::Unverified(format!("Codex hooks/list error: {error}"));
@@ -191,6 +226,21 @@ fn collect_hook_objects<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_candidates_skip_directories_and_nonexecutable_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_executable_file(dir.path()));
+        assert!(!is_executable_file(&dir.path().join("missing")));
+        let candidate = dir.path().join("codex");
+        std::fs::write(&candidate, "placeholder").unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!is_executable_file(&candidate));
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(is_executable_file(&candidate));
+    }
 
     fn response(command: &str, enabled: bool, trust: &str) -> Value {
         serde_json::json!({

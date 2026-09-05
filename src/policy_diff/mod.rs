@@ -67,7 +67,10 @@ fn format_rule((section, pattern, action, reason): &RuleTuple) -> String {
 }
 
 pub fn run(args: PolicyDiffArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let user_path = args.policy.clone().unwrap_or_else(resolve_policy_path);
+    let user_path = match args.policy {
+        Some(path) => path,
+        None => resolve_policy_path()?,
+    };
     let user = PolicyEngine::load(&user_path).map_err(|e| {
         format!(
             "could not load policy at {}: {e}\n(run 'sentinel install' first)",
@@ -160,16 +163,29 @@ mod tests {
 
     #[test]
     fn format_rule_is_pasteable_toml() {
-        let r = (
-            "deny.paths".into(),
-            "~/.npmrc".into(),
-            "block".into(),
-            "npm auth".into(),
-        );
-        let out = format_rule(&r);
-        assert!(out.contains("[[deny.paths]]"));
-        assert!(out.contains(r#"pattern = "~/.npmrc""#)); // globs: double-quoted
-        assert!(out.contains(r#"action = "block""#));
+        for (section, pattern, action, reason) in [
+            ("deny.paths", "~/.npmrc", "block", "npm auth"),
+            (
+                "deny.paths",
+                r#"./a "quoted" path\*"#,
+                "warn",
+                "quoted path",
+            ),
+            ("deny.commands", r"example\s+value", "block", "regex"),
+            ("deny.secrets", r"example's\s+value", "warn", "apostrophe"),
+            (
+                "allow.paths",
+                "./src/**",
+                "allow",
+                "a \"quoted\" note\nwith a second line",
+            ),
+        ] {
+            let rule = (section.into(), pattern.into(), action.into(), reason.into());
+            let out = format_rule(&rule);
+            let parsed = PolicyEngine::from_toml_str(&format!("[policy]\n{out}"))
+                .unwrap_or_else(|error| panic!("rule must parse as policy TOML: {error}; {out:?}"));
+            assert_eq!(to_tuples(&parsed), vec![rule]);
+        }
     }
 
     #[test]

@@ -1,34 +1,69 @@
 use super::InstallError;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
-/// Write `content` to `path` atomically: write a sibling temp file, then rename
-/// over the target (atomic on the same filesystem). A crash or full disk leaves
-/// the original settings file intact rather than half-written.
+/// Write `content` to `path` atomically: write a uniquely-named sibling temp
+/// file, then rename over the target (atomic on the same filesystem). A crash
+/// or full disk leaves the original settings file intact rather than
+/// half-written.
+///
+/// Each invocation uses a pid/time suffix and retries collisions. `create_new`
+/// provides exclusive creation, so a pre-existing symlink at a guessable
+/// `<target>.tmp` path can neither capture the write nor redirect it into
+/// another file. A leftover temp from a crashed run is simply skipped over by
+/// the next attempt.
 pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), InstallError> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    atomic_write_with_stamp(path, content, stamp)
+}
+
+// Keep name generation deterministic in collision tests; all actual file I/O
+// stays in this implementation, which the public entry point also calls.
+fn atomic_write_with_stamp(path: &Path, content: &str, stamp: u128) -> Result<(), InstallError> {
     use std::io::Write;
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| InstallError::WriteError(e.to_string()))?;
-    }
-    let mut tmp_os = path.as_os_str().to_owned();
-    tmp_os.push(".tmp");
-    let tmp = PathBuf::from(tmp_os);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| InstallError::WriteError(e.to_string()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sentinel-write");
     let existing_permissions = std::fs::metadata(path)
         .ok()
         .map(|metadata| metadata.permissions());
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    let mut temp = None;
+    for attempt in 0..1000_u32 {
+        let candidate = parent.join(format!(
+            ".{name}.sentinel-write.{}.{}.tmp",
+            std::process::id(),
+            stamp + u128::from(attempt)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                temp = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(InstallError::WriteError(error.to_string())),
+        }
     }
+    let Some((tmp, mut file)) = temp else {
+        return Err(InstallError::WriteError(
+            "could not allocate a unique sibling temporary file".into(),
+        ));
+    };
     let write_result = (|| -> Result<(), InstallError> {
-        let mut file = options
-            .open(&tmp)
-            .map_err(|error| InstallError::WriteError(error.to_string()))?;
         if let Some(permissions) = existing_permissions {
             file.set_permissions(permissions)
                 .map_err(|error| InstallError::WriteError(error.to_string()))?;
@@ -38,6 +73,7 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), InstallErro
         file.sync_all()
             .map_err(|error| InstallError::WriteError(error.to_string()))
     })();
+    drop(file);
     if let Err(error) = write_result {
         let _ = std::fs::remove_file(&tmp);
         return Err(error);
@@ -48,8 +84,17 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), InstallErro
         let _ = std::fs::remove_file(&tmp);
         return Err(InstallError::WriteError(e.to_string()));
     }
+    sync_parent_dir(parent);
     Ok(())
 }
+
+#[cfg(unix)]
+fn sync_parent_dir(parent: &Path) {
+    let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_parent: &Path) {}
 
 /// the hook events sentinel owns, for uninstall cleanup.
 const SENTINEL_HOOK_EVENTS: &[&str] = &["PreToolUse", "PostToolUse"];
@@ -597,13 +642,6 @@ pub(crate) fn codex_pre_tool_commands(document: &DocumentMut) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
-pub(crate) fn codex_pre_tool_command(document: &DocumentMut) -> Option<String> {
-    codex_pre_tool_commands(document)
-        .into_iter()
-        .find(|command| classify_hook_command(command) == HookCommandKind::DirectPre)
-}
-
 pub(crate) fn inspect_codex_pre_tool(document: &DocumentMut) -> HookInspection {
     let direct: Vec<String> = codex_pre_tool_commands(document)
         .into_iter()
@@ -719,8 +757,68 @@ mod tests {
         let path = dir.path().join("settings.json");
         atomic_write(&path, "{\"x\":1}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"x\":1}");
-        // the temp sibling must be renamed away, not left behind
-        assert!(!dir.path().join("settings.json.tmp").exists());
+        // no leftover sibling of any kind may remain beside the target
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("settings.json")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_ignores_preplanted_tmp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        // regression (audit F-3): the old implementation opened a predictable
+        // `<target>.tmp` without O_EXCL, so a planted symlink redirected the
+        // write (and the chmod) into the symlink's victim. The unique
+        // create_new temp must leave the plant untouched and write the target.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        symlink(&victim, dir.path().join("settings.json.tmp")).unwrap();
+
+        atomic_write(&path, "{\"x\":1}").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"x\":1}");
+        // the plant itself is left as-is for the user to see, not followed
+        assert!(dir
+            .path()
+            .join("settings.json.tmp")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_skips_over_stale_tmp_files() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let stamp = 42;
+        let stale: Vec<_> = (0..5)
+            .map(|attempt| {
+                dir.path().join(format!(
+                    ".config.toml.sentinel-write.{}.{}.tmp",
+                    std::process::id(),
+                    stamp + attempt
+                ))
+            })
+            .collect();
+        for candidate in &stale {
+            std::fs::write(candidate, "stale").unwrap();
+        }
+        // These are the first five candidates the actual writer will try.
+        atomic_write_with_stamp(&path, "fresh", stamp).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+        for candidate in &stale {
+            assert_eq!(std::fs::read_to_string(candidate).unwrap(), "stale");
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 6);
     }
 
     #[cfg(unix)]
@@ -890,8 +988,10 @@ command = "python3 other.py"
         assert!(content.contains(r#"model = "gpt-5""#));
         assert_eq!(content.matches("evaluate --agent codex").count(), 1);
         let document = read_codex_config(&path).unwrap();
+        let inspection = inspect_codex_pre_tool(&document);
+        assert_eq!(inspection.ownership, HookOwnership::Direct);
         assert_eq!(
-            codex_pre_tool_command(&document).as_deref(),
+            inspection.command.as_deref(),
             Some("'/Applications/My Tools/sentinel' evaluate --agent codex")
         );
     }

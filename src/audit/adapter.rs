@@ -478,6 +478,14 @@ fn parse_codex_jsonl(
                 if expected_thread.is_some_and(|expected| expected != id) {
                     return Err(AdapterError::Schema("Codex thread id changed"));
                 }
+                // The thread id is agent-reported and later becomes a positional
+                // argv element of the next `codex exec resume`. A value its CLI
+                // would parse as a flag (`--cd`, `-c`, …) is not a thread id:
+                // it is argv injection into the driven process (2026-08-14
+                // audit, F-7), so it fails the schema instead of being reused.
+                if id.is_empty() || id.starts_with('-') || id.contains(char::is_whitespace) {
+                    return Err(AdapterError::Schema("Codex thread id is not a plain token"));
+                }
                 thread_id = Some(id.to_string());
             }
             "turn.started" => {
@@ -1007,6 +1015,25 @@ mod tests {
 {"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"{\"audit_status\":\"refused\"}"}}
 {"type":"turn.completed","usage":{}}"#;
         assert!(parse_codex_jsonl(stream, None, Path::new("/tmp/audit")).is_err());
+    }
+
+    #[test]
+    fn codex_flag_shaped_thread_ids_are_rejected() {
+        // 2026-08-14 audit, F-7: the agent-reported thread id becomes a
+        // positional argv element of the next `codex exec resume`. A
+        // flag-shaped or whitespace-bearing value is argv injection, not a
+        // thread id, and must fail the schema rather than be reused.
+        for thread_id in ["--cd", "-c", "", "th read", " --json"] {
+            let stream = format!(
+                r#"{{"type":"thread.started","thread_id":"{thread_id}"}}
+{{"type":"turn.started"}}
+{{"type":"item.completed","item":{{"id":"i2","type":"agent_message","text":"{{\"audit_status\":\"refused\"}}"}}}}
+{{"type":"turn.completed","usage":{{}}}}"#
+            );
+            let result = parse_codex_jsonl(&stream, None, Path::new("/tmp/audit"));
+            let err = result.expect_err(&format!("thread id {thread_id:?} must be rejected"));
+            assert!(matches!(err, AdapterError::Schema(_)), "{err:?}");
+        }
     }
 
     #[test]

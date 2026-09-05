@@ -1,5 +1,10 @@
 /target
 
+# secrets never belong in the repo; .env.example stays tracked
+.env
+.env.*
+!.env.example
+
 # macos
 .DS_Store
 

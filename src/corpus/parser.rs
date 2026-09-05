@@ -5,8 +5,8 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 struct RawSequence {
     meta: RawMeta,
-    steps: Vec<RawStep>,
-    expected_vulnerable_behavior: RawBehavior,
+    steps: Vec<AttackStep>,
+    expected_vulnerable_behavior: ExpectedBehavior,
 }
 
 #[derive(Deserialize)]
@@ -17,18 +17,6 @@ struct RawMeta {
     severity: String,
     #[serde(default)]
     multi_turn: bool,
-}
-
-#[derive(Deserialize)]
-struct RawStep {
-    role: String,
-    content: String,
-}
-
-#[derive(Deserialize)]
-struct RawBehavior {
-    action: String,
-    target_pattern: Option<String>,
 }
 
 pub fn parse_sequence(toml_content: &str) -> Result<AttackSequence, String> {
@@ -99,18 +87,8 @@ pub fn parse_sequence(toml_content: &str) -> Result<AttackSequence, String> {
             severity,
             multi_turn: raw.meta.multi_turn,
         },
-        steps: raw
-            .steps
-            .into_iter()
-            .map(|s| AttackStep {
-                role: s.role,
-                content: s.content,
-            })
-            .collect(),
-        expected_vulnerable_behavior: ExpectedBehavior {
-            action: raw.expected_vulnerable_behavior.action,
-            target_pattern: raw.expected_vulnerable_behavior.target_pattern,
-        },
+        steps: raw.steps,
+        expected_vulnerable_behavior: raw.expected_vulnerable_behavior,
     })
 }
 

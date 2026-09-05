@@ -39,7 +39,7 @@ pub struct CheckOutcome {
 
 /// Evaluate one hook-input JSON against a loaded policy. Pure: no file writes,
 /// no audit logging. This is the testable core of `check`.
-pub fn evaluate_check(engine: &PolicyEngine, raw: &str) -> Result<CheckOutcome, String> {
+pub fn evaluate_check(engine: &PolicyEngine, raw: &str) -> CheckOutcome {
     let result = pipeline::evaluate_raw(engine, raw);
     let decision = result.decision().clone();
     let (tool_name, paths, command) = match result.call() {
@@ -74,7 +74,7 @@ pub fn evaluate_check(engine: &PolicyEngine, raw: &str) -> Result<CheckOutcome, 
         (false, Action::Allow) => "allowed (enforce mode)".to_string(),
     };
 
-    Ok(CheckOutcome {
+    CheckOutcome {
         mode: engine.mode().to_string(),
         tool_name,
         rule_action: decision.action.to_string(),
@@ -84,13 +84,13 @@ pub fn evaluate_check(engine: &PolicyEngine, raw: &str) -> Result<CheckOutcome, 
         command,
         blocks,
         effective,
-    })
+    }
 }
 
 pub fn run(args: CheckArgs) -> Result<(), Box<dyn std::error::Error>> {
     let raw = read_input(&args)?;
 
-    let policy_path = resolve_policy_path();
+    let policy_path = resolve_policy_path()?;
     let engine = PolicyEngine::load(&policy_path).map_err(|e| {
         format!(
             "could not load policy at {}: {e}\n(run 'sentinel install' first)",
@@ -98,7 +98,7 @@ pub fn run(args: CheckArgs) -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    let outcome = evaluate_check(&engine, &raw)?;
+    let outcome = evaluate_check(&engine, &raw);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
@@ -171,7 +171,7 @@ reason = "SSH key access"
         PolicyEngine::from_config(parse_policy(&toml).unwrap())
     }
 
-    fn check(mode: &str, raw: &str) -> Result<CheckOutcome, String> {
+    fn check(mode: &str, raw: &str) -> CheckOutcome {
         evaluate_check(&engine(mode), raw)
     }
 
@@ -180,8 +180,7 @@ reason = "SSH key access"
         let o = check(
             "enforce",
             r#"{"tool_name":"Read","tool_input":{"file_path":"~/.ssh/id_rsa"}}"#,
-        )
-        .unwrap();
+        );
         assert_eq!(o.rule_action, "block");
         assert!(o.blocks, "enforce + block must report a live deny");
         assert_eq!(o.effective, "DENIED");
@@ -194,8 +193,7 @@ reason = "SSH key access"
         let o = check(
             "audit",
             r#"{"tool_name":"Read","tool_input":{"file_path":"~/.ssh/id_rsa"}}"#,
-        )
-        .unwrap();
+        );
         assert_eq!(o.rule_action, "block", "the rule still says block");
         assert!(
             !o.blocks,
@@ -209,8 +207,7 @@ reason = "SSH key access"
         let o = check(
             "enforce",
             r#"{"tool_name":"Read","tool_input":{"file_path":"./src/main.rs"}}"#,
-        )
-        .unwrap();
+        );
         assert_eq!(o.rule_action, "allow");
         assert!(!o.blocks);
     }
@@ -221,8 +218,7 @@ reason = "SSH key access"
         let o = check(
             "enforce",
             r#"{"tool_name":"Bash","tool_input":{"command":"cat ~/.ssh/id_rsa"}}"#,
-        )
-        .unwrap();
+        );
         assert!(o.extracted_paths.iter().any(|p| p.contains(".ssh/id_rsa")));
         assert_eq!(o.command.as_deref(), Some("cat ~/.ssh/id_rsa"));
         assert!(
@@ -233,17 +229,17 @@ reason = "SSH key access"
 
     #[test]
     fn missing_tool_name_is_rejected() {
-        let missing = check("enforce", "{}").unwrap();
+        let missing = check("enforce", "{}");
         assert!(missing.blocks);
         assert_eq!(missing.tool_name, "<uninspectable>");
-        let missing = check("enforce", r#"{"tool_input":{"file_path":"x"}}"#).unwrap();
+        let missing = check("enforce", r#"{"tool_input":{"file_path":"x"}}"#);
         assert!(missing.blocks);
     }
 
     #[test]
     fn empty_and_invalid_input_fail_closed_like_the_live_hook() {
-        assert!(check("enforce", "").unwrap().blocks);
-        assert!(check("enforce", "not json {{{").unwrap().blocks);
+        assert!(check("enforce", "").blocks);
+        assert!(check("enforce", "not json {{{").blocks);
     }
 
     #[test]
@@ -268,7 +264,7 @@ reason = "SSH key access"
             r#"{{"tool_name":"Bash","tool_input":{{"command":"npm install"}},"cwd":"{}"}}"#,
             dir.display()
         );
-        let o = evaluate_check(&engine("enforce"), &raw).unwrap();
+        let o = evaluate_check(&engine("enforce"), &raw);
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(
             o.rule_action, "block",
@@ -287,8 +283,7 @@ reason = "SSH key access"
         let o = check(
             "enforce",
             r#"{"tool_name":"Write","tool_input":{"file_path":"./x","content":"SUPERSECRETTOKEN"}}"#,
-        )
-        .unwrap();
+        );
         let json = serde_json::to_string(&o).unwrap();
         assert!(
             !json.contains("SUPERSECRETTOKEN"),
@@ -324,7 +319,7 @@ reason = "SSH key access"
             &crate::install::defaults::default_policy_content("enforce"),
         )
         .unwrap();
-        let outcome = evaluate_check(&full_engine, &raw).unwrap();
+        let outcome = evaluate_check(&full_engine, &raw);
         assert!(outcome.blocks);
         assert_eq!(
             outcome.matched_rule.as_deref(),

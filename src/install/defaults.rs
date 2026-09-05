@@ -1192,72 +1192,51 @@ reason = "possible HashiCorp Vault service token (hvs.) - also appears as member
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evaluate::hook_schema::HookInput;
+    use crate::evaluate::normalize::NormalizedToolCall;
     use crate::policy::schema::parse_policy;
-    use crate::policy::{Action, PolicyEngine, ToolCall};
+    use crate::policy::{Action, PolicyEngine};
 
-    // These tests exercise the ACTUAL generated default policy end-to-end through
-    // the real PolicyEngine::evaluate PLUS the selfprotect pass the live evaluate
-    // pipeline runs (see `action_of`). The per-rule matcher semantics are covered
-    // by unit tests in policy/matcher.rs; what's verified HERE is the assembled
-    // file - rule ordering, cross-rule shadowing, and tier (block vs warn) - which
-    // is exactly where a single-rule view can't catch a regression.
-
+    // Exercise the generated policy through the shared production pipeline,
+    // including normalized file mutations, self-protection, and preflight.
+    // Individual matcher semantics are tested in policy/matcher.rs.
     fn engine() -> PolicyEngine {
         let cfg = parse_policy(&default_policy_content("enforce"))
             .expect("the generated default policy must parse");
         PolicyEngine::from_config(cfg)
     }
 
-    fn path_call(path: &str) -> ToolCall {
-        ToolCall {
-            tool_name: "Write".into(),
-            command: None,
-            paths: vec![path.into()],
-            shell_expansion_paths: vec![],
-            raw_params: "{}".into(),
-        }
+    fn call(tool_name: &str, tool_input: serde_json::Value) -> NormalizedToolCall {
+        serde_json::from_value::<HookInput>(serde_json::json!({
+            "tool_name": tool_name,
+            "tool_input": tool_input
+        }))
+        .expect("hook input must deserialize")
+        .normalize()
+        .expect("hook input must normalize")
     }
 
-    fn secret_call(raw: &str) -> ToolCall {
-        ToolCall {
-            tool_name: "Write".into(),
-            command: None,
-            paths: vec![],
-            shell_expansion_paths: vec![],
-            raw_params: raw.into(),
-        }
+    fn path_call(path: &str) -> NormalizedToolCall {
+        call("Read", serde_json::json!({"file_path": path}))
     }
 
-    // Route through the real hook extraction so a path embedded in the command
-    // (e.g. `rm -f ~/.sentinel/policy.toml`) is mined into `paths` exactly as
-    // production does - a direct ToolCall with empty paths would not exercise the
-    // deny.paths coverage of command-borne paths.
-    fn cmd_call(cmd: &str) -> ToolCall {
-        let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": cmd}});
-        serde_json::from_value::<crate::evaluate::hook_schema::HookInput>(input)
-            .expect("hook input must deserialize")
-            .to_tool_call()
+    fn secret_call(content: &str) -> NormalizedToolCall {
+        write_call("./src/example.txt", content)
     }
 
-    // A Write carries BOTH a target path and content, routed through the real
-    // extraction so paths and raw_params are populated exactly as production does.
-    fn write_call(path: &str, content: &str) -> ToolCall {
-        let input = serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": path, "content": content}});
-        serde_json::from_value::<crate::evaluate::hook_schema::HookInput>(input)
-            .expect("hook input must deserialize")
-            .to_tool_call()
+    fn cmd_call(command: &str) -> NormalizedToolCall {
+        call("Bash", serde_json::json!({"command": command}))
     }
 
-    fn action_of(call: &ToolCall) -> Action {
-        let decision = engine().evaluate(call);
-        // route through the SAME selfprotect pass the production evaluate pipeline
-        // applies (src/evaluate/mod.rs) so a Write-tool disarm of policy.toml /
-        // settings.json is exercised end-to-end, not just at the rule layer. The
-        // tool_input is reconstructed from raw_params exactly as `to_tool_call`
-        // serialized it; path_call/cmd_call/secret_call carry no target-path field,
-        // so selfprotect is a no-op for them.
-        let tool_input = serde_json::from_str(&call.raw_params).unwrap_or(serde_json::Value::Null);
-        crate::selfprotect::apply(decision, &tool_input).action
+    fn write_call(path: &str, content: &str) -> NormalizedToolCall {
+        call(
+            "Write",
+            serde_json::json!({"file_path": path, "content": content}),
+        )
+    }
+
+    fn action_of(call: &NormalizedToolCall) -> Action {
+        crate::evaluate::pipeline::decide(&engine(), call).action
     }
 
     // ── self-protect: block Sentinel's own policy, allow audit-log reads ────────
@@ -1271,7 +1250,7 @@ mod tests {
             action_of(&path_call("~/.sentinel/policy.toml")),
             Action::Warn
         );
-        let decision = engine().evaluate(&path_call("~/.sentinel/policy.toml"));
+        let decision = engine().evaluate(&path_call("~/.sentinel/policy.toml").to_tool_call());
         assert!(
             decision.matched_rule.unwrap().contains(".sentinel"),
             "must be attributed to the self-protect rule"
@@ -1446,7 +1425,7 @@ mod tests {
     #[test]
     fn gcp_service_account_file_blocks_via_private_key_rule() {
         let sa = r#"{"type":"service_account","private_key_id":"abc","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEvQ\n-----END PRIVATE KEY-----\n","client_email":"svc@proj.iam.gserviceaccount.com"}"#;
-        let decision = engine().evaluate(&secret_call(sa));
+        let decision = engine().evaluate(&secret_call(sa).to_tool_call());
         assert_eq!(
             decision.action,
             Action::Block,
@@ -1693,10 +1672,11 @@ mod tests {
         );
     }
 
-    // ── agent-config / persistence tripwires (warn) ─────────────────────────────
+    // Path rules warn on reads of these locations. Mutation escalation is
+    // covered separately by the self-protection tests.
 
     #[test]
-    fn agent_config_writes_warn() {
+    fn agent_config_paths_warn() {
         assert_eq!(
             action_of(&path_call("~/.claude/settings.json")),
             Action::Warn
@@ -1718,9 +1698,7 @@ mod tests {
 
     #[test]
     fn claude_extension_surfaces_warn() {
-        // skills / agents / hooks / MCP config are instruction- and exec-injection
-        // surfaces a poisoned repo can plant without ever issuing a blocked command
-        // (the mini-shai-hulud vector). Warn-tier: developers author these legitimately.
+        // Skills, agents, hooks, and MCP config paths are warn-tier tripwires.
         assert_eq!(
             action_of(&path_call("~/.claude/skills/evil/SKILL.md")),
             Action::Warn
@@ -1737,7 +1715,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_unit_writes_warn() {
+    fn persistence_unit_paths_warn() {
         assert_eq!(
             action_of(&path_call("~/Library/LaunchAgents/com.evil.agent.plist")),
             Action::Warn
@@ -1749,11 +1727,8 @@ mod tests {
     }
 
     #[test]
-    fn github_workflow_writes_warn() {
-        // CI workflows auto-run on push with access to repo secrets/OIDC - a
-        // poisoned repo or injected agent planting one is the same class of
-        // exec-surface tripwire as .vscode/tasks.json. Warn-tier: devs author
-        // workflows legitimately.
+    fn github_workflow_paths_warn() {
+        // Workflow paths share the warn tier with other autorun configuration.
         assert_eq!(
             action_of(&path_call("~/repo/.github/workflows/ci.yml")),
             Action::Warn

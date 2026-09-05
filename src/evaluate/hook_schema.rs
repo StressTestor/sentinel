@@ -300,32 +300,231 @@ struct CommandPath {
 
 fn extract_paths_from_command(cmd: &str) -> Vec<CommandPath> {
     let mut paths = Vec::new();
-    for raw in shell_tokens(cmd) {
-        if raw.value.is_empty() {
+    extract_paths_with_cwd(cmd, Some("."), &mut paths);
+    paths
+}
+
+/// Mine path candidates from a command, resolving relative operands against
+/// the directory a literal `cd` (or `sh -c` payload inheriting it) has moved
+/// the shell to. Without this, `cd ~ && cat .ssh/id_rsa` mines only
+/// `.ssh/id_rsa`, which never reaches a `~/.ssh/*` rule.
+///
+/// Only literal `cd` targets are tracked (absolute, `~`-relative, `$HOME`,
+/// or a metacharacter-free relative dir). Bare `cd` means home; unsupported
+/// options, extra/empty arguments, and runtime expansions clear the directory.
+/// Parentheses restore the outer directory. Pipeline completion and `||` make
+/// it ambiguous (shells differ on whether the last pipeline command is local),
+/// so subsequent relative operands are left as mined rather than guessed.
+/// A conditional cd can establish a directory within an && chain, but not for
+/// the next unconditional command: that cd may have been skipped entirely.
+fn extract_paths_with_cwd(cmd: &str, initial_cwd: Option<&str>, paths: &mut Vec<CommandPath>) {
+    let tokens = shell_tokens(cmd);
+    // The top-level caller starts at ".". None means an ambiguous inherited
+    // directory and must not be revived by a relative cd or nested shell.
+    let mut cwd = initial_cwd.map(str::to_string);
+    let mut command_cwd = cwd.clone();
+    let mut pipeline = false;
+    let mut conditional = false;
+    let mut conditional_cd = false;
+    let mut scopes = Vec::new();
+    let mut command_position = true;
+    let mut cd_command = false;
+    let mut i = 0;
+    while i < tokens.len() {
+        let raw = &tokens[i];
+        if raw.separator {
+            match raw.value.as_str() {
+                "(" => {
+                    scopes.push((
+                        cwd.clone(),
+                        command_cwd.clone(),
+                        pipeline,
+                        conditional,
+                        conditional_cd,
+                    ));
+                    command_cwd = cwd.clone();
+                    pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
+                    command_position = true;
+                }
+                ")" => {
+                    (cwd, command_cwd, pipeline, conditional, conditional_cd) =
+                        scopes.pop().unwrap_or((None, None, false, false, false));
+                    command_position = false;
+                }
+                "|" => {
+                    cwd = command_cwd.clone();
+                    pipeline = true;
+                    command_position = true;
+                }
+                "&" => {
+                    cwd = if conditional_cd {
+                        None
+                    } else {
+                        command_cwd.clone()
+                    };
+                    pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
+                    command_position = true;
+                }
+                ";" | "&&" | "||" => {
+                    if pipeline || raw.value == "||" || (raw.value == ";" && conditional_cd) {
+                        cwd = None;
+                    }
+                    conditional = raw.value != ";";
+                    if !conditional {
+                        conditional_cd = false;
+                    }
+                    pipeline = false;
+                    command_cwd = cwd.clone();
+                    command_position = true;
+                }
+                // Redirection operands are not commands. Backtick substitution
+                // is outside this limited directory model.
+                "`" => {
+                    cwd = None;
+                    command_position = false;
+                }
+                _ => command_position = false,
+            }
+            i += 1;
             continue;
+        }
+        if raw.value.is_empty() {
+            command_position = false;
+            i += 1;
+            continue;
+        }
+        if command_position {
+            cd_command = raw.value == "cd";
+            if raw.value == "cd" {
+                conditional_cd |= conditional;
+                cwd = cd_target(&tokens, i).and_then(|target| {
+                    if target.starts_with('/') || target.starts_with('~') {
+                        Some(target)
+                    } else {
+                        joined_cwd_form(&target, cwd.as_deref())
+                    }
+                });
+            } else if let Some(payload) = interpreter_c_payload(&tokens, i) {
+                // `sh -c '<command>'`: the payload is itself a command whose
+                // relative paths resolve against the same tracked directory.
+                extract_paths_with_cwd(payload, cwd.as_deref(), paths);
+            }
         }
         for cand in path_candidates(&raw.value) {
             let token = cand.trim_start_matches('@').trim_end_matches([',', ';']);
             if token.contains('/') || token.starts_with('~') || token.starts_with('.') {
+                let shell_expand_braces = raw.unquoted_open_brace
+                    && raw.unquoted_close_brace
+                    && token.contains('{')
+                    && token.contains('}');
                 paths.push(CommandPath {
                     path: token.to_string(),
-                    shell_expand_braces: raw.unquoted_open_brace
-                        && raw.unquoted_close_brace
-                        && token.contains('{')
-                        && token.contains('}'),
+                    shell_expand_braces,
                 });
+                // A cd operand is relative to the command's entry directory,
+                // not the directory that operand will establish for later calls.
+                let candidate_cwd = if cd_command { &command_cwd } else { &cwd };
+                if let Some(joined) = joined_cwd_form(token, candidate_cwd.as_deref()) {
+                    paths.push(CommandPath {
+                        path: joined,
+                        shell_expand_braces,
+                    });
+                }
+            }
+        }
+        command_position = false;
+        i += 1;
+    }
+}
+
+fn token_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+/// The directory a `cd` at `tokens[cd_index]` moves to, when it can be proven.
+/// See `extract_paths_with_cwd` for what counts as provable.
+fn cd_target(tokens: &[ShellToken], cd_index: usize) -> Option<String> {
+    let mut args = tokens[cd_index + 1..]
+        .iter()
+        .take_while(|token| !token.separator);
+    let mut target = args.next();
+    if target.is_some_and(|token| token.value == "--") {
+        target = args.next();
+    }
+    let Some(target) = target else {
+        return Some("~".into()); // bare `cd` goes home
+    };
+    if args.next().is_some() || target.value.is_empty() || target.value.starts_with('-') {
+        return None;
+    }
+    let target = &target.value;
+    for var in ["${HOME}", "$HOME"] {
+        if let Some(rest) = target.strip_prefix(var) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return Some(format!("~{rest}"));
             }
         }
     }
-    paths
+    if target
+        .bytes()
+        .any(|byte| matches!(byte, b'$' | b'`' | b'*' | b'?' | b'[' | b'{' | b'}'))
+    {
+        return None; // runtime-resolved or multi-valued: ambiguous
+    }
+    Some(target.clone())
+}
+
+/// When `tokens[i]` is a shell interpreter invoked with a `-c`-style flag,
+/// return the command-string payload that follows it.
+fn interpreter_c_payload(tokens: &[ShellToken], i: usize) -> Option<&str> {
+    let basename = token_basename(&tokens[i].value);
+    if !matches!(basename, "sh" | "bash" | "zsh" | "dash" | "ksh" | "ash") {
+        return None;
+    }
+    let flag = tokens.get(i + 1)?;
+    if flag.separator
+        || !(flag.value == "-c"
+            || (flag.value.starts_with('-')
+                && flag.value.len() > 1
+                && !flag.value.starts_with("--")
+                && flag.value.ends_with('c')
+                && flag.value[1..flag.value.len() - 1]
+                    .bytes()
+                    .all(|byte| matches!(byte, b'i' | b'l'))))
+    {
+        return None;
+    }
+    let payload = tokens.get(i + 2)?;
+    (!payload.separator && !payload.value.is_empty()).then_some(payload.value.as_str())
+}
+
+/// The home/`cd`-resolved spelling of a RELATIVE candidate, when the effective
+/// directory is known and the candidate itself carries no runtime expansion.
+/// Already-absolute candidates and `$`/backslash-assembled fragments return
+/// None: they resolve (or fail) on their own.
+fn joined_cwd_form(candidate: &str, cwd: Option<&str>) -> Option<String> {
+    let cwd = cwd?;
+    if candidate.starts_with('/') || candidate.starts_with('~') {
+        return None;
+    }
+    if candidate.contains('$') || candidate.contains('`') {
+        return None;
+    }
+    Some(format!("{cwd}/{candidate}"))
 }
 
 /// A small shell lexer for path mining. It is intentionally heuristic (not a
 /// shell parser), but it must not split a valid shell word at spaces protected
 /// by quotes or backslashes, otherwise deny.path rules containing spaces can be
-/// bypassed through Bash.
+/// bypassed through Bash. Command separators become their own tokens so the
+/// miner knows which words sit in command position.
 struct ShellToken {
     value: String,
+    separator: bool,
     unquoted_open_brace: bool,
     unquoted_close_brace: bool,
 }
@@ -333,35 +532,90 @@ struct ShellToken {
 fn shell_tokens(cmd: &str) -> Vec<ShellToken> {
     let mut tokens = Vec::new();
     let mut token = String::new();
+    let mut token_started = false;
     let mut unquoted_open_brace = false;
     let mut unquoted_close_brace = false;
     let mut chars = cmd.chars().peekable();
     let mut in_single = false;
     let mut in_double = false;
 
+    let flush = |tokens: &mut Vec<ShellToken>,
+                 token: &mut String,
+                 started: &mut bool,
+                 open: &mut bool,
+                 close: &mut bool| {
+        if *started {
+            tokens.push(ShellToken {
+                value: std::mem::take(token),
+                separator: false,
+                unquoted_open_brace: *open,
+                unquoted_close_brace: *close,
+            });
+        }
+        *started = false;
+        *open = false;
+        *close = false;
+    };
+
     while let Some(c) = chars.next() {
         match c {
             '\\' if !in_single => {
+                token_started = true;
                 if let Some(next) = chars.next() {
                     token.push(next);
                 } else {
                     token.push(c);
                 }
             }
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => {
+                token_started = true;
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                token_started = true;
+                in_double = !in_double;
+            }
+            '\n' | '\r' if !in_single && !in_double => {
+                flush(
+                    &mut tokens,
+                    &mut token,
+                    &mut token_started,
+                    &mut unquoted_open_brace,
+                    &mut unquoted_close_brace,
+                );
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                tokens.push(ShellToken {
+                    value: ";".into(),
+                    separator: true,
+                    unquoted_open_brace: false,
+                    unquoted_close_brace: false,
+                });
+            }
             c if !in_single && !in_double && (c.is_whitespace() || "|&;<>()`".contains(c)) => {
-                if !token.is_empty() {
+                flush(
+                    &mut tokens,
+                    &mut token,
+                    &mut token_started,
+                    &mut unquoted_open_brace,
+                    &mut unquoted_close_brace,
+                );
+                if !c.is_whitespace() {
+                    let mut separator = c.to_string();
+                    if matches!(c, '|' | '&') && chars.peek() == Some(&c) {
+                        separator.push(chars.next().expect("peeked separator"));
+                    }
                     tokens.push(ShellToken {
-                        value: std::mem::take(&mut token),
-                        unquoted_open_brace,
-                        unquoted_close_brace,
+                        value: separator,
+                        separator: true,
+                        unquoted_open_brace: false,
+                        unquoted_close_brace: false,
                     });
-                    unquoted_open_brace = false;
-                    unquoted_close_brace = false;
                 }
             }
             _ => {
+                token_started = true;
                 if !in_single && !in_double {
                     unquoted_open_brace |= c == '{';
                     unquoted_close_brace |= c == '}';
@@ -371,13 +625,13 @@ fn shell_tokens(cmd: &str) -> Vec<ShellToken> {
         }
     }
 
-    if !token.is_empty() {
-        tokens.push(ShellToken {
-            value: token,
-            unquoted_open_brace,
-            unquoted_close_brace,
-        });
-    }
+    flush(
+        &mut tokens,
+        &mut token,
+        &mut token_started,
+        &mut unquoted_open_brace,
+        &mut unquoted_close_brace,
+    );
     tokens
 }
 
@@ -426,6 +680,86 @@ fn extract_all_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chained_relative_cd_keeps_the_established_directory() {
+        let paths = extract_paths_from_command("cd /example/project && cd src && cat ./module.rs");
+        assert!(paths
+            .iter()
+            .any(|path| path.path == "/example/project/src/./module.rs"));
+        assert!(!paths.iter().any(|path| path.path == "src/./module.rs"));
+
+        let paths = extract_paths_from_command("cd /example && cd sub/dir && cat ./report.txt");
+        assert!(paths.iter().any(|path| path.path == "/example/sub/dir"));
+        assert!(!paths
+            .iter()
+            .any(|path| path.path == "/example/sub/dir/sub/dir"));
+    }
+
+    #[test]
+    fn directory_tracking_respects_subshells_and_redirection_targets() {
+        for command in [
+            "cd /example; (cd /other); cat ./report.txt",
+            "cd /example; printf > cd /other; cat ./report.txt",
+            "cd /example; printf < cd /other; cat ./report.txt",
+            "cd /example; (false && cd /other); cat ./report.txt",
+        ] {
+            let paths = extract_paths_from_command(command);
+            assert!(
+                paths
+                    .iter()
+                    .any(|path| path.path == "/example/./report.txt"),
+                "{command}"
+            );
+            assert!(
+                !paths.iter().any(|path| path.path == "/other/./report.txt"),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_directory_changes_do_not_create_resolved_paths() {
+        for command in [
+            "cd /example; printf x | cd /other; cat ./report.txt",
+            "cd /example; cd /other | printf x; cat ./report.txt",
+            "cd /example || cat ./report.txt",
+            "cd /example; cd child extra; cat ./report.txt",
+            "cd /example; cd -P /other; cat ./report.txt",
+            "cd /example; cd ''; cat ./report.txt",
+            "false && cd /example; cat ./report.txt",
+            "false && cd /example && printf done; cat ./report.txt",
+            "false && cd /example && (printf done); cat ./report.txt",
+            "false && cd /example & cat ./report.txt",
+            "cd /example; false && cd /other; cd child; cat ./report.txt",
+            "cd /example; false && cd /other; sh -c 'cd child; cat ./report.txt'",
+        ] {
+            let paths = extract_paths_from_command(command);
+            assert!(
+                paths.iter().any(|path| path.path == "./report.txt"),
+                "{command}"
+            );
+            assert!(
+                !paths
+                    .iter()
+                    .any(|path| path.path.ends_with("/./report.txt")),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_newlines_stay_inside_words_and_nested_shell_payloads() {
+        let tokens = shell_tokens("printf '%s' './first\nsecond.txt'");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[2].value, "./first\nsecond.txt");
+        assert!(!tokens[2].separator);
+
+        let paths = extract_paths_from_command("sh -c 'cd /example/project\ncat ./module.rs'");
+        assert!(paths
+            .iter()
+            .any(|path| path.path == "/example/project/./module.rs"));
+    }
 
     #[test]
     fn parse_bash_tool_call() {
