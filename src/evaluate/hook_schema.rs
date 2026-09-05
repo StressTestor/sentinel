@@ -300,7 +300,7 @@ struct CommandPath {
 
 fn extract_paths_from_command(cmd: &str) -> Vec<CommandPath> {
     let mut paths = Vec::new();
-    extract_paths_with_cwd(cmd, None, &mut paths);
+    extract_paths_with_cwd(cmd, Some("."), &mut paths);
     paths
 }
 
@@ -315,11 +315,17 @@ fn extract_paths_from_command(cmd: &str) -> Vec<CommandPath> {
 /// Parentheses restore the outer directory. Pipeline completion and `||` make
 /// it ambiguous (shells differ on whether the last pipeline command is local),
 /// so subsequent relative operands are left as mined rather than guessed.
+/// A conditional cd can establish a directory within an && chain, but not for
+/// the next unconditional command: that cd may have been skipped entirely.
 fn extract_paths_with_cwd(cmd: &str, initial_cwd: Option<&str>, paths: &mut Vec<CommandPath>) {
     let tokens = shell_tokens(cmd);
+    // The top-level caller starts at ".". None means an ambiguous inherited
+    // directory and must not be revived by a relative cd or nested shell.
     let mut cwd = initial_cwd.map(str::to_string);
     let mut command_cwd = cwd.clone();
     let mut pipeline = false;
+    let mut conditional = false;
+    let mut conditional_cd = false;
     let mut scopes = Vec::new();
     let mut command_position = true;
     let mut cd_command = false;
@@ -329,13 +335,22 @@ fn extract_paths_with_cwd(cmd: &str, initial_cwd: Option<&str>, paths: &mut Vec<
         if raw.separator {
             match raw.value.as_str() {
                 "(" => {
-                    scopes.push((cwd.clone(), command_cwd.clone(), pipeline));
+                    scopes.push((
+                        cwd.clone(),
+                        command_cwd.clone(),
+                        pipeline,
+                        conditional,
+                        conditional_cd,
+                    ));
                     command_cwd = cwd.clone();
                     pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
                     command_position = true;
                 }
                 ")" => {
-                    (cwd, command_cwd, pipeline) = scopes.pop().unwrap_or((None, None, false));
+                    (cwd, command_cwd, pipeline, conditional, conditional_cd) =
+                        scopes.pop().unwrap_or((None, None, false, false, false));
                     command_position = false;
                 }
                 "|" => {
@@ -344,13 +359,23 @@ fn extract_paths_with_cwd(cmd: &str, initial_cwd: Option<&str>, paths: &mut Vec<
                     command_position = true;
                 }
                 "&" => {
-                    cwd = command_cwd.clone();
+                    cwd = if conditional_cd {
+                        None
+                    } else {
+                        command_cwd.clone()
+                    };
                     pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
                     command_position = true;
                 }
                 ";" | "&&" | "||" => {
-                    if pipeline || raw.value == "||" {
+                    if pipeline || raw.value == "||" || (raw.value == ";" && conditional_cd) {
                         cwd = None;
+                    }
+                    conditional = raw.value != ";";
+                    if !conditional {
+                        conditional_cd = false;
                     }
                     pipeline = false;
                     command_cwd = cwd.clone();
@@ -375,8 +400,14 @@ fn extract_paths_with_cwd(cmd: &str, initial_cwd: Option<&str>, paths: &mut Vec<
         if command_position {
             cd_command = raw.value == "cd";
             if raw.value == "cd" {
-                cwd = cd_target(&tokens, i)
-                    .map(|target| joined_cwd_form(&target, cwd.as_deref()).unwrap_or(target));
+                conditional_cd |= conditional;
+                cwd = cd_target(&tokens, i).and_then(|target| {
+                    if target.starts_with('/') || target.starts_with('~') {
+                        Some(target)
+                    } else {
+                        joined_cwd_form(&target, cwd.as_deref())
+                    }
+                });
             } else if let Some(payload) = interpreter_c_payload(&tokens, i) {
                 // `sh -c '<command>'`: the payload is itself a command whose
                 // relative paths resolve against the same tracked directory.
@@ -671,6 +702,7 @@ mod tests {
             "cd /example; (cd /other); cat ./report.txt",
             "cd /example; printf > cd /other; cat ./report.txt",
             "cd /example; printf < cd /other; cat ./report.txt",
+            "cd /example; (false && cd /other); cat ./report.txt",
         ] {
             let paths = extract_paths_from_command(command);
             assert!(
@@ -695,6 +727,12 @@ mod tests {
             "cd /example; cd child extra; cat ./report.txt",
             "cd /example; cd -P /other; cat ./report.txt",
             "cd /example; cd ''; cat ./report.txt",
+            "false && cd /example; cat ./report.txt",
+            "false && cd /example && printf done; cat ./report.txt",
+            "false && cd /example && (printf done); cat ./report.txt",
+            "false && cd /example & cat ./report.txt",
+            "cd /example; false && cd /other; cd child; cat ./report.txt",
+            "cd /example; false && cd /other; sh -c 'cd child; cat ./report.txt'",
         ] {
             let paths = extract_paths_from_command(command);
             assert!(

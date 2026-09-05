@@ -439,6 +439,26 @@ mod tests {
                 Action::Allow,
             ),
             (format!("tar -xf content.tar -C '{root}'"), Action::Allow),
+            (
+                format!("false && cd '{root}'; cat ./private/report.txt"),
+                Action::Allow,
+            ),
+            (
+                format!("false && cd '{root}' && printf done; cp -r . ./backup"),
+                Action::Allow,
+            ),
+            (
+                format!("cd '{root}' && cat ./private/report.txt"),
+                Action::Block,
+            ),
+            (
+                format!("cd '{root}' && printf done; cat ./private/report.txt"),
+                Action::Block,
+            ),
+            (
+                format!("false && cd /example; cd '{root}'; cat ./private/report.txt"),
+                Action::Block,
+            ),
             (format!("cp -r '{root}' '{root}/backup'"), Action::Block),
         ] {
             let input: crate::evaluate::hook_schema::HookInput = serde_json::from_value(

@@ -64,6 +64,8 @@ pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
     let mut sources = Vec::new();
     let mut cwd = Some(".".to_string());
     let mut pipeline = false;
+    let mut conditional = false;
+    let mut conditional_cd = false;
     let mut parents = Vec::new();
     let mut start = 0;
     for end in 0..=tokens.len() {
@@ -80,6 +82,7 @@ pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
         }
         if let Some((tool, args)) = args.split_first() {
             if tool == "cd" {
+                conditional_cd |= conditional;
                 let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
                 cwd = match args {
                     [] => traversal_source_path("~", cwd.as_deref()),
@@ -97,23 +100,34 @@ pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
         if let Some(separator) = tokens.get(end) {
             match separator.as_str() {
                 "(" => {
-                    parents.push((cwd.clone(), pipeline));
+                    parents.push((cwd.clone(), pipeline, conditional, conditional_cd));
                     pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
                 }
-                ")" => (cwd, pipeline) = parents.pop().unwrap_or((None, false)),
+                ")" => {
+                    (cwd, pipeline, conditional, conditional_cd) =
+                        parents.pop().unwrap_or((None, false, false, false))
+                }
                 "|" => {
                     cwd = before;
                     pipeline = true;
                 }
                 "&" => {
-                    cwd = before;
+                    cwd = if conditional_cd { None } else { before };
                     pipeline = false;
+                    conditional = false;
+                    conditional_cd = false;
                 }
                 ";" | "&&" | "||" => {
                     // Shell lastpipe behavior varies, so a completed pipeline
                     // cannot establish a proven directory for later commands.
-                    if pipeline || separator == "||" {
+                    if pipeline || separator == "||" || (separator == ";" && conditional_cd) {
                         cwd = None;
+                    }
+                    conditional = separator != ";";
+                    if !conditional {
+                        conditional_cd = false;
                     }
                     pipeline = false;
                 }
@@ -1948,6 +1962,11 @@ mod tests {
             "cd /example; cd child extra; cp -r ./src ./out",
             "cd /example; cd -P /other; cp -r ./src ./out",
             "cd /example; cd ''; cp -r ./src ./out",
+            "false && cd /example; cp -r ./src ./out",
+            "false && cd /example && printf done; cp -r ./src ./out",
+            "false && cd /example && (printf done); cp -r ./src ./out",
+            "false && cd /example & cp -r ./src ./out",
+            "cd /example; false && cd /other; cd child; cp -r ./src ./out",
         ] {
             assert!(recursive_traversal_sources(command).is_empty(), "{command}");
         }
