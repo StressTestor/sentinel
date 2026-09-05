@@ -70,6 +70,47 @@ fn explicit_policy_lint_does_not_require_home() {
 }
 
 #[test]
+fn project_audit_fixture_is_independent_of_the_live_audit_trail() {
+    let home = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    fs::create_dir(home.path().join(".sentinel")).unwrap();
+    fs::write(
+        home.path().join(".sentinel/policy.toml"),
+        "[policy]\nmode = \"enforce\"\non_failure = \"closed\"\ndefault = \"allow\"\n",
+    )
+    .unwrap();
+    fs::create_dir(project.path().join(".sentinel")).unwrap();
+    let fixture = project.path().join(".sentinel/audit.jsonl");
+    fs::write(&fixture, "fixture record\n").unwrap();
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "cwd": project.path(),
+        "tool_input": {"file_path": ".sentinel/audit.jsonl", "content": "updated fixture\n"}
+    });
+    let output = command(project.path(), home.path().to_str())
+        .args(["check", "--json"])
+        .arg(payload.to_string())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["blocks"], false, "{response}");
+    assert_eq!(fs::read_to_string(fixture).unwrap(), "fixture record\n");
+    let mut live_payload = payload;
+    live_payload["tool_input"]["file_path"] =
+        serde_json::json!(home.path().join(".sentinel/audit.jsonl"));
+    let output = command(project.path(), home.path().to_str())
+        .args(["check", "--json"])
+        .arg(live_payload.to_string())
+        .output()
+        .unwrap();
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["blocks"], true, "{response}");
+    assert_eq!(response["matched_rule"], "selfprotect: audit-trail write");
+    assert!(!home.path().join(".sentinel/audit.jsonl").exists());
+}
+
+#[test]
 fn relocated_claude_install_status_and_uninstall_share_the_same_file() {
     let home = tempdir().unwrap();
     let config = tempdir().unwrap();

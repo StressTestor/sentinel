@@ -51,6 +51,13 @@ fn apply_normalized_with(
     if decision.action == Action::Block {
         return decision;
     }
+    if call.mutations.is_empty() {
+        return decision;
+    }
+    let audit_identity = match audit_trail_path_identity() {
+        Ok(identity) => identity,
+        Err(error) => return path_identity_failure_block(error),
+    };
 
     for mutation in &call.mutations {
         let before = match mutation
@@ -74,7 +81,7 @@ fn apply_normalized_with(
             .into_iter()
             .flatten()
             .flat_map(PathIdentity::paths)
-            .find_map(protected_state_file)
+            .find_map(|path| protected_state_file(path, &audit_identity))
         {
             return protected_state_write_block(protected);
         }
@@ -253,12 +260,23 @@ fn protected_state_write_block(protected: ProtectedStateFile) -> PolicyDecision 
     }
 }
 
-fn protected_state_file(path: &str) -> Option<ProtectedStateFile> {
+fn audit_trail_path_identity() -> Result<PathIdentity, String> {
+    let path = crate::audit_trail::audit_log_path().map_err(|error| error.to_string())?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| "audit trail path is not valid UTF-8".to_string())?;
+    mutation_path_identity(path, None)
+}
+
+fn protected_state_file(path: &str, audit_identity: &PathIdentity) -> Option<ProtectedStateFile> {
     if is_sentinel_policy_path(path) {
         Some(ProtectedStateFile::Policy)
     } else if has_path_suffix(path, ".sentinel/mcp-baseline.json") {
         Some(ProtectedStateFile::McpBaseline)
-    } else if has_path_suffix(path, ".sentinel/audit.jsonl") {
+    } else if audit_identity
+        .paths()
+        .any(|audit_path| path.trim().eq_ignore_ascii_case(audit_path.trim()))
+    {
         Some(ProtectedStateFile::AuditTrail)
     } else {
         None
@@ -725,6 +743,47 @@ fn hook_installed_in_file(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn audit_trail_identity_does_not_match_project_fixtures() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("home/.sentinel/audit.jsonl");
+        let fixture = root.path().join("project/.sentinel/audit.jsonl");
+        let audit_identity = mutation_path_identity(live.to_str().unwrap(), None).unwrap();
+        let fixture_identity = mutation_path_identity(fixture.to_str().unwrap(), None).unwrap();
+        assert!(fixture_identity
+            .paths()
+            .all(|path| protected_state_file(path, &audit_identity).is_none()));
+        assert!(audit_identity.paths().all(|path| matches!(
+            protected_state_file(path, &audit_identity),
+            Some(ProtectedStateFile::AuditTrail)
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_trail_identity_matches_file_and_directory_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".sentinel");
+        std::fs::create_dir(&directory).unwrap();
+        let live = directory.join("audit.jsonl");
+        std::fs::write(&live, "local fixture\n").unwrap();
+        let file_alias = root.path().join("audit-alias.jsonl");
+        symlink(&live, &file_alias).unwrap();
+        let directory_alias = root.path().join("state-alias");
+        symlink(&directory, &directory_alias).unwrap();
+        let audit_identity = mutation_path_identity(live.to_str().unwrap(), None).unwrap();
+        for alias in [file_alias, directory_alias.join("audit.jsonl")] {
+            let identity = mutation_path_identity(alias.to_str().unwrap(), None).unwrap();
+            assert!(identity.paths().any(|path| matches!(
+                protected_state_file(path, &audit_identity),
+                Some(ProtectedStateFile::AuditTrail)
+            )));
+        }
+        assert_eq!(std::fs::read_to_string(live).unwrap(), "local fixture\n");
+    }
 
     #[test]
     fn relocated_claude_directory_recognizes_both_settings_files() {

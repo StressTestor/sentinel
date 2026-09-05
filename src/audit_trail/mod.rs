@@ -95,7 +95,7 @@ fn append_event(path: &Path, event: &AuditEvent) -> std::io::Result<()> {
     file.write_all(&line)
 }
 
-fn audit_log_path() -> std::io::Result<PathBuf> {
+pub(crate) fn audit_log_path() -> std::io::Result<PathBuf> {
     Ok(crate::common::home_dir()?
         .join(".sentinel")
         .join("audit.jsonl"))
@@ -464,12 +464,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn audit_file_holds_an_exclusive_lock_until_closed() {
+    fn audit_file_is_exclusively_locked_when_returned() {
         use std::os::fd::AsRawFd;
 
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".sentinel/audit.jsonl");
-        let locked = open_audit_file(&path).unwrap();
+        let _locked = open_audit_file(&path).unwrap();
         let other = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -477,18 +477,15 @@ mod tests {
         // SAFETY: other owns a live descriptor; nonblocking flock changes only
         // its advisory lock state and does not read or write memory.
         let result = unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(result, -1);
+        let error = std::io::Error::last_os_error();
+        assert_eq!(result, -1, "the returned audit handle must hold its lock");
         assert_eq!(
-            std::io::Error::last_os_error().kind(),
-            std::io::ErrorKind::WouldBlock
+            error.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "unexpected flock error: {error}"
         );
-        drop(locked);
-        // SAFETY: the descriptor is still owned by other and the first lock has
-        // been released by dropping its sole file handle.
-        assert_eq!(
-            unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
+        // Immediate unlock after drop is not asserted: parallel tests may fork
+        // and temporarily retain this open-file description until their exec.
     }
 
     #[cfg(unix)]

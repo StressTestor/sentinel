@@ -170,6 +170,9 @@ Host hook payload arrives
                 a `sh -c '<command>'` payload — `cd ~ && cat .ssh/id_rsa` reaches
                 the `~/.ssh/*` rule, while `echo cd ~` (cd NOT in command
                 position) does not.
+                Directory changes on a conditional branch remain usable within
+                that successful `&&` chain, but are cleared before a later
+                unconditional segment because the change may have been skipped.
               - recursive-traversal coverage: when the command applies a
                 directory-RECURSIVE tool (`cp`/`rsync`/`grep` with an explicit
                 recursive flag, `tar` in create mode, `find`, `ditto`) at an
@@ -392,6 +395,9 @@ An advisory lock covers each complete record across cooperating Sentinel writers
 it does not prevent arbitrary same-user programs from modifying the log. A write
 failure produces a stderr diagnostic while preserving the hook's stdout contract
 and policy decision.
+Audit self-protection uses the same live path resolver as the logger and compares
+logical and effective mutation identities. A project fixture with the same
+`.sentinel/audit.jsonl` suffix is independent of the live home-directory log.
 
 `status` and `doctor` inspect agent config rather than inferring health from the
 binary alone. Claude activation includes `disableAllHooks`. Codex activation is

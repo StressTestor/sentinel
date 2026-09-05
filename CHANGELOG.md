@@ -15,6 +15,8 @@ versioning.
   successive relative directory changes and `sh -c` payloads. Quoted newlines
   remain part of their argument. A command-position-aware walk keeps arguments
   from being mistaken for a directory change.
+  Directory changes on conditional branches do not leak into subsequent
+  unconditional commands.
 - **Close the recursive-traversal bypass (audit F-2).** `cp -r ~ /tmp`,
   `tar czf x.tgz ~`, `rsync -a ~/ /dst`, `grep -r AKIA ~`, `ditto`, and `find`
   read every protected subtree under the operand while mining only the bare
@@ -35,6 +37,8 @@ versioning.
   cooperating Sentinel writers. Logging failures produce stderr diagnostics
   without changing the hook decision. Write/Edit/MultiEdit on the trail is
   blocked by self-protect.
+  Protection follows the live audit path and its resolved aliases, so unrelated
+  project fixtures with the same filename remain writable.
 - **Honor `CLAUDE_CONFIG_DIR` (audit F-5).** With the variable set, Claude
   Code ignores `~/.claude/settings.json`; install/status/doctor and
   self-protection now share the configured settings paths.
