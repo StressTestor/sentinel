@@ -6,7 +6,38 @@ versioning.
 
 ## [Unreleased]
 
+### Added
+- **Command Code is a native agent target.** `sentinel install --agent
+  command-code` writes a PreToolUse hook into `~/.commandcode/settings.json`
+  (and `--result-scan` the opt-in PostToolUse scan), `sentinel uninstall --agent
+  command-code` removes it, and `status`/`doctor` report the same config,
+  activation, and canary state they do for Claude Code. Command Code honors the
+  nested `hookSpecificOutput.permissionDecision` JSON that Claude Code and Codex
+  already use, so the JSON settings writer, `hooks.PreToolUse` inspector, and
+  hook-removal content check are shared rather than duplicated. Install into a
+  `~`-containing path outside the agent remains unaffected.
+
 ### Security
+- **Command Code's argv tail is no longer invisible to the rules.** Command Code
+  splits one command line across `command` + `args`, and only `command` reached
+  the matchers — so `{"command":"/bin/sh","args":["-c","cat ~/.ssh/id_rsa"]}`
+  matched nothing while the shell read the key (and the same shape walked around
+  every destructive-command rule). `evaluate/hook_schema.rs` now folds an `args`
+  string-array onto the extracted command, so deny.commands and deny.paths judge
+  the line that will actually run. The join is a plain space, which can only add
+  tokens for a rule to match, never hide one. `absolute_path` is also recognized
+  as a path field (Command Code's `read_file`), and `evaluate --agent
+  command-code` selects the nested decision format.
+- **The Command Code hook config is self-protected like Claude Code's.**
+  `~/.commandcode/settings.json` is recognized by the content-aware hook check: a
+  typed Write/Edit that drops the Sentinel hook escalates warn → block, and the
+  same resolution covers symlink aliases. The Bash-child form of that disarm
+  (`sed -i` / redirect / `tee` / `cp`-as-destination) is covered by a new
+  deny.commands cluster, `rm`/`mv` of `~/.commandcode` is a block, and writes
+  under `~/.commandcode/*` are warn-tier. Without these, the guard this release
+  installs could be stripped by a single shell command.
+  Policy revision `2026-09-21.1`; `policy-migrate` carries every earlier
+  generation forward.
 - **Close the cd-relative path bypass (audit F-1).** A relative operand after a
   literal `cd` (`cd ~ && cat .ssh/id_rsa`) never reached a `~/.ssh/*` rule
   because candidates were only mined, never resolved against the directory the

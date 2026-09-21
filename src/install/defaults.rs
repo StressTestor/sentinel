@@ -1,7 +1,7 @@
 use super::InstallError;
 use std::path::Path;
 
-pub const CURRENT_POLICY_REVISION: &str = "2026-08-07.1";
+pub const CURRENT_POLICY_REVISION: &str = "2026-09-21.1";
 
 /// write the default policy.toml with sane deny rules.
 /// does NOT overwrite if the file already exists.
@@ -437,6 +437,13 @@ pattern = "~/.gemini/*"
 action = "warn"
 reason = "agent write to Gemini CLI config - review for unexpected changes"
 
+# whole-dir, like ~/.codex/* and ~/.gemini/*: covers settings.json (the hook
+# surface) and any registered hook script beside it.
+[[deny.paths]]
+pattern = "~/.commandcode/*"
+action = "warn"
+reason = "agent write to Command Code config - review for unexpected changes"
+
 [[deny.paths]]
 pattern = "**/.vscode/tasks.json"
 action = "warn"
@@ -795,6 +802,16 @@ pattern = '\b(rm|mv)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/s
 action = "block"
 reason = "deleting/moving ~/.claude or its settings.json removes the PreToolUse hook (guard-disarm)"
 
+# same total disarm for Command Code, whose hook registration lives in
+# ~/.commandcode/settings.json. `rm -rf ~/.commandcode` also takes the hook
+# SCRIPT with it when a bridge script is registered instead of a direct
+# `sentinel evaluate` command. Only the dir itself or its settings.json is
+# matched, so a subdir cleanup cannot false-block.
+[[deny.commands]]
+pattern = '\b(rm|mv)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.commandcode(/settings\.json|/)?(["\x27\s;|&]|$)'
+action = "block"
+reason = "deleting/moving ~/.commandcode or its settings.json removes the PreToolUse hook (guard-disarm)"
+
 # deleting/moving ~/.sentinel removes the policy file the hook loads. A missing
 # policy currently fails closed (deny), but it pairs with a HOME-repoint/race into
 # a real disarm and erases the audit trail - block it. (READING ~/.sentinel/*,
@@ -845,6 +862,44 @@ reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreTo
 pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.claude/settings(\.local)?\.json(\s+-\S+)*\s*$'
 action = "block"
 reason = "replacing/zeroing .claude/settings.json via cp/install/ln/dd/truncate - can strip the PreToolUse hook (guard-disarm)"
+
+# --- Command Code hook config (guard-disarm) ---
+# Command Code's guard is registered in ~/.commandcode/settings.json, so it is
+# removable by exactly the shell mutations above. Same reasoning, same shape:
+# selfprotect only inspects typed Write/Edit/MultiEdit calls, never a Bash child,
+# so a shell rewrite of the settings file has to be a deny.commands rule. The
+# `rm`/`mv` half is the ~/.commandcode rule above. Command Code has a single
+# settings file (no settings.local.json variant).
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.commandcode/settings\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of ~/.commandcode/settings.json - can strip the PreToolUse hook (guard-disarm)"
+
+# line editors (ed/ex) rewrite in place with no -i flag, no redirect, no tee.
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.commandcode/settings\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor (ed/ex) rewrite of ~/.commandcode/settings.json - can strip the PreToolUse hook (guard-disarm)"
+
+# truncating/overwriting redirect (`>`, `>>`, `>|` clobber) onto the settings file.
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.commandcode/settings\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting ~/.commandcode/settings.json via redirect - can strip the PreToolUse hook (guard-disarm)"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.commandcode/settings\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting ~/.commandcode/settings.json via tee/sponge - can strip the PreToolUse hook (guard-disarm)"
+
+# replacing the settings file with attacker content via cp/install/ln/dd, or
+# zeroing it via truncate. End-anchored so settings.json must be the DESTINATION
+# (last path, modulo trailing flags) - `cp settings.json backup` (reading it OUT)
+# stays at the warn-tier path rule, not blocked.
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.commandcode/settings\.json(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing ~/.commandcode/settings.json via cp/install/ln/dd/truncate - can strip the PreToolUse hook (guard-disarm)"
 
 # rewriting ~/.sentinel/policy.toml from a SHELL child process is the disarm the
 # selfprotect content-check CANNOT see (it inspects only Write/Edit/MultiEdit tool
@@ -1691,6 +1746,10 @@ mod tests {
             Action::Warn
         );
         assert_eq!(
+            action_of(&path_call("~/.commandcode/settings.json")),
+            Action::Warn
+        );
+        assert_eq!(
             action_of(&path_call("./repo/.vscode/tasks.json")),
             Action::Warn
         );
@@ -2140,6 +2199,50 @@ mod tests {
                 "printf '{}' | tee ~/.claude/settings.json>/dev/null"
             )),
             Action::Block
+        );
+    }
+
+    #[test]
+    fn command_code_settings_shell_strip_blocks() {
+        // the same disarm, retargeted at Command Code's hook config: the guard
+        // Command Code loads lives in ~/.commandcode/settings.json
+        assert_eq!(
+            action_of(&cmd_call(
+                "sed -i '' '/sentinel evaluate/d' ~/.commandcode/settings.json"
+            )),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call(
+                "perl -i -pe 's/sentinel//' ~/.commandcode/settings.json"
+            )),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call("echo '{}' > ~/.commandcode/settings.json")),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call(
+                "jq 'del(.hooks)' a.json | sponge ~/.commandcode/settings.json"
+            )),
+            Action::Block
+        );
+        assert_eq!(
+            action_of(&cmd_call("cp /tmp/evil.json ~/.commandcode/settings.json")),
+            Action::Block
+        );
+        // the config dir holds both the registration and (under a bridge
+        // install) the hook script, so removing it is a total disarm
+        assert_eq!(action_of(&cmd_call("rm -rf ~/.commandcode")), Action::Block);
+        assert_eq!(
+            action_of(&cmd_call("mv ~/.commandcode/settings.json /tmp/x")),
+            Action::Block
+        );
+        // reading it is the warn-tier path rule, exactly like Claude's
+        assert_eq!(
+            action_of(&cmd_call("cat ~/.commandcode/settings.json")),
+            Action::Warn
         );
     }
 

@@ -1,15 +1,24 @@
 # architecture
 
-last updated: 2026-09-04
+last updated: 2026-09-21
+prior: 2026-09-04
 
 ## overview
 
 sentinel is a runtime defense tool for CLI AI agents. it normalizes typed tool
 calls, evaluates them through one deterministic policy pipeline, and answers in
 the selected host's hook contract. native install, uninstall, status, and doctor
-lifecycle support is implemented for Claude Code and Codex. `evaluate --agent
-<name>` remains the lower-level integration contract for other hook-capable
-agents. a deny also exits 2.
+lifecycle support is implemented for Claude Code, Codex, and Command Code.
+`evaluate --agent <name>` remains the lower-level integration contract for other
+hook-capable agents. a deny also exits 2.
+
+Command Code is the cheapest of the three to support because its hook contract is
+the same nested `hookSpecificOutput.permissionDecision` JSON as Claude Code: the
+JSON settings writer, the `hooks.PreToolUse` inspector, and the content-aware
+hook-removal check are all shared, and only the config path
+(`~/.commandcode/settings.json`) differs. its one shape difference is input-side —
+`shell_command` splits a command line across `command` + `args`, which
+`evaluate/hook_schema.rs` folds back together (see key patterns).
 
 the separate `audit` command is not an enforcement hook or a sandbox. it drives a
 real Claude Code or Codex process through a stateful session, correlates
@@ -87,7 +96,7 @@ sentinel/
 │   ├── install/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
 │   │   ├── activation.rs   Codex public hooks API activation/trust probe
-│   │   ├── state.rs        Claude/Codex installed and activated state
+│   │   ├── state.rs        Claude/Codex/Command Code installed and activated state
 │   │   ├── hooks.rs        direct/Ghost ownership reconciliation + atomic writes
 │   │   └── defaults.rs     default policy.toml generator
 │   ├── policy_migrate.rs   revision detection + validated three-way migration
@@ -227,7 +236,7 @@ shai-hulud / Miasma supply-chain hardening pack, organized by honesty tier:
   `--post-file`), plus `>/dev/tcp` and `nc <file`.
 - **warn (dual-use tripwires):** plain `curl/wget --data`/`-d` (common in API
   testing); writes to other agents' hook configs (`.claude/settings*.json`,
-  `~/.codex`, `~/.gemini`, `.vscode/tasks.json`), CI workflows
+  `~/.codex`, `~/.gemini`, `~/.commandcode`, `.vscode/tasks.json`), CI workflows
   (`.github/workflows/*` - auto-run-on-push + secrets/OIDC surface), LaunchAgent /
   systemd-user persistence units, project-local `kubeconfig`, and
   `npm/pnpm/yarn/bun publish` / `npm token` / `gh repo create --public`.
@@ -252,15 +261,36 @@ onto a deny rule's literal prefix and matched, so a candidate the shell would ex
 onto a protected target can't dodge the anchored rule. Hook-removal protection
 (`src/selfprotect/`) runs after policy evaluation: a Write/Edit/MultiEdit to
 `.claude/settings(.local).json` that drops the `sentinel evaluate` hook escalates
-warn → block; the same event-aware check covers native Codex `config.toml` and
-`hooks.json`, where command text outside `hooks.PreToolUse` does not count as a
-live guard. Autorun inspection resolves the same effective mutation identity as
+warn → block; `~/.commandcode/settings.json` carries the same nested shape and
+gets the same check; the same event-aware check covers native Codex `config.toml`
+and `hooks.json`, where command text outside `hooks.PreToolUse` does not count as
+a live guard. Autorun inspection resolves the same effective mutation identity as
 hook preservation, including existing symlink aliases and symlinked parents.
 Hook-preserving edits keep their policy action. The Bash-child form
 of the same disarm (`sed -i`/redirect/`tee` rewriting settings.json) — which
 selfprotect's content check cannot see — is covered by deny.commands rules
-instead. `sentinel check` applies the same `selfprotect` + `preflight` escalations
-as the live `evaluate` path, so its dry-run can't under-report the live hook.
+instead, mirrored per agent config path (`.claude/settings(.local).json` and
+`~/.commandcode/settings.json`). `sentinel check` applies the same `selfprotect` +
+`preflight` escalations as the live `evaluate` path, so its dry-run can't
+under-report the live hook.
+
+### host tool-input shapes
+
+Hosts name the same tool call differently, and a defense that only reads the
+field names it expects can be walked around by using a different one.
+`evaluate/hook_schema.rs` normalizes before any rule runs:
+
+- **command fields** — `command`, `cmd`, `shell_command`, in string or argv-array
+  form, regardless of tool name.
+- **argv tail** — a host that splits one command line across `command` + `args`
+  (Command Code's `shell_command`) would otherwise present `/bin/sh` to the
+  matchers while the shell ran `sh -c 'cat ~/.ssh/id_rsa'`. `append_argv_tail`
+  folds an `args` string-array onto the extracted command, so deny.commands and
+  deny.paths judge the line that will actually run. The join is a plain space: it
+  can only add tokens for the rules to see, never hide one. A non-array `args`
+  (some MCP tool's option object) is left alone.
+- **path fields** — `file_path`, `absolute_path` (Command Code's `read_file`),
+  `path`, `filePath`, `pattern`, `notebook_path`, `file`, `filename`.
 
 ### install-preflight (worm TTP)
 

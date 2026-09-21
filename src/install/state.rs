@@ -1,6 +1,10 @@
 use super::activation::{self, Activation};
 use super::hooks::{self, HookInspection, HookOwnership};
-use super::{claude_settings_path, codex_config_path, codex_hooks_path, AgentTarget};
+use super::{
+    claude_settings_path, codex_config_path, codex_hooks_path, commandcode_settings_path,
+    AgentTarget,
+};
+use serde_json::Value;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -15,10 +19,31 @@ pub fn inspect_agent(target: AgentTarget) -> std::io::Result<AgentState> {
     Ok(match target {
         AgentTarget::ClaudeCode => inspect_claude(claude_settings_path()?),
         AgentTarget::Codex => inspect_codex(codex_config_path()?, codex_hooks_path()?),
+        AgentTarget::CommandCode => inspect_command_code(commandcode_settings_path()?),
     })
 }
 
+/// Claude Code: same JSON `hooks.PreToolUse` shape as Command Code, plus its own
+/// `disableAllHooks` kill switch, which is the only additional state the config
+/// itself can prove.
 fn inspect_claude(config_path: PathBuf) -> AgentState {
+    inspect_json_settings(config_path, "Claude Code", activation::claude_activation)
+}
+
+/// Command Code. Its settings carry no global "hooks off" switch, so a parsed
+/// file with the hook entry present is all the config can attest — whether the
+/// hook actually fires is what `doctor`'s canary probe is for.
+fn inspect_command_code(config_path: PathBuf) -> AgentState {
+    inspect_json_settings(config_path, "Command Code", |_| Activation::Active)
+}
+
+/// Shared inspector for agents whose settings are a JSON document with a
+/// `hooks.PreToolUse` array (Claude Code and Command Code).
+fn inspect_json_settings(
+    config_path: PathBuf,
+    label: &str,
+    active_probe: impl Fn(&Value) -> Activation,
+) -> AgentState {
     let config_exists = config_path.exists();
     let parsed = std::fs::read_to_string(&config_path)
         .map_err(|error| error.to_string())
@@ -26,27 +51,24 @@ fn inspect_claude(config_path: PathBuf) -> AgentState {
             serde_json::from_str::<serde_json::Value>(&content).map_err(|error| error.to_string())
         });
     let (hook, activation) = match parsed {
-        Ok(settings) => match hooks::inspect_claude_pre_tool(&settings) {
+        Ok(settings) => match hooks::inspect_json_pre_tool(&settings) {
             Ok(hook) => {
-                let activation = activation_for_inspection(
-                    &hook,
-                    || activation::claude_activation(&settings),
-                    "Claude Code",
-                );
+                let activation =
+                    activation_for_inspection(&hook, || active_probe(&settings), label);
                 (hook, activation)
             }
             Err(error) => (
                 absent_hook(),
-                Activation::Broken(format!("invalid Claude hook configuration: {error}")),
+                Activation::Broken(format!("invalid {label} hook configuration: {error}")),
             ),
         },
         Err(_) if !config_exists => (
             absent_hook(),
-            Activation::Broken("Claude Code settings file is absent".into()),
+            Activation::Broken(format!("{label} settings file is absent")),
         ),
         Err(error) => (
             absent_hook(),
-            Activation::Broken(format!("could not parse Claude Code settings: {error}")),
+            Activation::Broken(format!("could not parse {label} settings: {error}")),
         ),
     };
     AgentState {
@@ -80,7 +102,7 @@ fn inspect_codex(config_path: PathBuf, hooks_path: PathBuf) -> AgentState {
                     .map_err(|error| error.to_string())
             })
             .and_then(|settings| {
-                hooks::inspect_claude_pre_tool(&settings).map_err(|error| error.to_string())
+                hooks::inspect_json_pre_tool(&settings).map_err(|error| error.to_string())
             }) {
             Ok(inspection) => inspection,
             Err(error) => {

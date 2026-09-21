@@ -24,6 +24,7 @@ pub enum InstallError {
 pub enum AgentTarget {
     ClaudeCode,
     Codex,
+    CommandCode,
 }
 
 impl AgentTarget {
@@ -31,6 +32,7 @@ impl AgentTarget {
         match agent.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" | "claude_code" => Some(Self::ClaudeCode),
             "codex" => Some(Self::Codex),
+            "command-code" | "command_code" | "commandcode" => Some(Self::CommandCode),
             _ => None,
         }
     }
@@ -39,6 +41,7 @@ impl AgentTarget {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::CommandCode => "command-code",
         }
     }
 
@@ -46,6 +49,7 @@ impl AgentTarget {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::CommandCode => "Command Code",
         }
     }
 }
@@ -63,6 +67,18 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
     match target {
         AgentTarget::ClaudeCode => {
             let settings_path = claude_settings_path()?;
+            hooks::install_hook(&settings_path, &sentinel_path)?;
+            println!(
+                "configured PreToolUse protection in {}",
+                settings_path.display()
+            );
+            if result_scan {
+                hooks::install_post_hook(&settings_path, &sentinel_path)?;
+                println!("configured PostToolUse result-scan hook (detection only)");
+            }
+        }
+        AgentTarget::CommandCode => {
+            let settings_path = commandcode_settings_path()?;
             hooks::install_hook(&settings_path, &sentinel_path)?;
             println!(
                 "configured PreToolUse protection in {}",
@@ -221,6 +237,14 @@ pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
                 settings_path.display()
             );
         }
+        AgentTarget::CommandCode => {
+            let settings_path = commandcode_settings_path()?;
+            hooks::uninstall_hook(&settings_path)?;
+            println!(
+                "removed direct Sentinel hooks from {}",
+                settings_path.display()
+            );
+        }
         AgentTarget::Codex => {
             let config_path = codex_config_path()?;
             hooks::uninstall_codex_hook(&config_path)?;
@@ -271,6 +295,19 @@ fn configured_dir(variable: &str, default: &str) -> std::io::Result<PathBuf> {
 
 pub(crate) fn codex_home() -> std::io::Result<PathBuf> {
     configured_dir("CODEX_HOME", ".codex")
+}
+
+/// Command Code's user-level settings file. Command Code tests a hook `matcher`
+/// against the tool display name (`SHELL`, `READ`, `WRITE`, `EDIT`) and honors
+/// the same nested PreToolUse decision JSON as Claude Code, so the JSON hook
+/// writer and inspector are shared. There is no relocated-config-dir variable
+/// to honor here (unlike `CLAUDE_CONFIG_DIR` / `CODEX_HOME`).
+pub(crate) fn commandcode_home() -> std::io::Result<PathBuf> {
+    Ok(crate::common::home_dir()?.join(".commandcode"))
+}
+
+pub(crate) fn commandcode_settings_path() -> std::io::Result<PathBuf> {
+    Ok(commandcode_home()?.join("settings.json"))
 }
 
 pub(crate) fn codex_config_path() -> std::io::Result<PathBuf> {

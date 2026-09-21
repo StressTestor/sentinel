@@ -198,8 +198,11 @@ impl HookInput {
 }
 
 /// fields that carry a file path across the tools we model (and common variants).
+/// `absolute_path` is Command Code's `read_file` path field; the other agents send
+/// `file_path`.
 const PATH_FIELDS: &[&str] = &[
     "file_path",
+    "absolute_path",
     "path",
     "filePath",
     "pattern",
@@ -257,15 +260,47 @@ fn extract_command(input: &serde_json::Value) -> Option<String> {
 
 /// name-gated command extraction: always try the shell-specific COMMAND_FIELDS
 /// first; then, ONLY for exec-named tools, fall back to EXEC_FIELDS. Non-exec
-/// tools get exactly the old behavior.
+/// tools get exactly the old behavior. The argv tail (`args`) is folded onto
+/// whatever form we found — see [`append_argv_tail`].
 fn extract_command_for_tool(tool_name: &str, input: &serde_json::Value) -> Option<String> {
-    extract_command(input).or_else(|| {
-        if is_exec_tool(tool_name) {
-            extract_command_from_fields(input, EXEC_FIELDS)
-        } else {
-            None
-        }
-    })
+    extract_command(input)
+        .or_else(|| {
+            if is_exec_tool(tool_name) {
+                extract_command_from_fields(input, EXEC_FIELDS)
+            } else {
+                None
+            }
+        })
+        .map(|command| append_argv_tail(command, input))
+}
+
+/// Command Code's `shell_command` splits one command line across two fields:
+/// `command` holds the program and `args` the argv tail, and the host hands both
+/// to the shell. So
+/// `{"command":"/bin/sh","args":["-c","cat ~/.ssh/id_rsa"]}` runs the ssh-key
+/// read while the matcher only ever saw `/bin/sh` — every deny.commands regex
+/// and deny.paths token saw nothing to match. Fold the tail onto the extracted
+/// command so the rules judge the line that will actually run.
+///
+/// Only an array of strings is folded (the same argv form COMMAND_FIELDS already
+/// joins); a non-shell tool carrying some unrelated `args` object is untouched.
+/// The join is a plain space, which is the fail-safe direction: it can only add
+/// tokens for the rules to match, never hide one.
+fn append_argv_tail(mut command: String, input: &serde_json::Value) -> String {
+    let Some(args) = input.get("args").and_then(|value| value.as_array()) else {
+        return command;
+    };
+    let tail = args
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if tail.is_empty() {
+        return command;
+    }
+    command.push(' ');
+    command.push_str(&tail);
+    command
 }
 
 /// the shared field walker: first listed field that holds a string (returned
@@ -680,6 +715,87 @@ fn extract_all_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn normalize(tool_name: &str, tool_input: serde_json::Value) -> NormalizedToolCall {
+        HookInput {
+            tool_name: Some(tool_name.into()),
+            tool_input,
+            cwd: None,
+            tool_use_id: None,
+            _extra: serde_json::Map::new(),
+        }
+        .normalize()
+        .expect("normalizes")
+    }
+
+    #[test]
+    fn command_code_argv_tail_is_folded_into_the_command() {
+        // the host runs `program` + `args`; the rules must judge both.
+        let call = normalize(
+            "shell_command",
+            serde_json::json!({
+                "command": "/bin/sh",
+                "args": ["-c", "cat ~/.ssh/id_rsa"],
+            }),
+        );
+        assert_eq!(
+            call.command.as_deref(),
+            Some("/bin/sh -c cat ~/.ssh/id_rsa"),
+            "the argv tail must reach the matchers, not just the program"
+        );
+        assert!(
+            call.paths.iter().any(|path| path == "~/.ssh/id_rsa"),
+            "a path parked in args must be mined: {:?}",
+            call.paths
+        );
+    }
+
+    #[test]
+    fn argv_tail_folds_onto_an_argv_command_field_too() {
+        let call = normalize(
+            "shell_command",
+            serde_json::json!({
+                "command": ["/bin/sh", "-c"],
+                "args": ["rm -rf /"],
+            }),
+        );
+        assert_eq!(call.command.as_deref(), Some("/bin/sh -c rm -rf /"));
+    }
+
+    #[test]
+    fn argv_tail_absent_or_unusable_leaves_the_command_alone() {
+        // no args at all
+        let call = normalize("shell_command", serde_json::json!({ "command": "ls -la" }));
+        assert_eq!(call.command.as_deref(), Some("ls -la"));
+        // args that is not an argv array (an MCP tool's option object) is not a
+        // command continuation and must not be concatenated
+        let call = normalize(
+            "mcp__thing__do",
+            serde_json::json!({ "command": "ls", "args": { "depth": 2 } }),
+        );
+        assert_eq!(call.command.as_deref(), Some("ls"));
+        // an empty array contributes nothing (and no stray trailing separator)
+        let call = normalize(
+            "shell_command",
+            serde_json::json!({ "command": "ls", "args": [] }),
+        );
+        assert_eq!(call.command.as_deref(), Some("ls"));
+    }
+
+    #[test]
+    fn command_code_read_file_path_field_is_mined() {
+        let call = normalize(
+            "read_file",
+            serde_json::json!({ "absolute_path": "/Users/dev/.ssh/id_rsa" }),
+        );
+        assert!(
+            call.paths
+                .iter()
+                .any(|path| path == "/Users/dev/.ssh/id_rsa"),
+            "absolute_path is read_file's path field: {:?}",
+            call.paths
+        );
+    }
 
     #[test]
     fn chained_relative_cd_keeps_the_established_directory() {

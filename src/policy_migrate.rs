@@ -232,6 +232,40 @@ const ADDED_AFTER_2026_07_28_1: &[(&str, RuleSection)] = &[
     ),
 ];
 
+// Command Code is installable at revision 2026-09-21.1. Its guard lives in
+// ~/.commandcode/settings.json, so it needs the same shell-mutation cluster
+// .claude/settings.json already has (selfprotect only inspects typed
+// Write/Edit/MultiEdit calls, never a Bash child) plus a reconfiguration path
+// rule. Every generation below predates Command Code support, so reconstruction
+// strips all seven.
+const ADDED_AFTER_2026_08_07_1: &[(&str, RuleSection)] = &[
+    (r#"~/.commandcode/*"#, RuleSection::DenyPaths),
+    (
+        r#"\b(rm|mv)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.commandcode(/settings\.json|/)?(["\x27\s;|&]|$)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.commandcode/settings\.json(["\x27\s<>;|&]|$)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"\b(ed|ex)\b\s+\S*\.commandcode/settings\.json(["\x27\s<>;|&]|$)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#">>?\|?\s*"?\S*\.commandcode/settings\.json(["\x27\s<>;|&]|$)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"\b(tee|sponge)\b[^;&|\n]*\.commandcode/settings\.json(["\x27\s<>;|&]|$)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.commandcode/settings\.json(\s+-\S+)*\s*$"#,
+        RuleSection::DenyCommands,
+    ),
+];
+
 const CURRENT_TO_0_4_1: &[RuleChange] = &[
     RuleChange {
         section: RuleSection::DenyPaths,
@@ -596,6 +630,7 @@ fn published_default(
         .iter()
         .chain(ADDED_AFTER_0_4_1.iter())
         .chain(ADDED_AFTER_2026_07_28_1.iter())
+        .chain(ADDED_AFTER_2026_08_07_1.iter())
     {
         remove_rule(&mut doc, *section, pattern)?;
     }
@@ -623,6 +658,7 @@ fn draft_default(mode: &str) -> Result<DocumentMut, MigrationError> {
     for (pattern, section) in MCP_TRUST_ADDITIONS
         .iter()
         .chain(ADDED_AFTER_2026_07_28_1.iter())
+        .chain(ADDED_AFTER_2026_08_07_1.iter())
     {
         remove_rule(&mut doc, *section, pattern)?;
     }
@@ -641,7 +677,10 @@ fn prior_default(mode: &str) -> Result<DocumentMut, MigrationError> {
         .and_then(Item::as_table_mut)
         .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
     policy.insert("revision", value(PRIOR_POLICY_REVISION));
-    for (pattern, section) in ADDED_AFTER_2026_07_28_1 {
+    for (pattern, section) in ADDED_AFTER_2026_07_28_1
+        .iter()
+        .chain(ADDED_AFTER_2026_08_07_1.iter())
+    {
         remove_rule(&mut doc, *section, pattern)?;
     }
     for change in CURRENT_TO_2026_07_28_1 {
@@ -1230,7 +1269,7 @@ mod tests {
     fn default_has_explicit_revision_and_schema_accepts_it() {
         let content = default_policy_content("enforce");
         assert!(content.contains(&format!("revision = \"{CURRENT_POLICY_REVISION}\"")));
-        assert_eq!(CURRENT_POLICY_REVISION, "2026-08-07.1");
+        assert_eq!(CURRENT_POLICY_REVISION, "2026-09-21.1");
         let engine = PolicyEngine::from_toml_str(&content).unwrap();
         assert_eq!(engine.mode(), "enforce");
     }
@@ -1270,7 +1309,9 @@ mod tests {
             .sum();
         assert_eq!(
             current_count - draft_count,
-            MCP_TRUST_ADDITIONS.len() + ADDED_AFTER_2026_07_28_1.len()
+            MCP_TRUST_ADDITIONS.len()
+                + ADDED_AFTER_2026_07_28_1.len()
+                + ADDED_AFTER_2026_08_07_1.len()
         );
     }
 
@@ -1314,7 +1355,7 @@ mod tests {
         assert_eq!(applied.from, PublishedGeneration::Draft2026_07_28);
         assert_eq!(fs::read_to_string(&applied.backup_path).unwrap(), old);
         let migrated = fs::read_to_string(&path).unwrap();
-        assert!(migrated.contains("revision = \"2026-08-07.1\""));
+        assert!(migrated.contains(&format!("revision = \"{CURRENT_POLICY_REVISION}\"")));
         assert!(migrated.contains("mode = \"audit\""));
         assert!(matches!(
             inspect_content(&migrated).unwrap(),
