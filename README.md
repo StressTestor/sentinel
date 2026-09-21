@@ -33,9 +33,9 @@ nobody is defending at the runtime layer. sentinel fixes that.
 
 ## how it works
 
-sentinel hooks into Claude Code's and Codex's pre-tool systems. every tool call passes through the same policy pipeline before execution. sentinel evaluates the typed tool input against your security policy and either allows, warns, or blocks it. a block signals through the agent's native hook contract and exit code 2.
+sentinel hooks into Claude Code's, Codex's, and Command Code's pre-tool systems. every tool call passes through the same policy pipeline before execution. sentinel evaluates the typed tool input against your security policy and either allows, warns, or blocks it. a block signals through the agent's native hook contract and exit code 2.
 
-`sentinel install` owns the Claude Code lifecycle by default; `sentinel install --agent codex` owns the Codex lifecycle. both installers reconcile existing Sentinel entries instead of stacking duplicates. if Claude Code is already mediated through Ghost, Sentinel leaves that bridge in charge and removes only redundant direct Sentinel handlers. other agents can call `sentinel evaluate --agent <name>` through their own hook integration, but Sentinel does not pretend to manage their lifecycle.
+`sentinel install` owns the Claude Code lifecycle by default; `sentinel install --agent codex` owns the Codex lifecycle, and `sentinel install --agent command-code` owns the Command Code lifecycle. all installers reconcile existing Sentinel entries instead of stacking duplicates. if Claude Code is already mediated through Ghost, Sentinel leaves that bridge in charge and removes only redundant direct Sentinel handlers. other agents can call `sentinel evaluate --agent <name>` through their own hook integration, but Sentinel does not pretend to manage their lifecycle.
 
 ```
 you type a prompt
@@ -58,11 +58,12 @@ cargo install sentinel-guard
 sentinel install          # enforce mode (blocks violations) - the default
 sentinel install --audit  # audit mode (logs only, never blocks)
 sentinel install --agent codex
+sentinel install --agent command-code
 ```
 
 (the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
 
-the default install writes a PreToolUse hook into `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when configured. installation, health checks, and self-protection use the same location. the Codex install uses `$CODEX_HOME` when set, otherwise `~/.codex`; it prefers `hooks.json` when that file already exists and otherwise writes the native hook table in `config.toml`. the installer also writes a default policy with deny rules for credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and its own policy, binary, and hook entry. `HOME` must be a nonempty absolute path before installation changes files.
+the default install writes a PreToolUse hook into `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when configured. installation, health checks, and self-protection use the same location. the Codex install uses `$CODEX_HOME` when set, otherwise `~/.codex`; it prefers `hooks.json` when that file already exists and otherwise writes the native hook table in `config.toml`. the Command Code install writes the same JSON hook shape into `~/.commandcode/settings.json`. the installer also writes a default policy with deny rules for credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and its own policy, binary, and hook entry. `HOME` must be a nonempty absolute path before installation changes files.
 
 ## enforce by default
 
@@ -86,7 +87,7 @@ audit evidence comes from the selected agent's structured output. these verdicts
 
 ## install health
 
-`sentinel status --agent <claude-code|codex>` inspects the selected agent's actual configuration and activation state. `sentinel doctor --agent <name> --strict` also runs a known-bad canary through the configured hook chain. for Codex, activation is checked through the public `codex app-server` hooks API: a hook that exists but is disabled, untrusted, duplicated, or unverifiable is not reported healthy.
+`sentinel status --agent <claude-code|codex|command-code>` inspects the selected agent's actual configuration and activation state. `sentinel doctor --agent <name> --strict` also runs a known-bad canary through the configured hook chain. for Codex, activation is checked through the public `codex app-server` hooks API: a hook that exists but is disabled, untrusted, duplicated, or unverifiable is not reported healthy.
 
 these are point-in-time checks. they prove that the current configuration and canary path work; they cannot prove continuous enforcement after the check. Codex trust remains a separate host decision, so approve the hook in `/hooks` and rerun strict doctor. deleting the hooked binary during an already-running agent session can still fail open.
 
@@ -169,8 +170,9 @@ sentinel audit            run attack corpus against your agent
 sentinel install          install hooks + default policy (enforce mode)
 sentinel install --audit  install in audit mode (log only, never blocks)
 sentinel install --agent codex  install the native Codex hook
+sentinel install --agent command-code  install the native Command Code hook
 sentinel install --result-scan   also register the PostToolUse result-secret hook (opt-in)
-sentinel uninstall --agent <name>  remove direct Claude Code or Codex hooks
+sentinel uninstall --agent <name>  remove direct Claude Code, Codex, or Command Code hooks
 sentinel evaluate [--agent <name>]  evaluate a tool call (called by the hook)
 sentinel post-evaluate    scan a tool RESULT for secret shapes (PostToolUse hook; detection only)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
