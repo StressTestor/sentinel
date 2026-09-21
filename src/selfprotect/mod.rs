@@ -316,7 +316,10 @@ fn hook_removal_block() -> PolicyDecision {
 }
 
 fn content_preserves_hook(path: &str, kind: ConfigKind, content: &str) -> bool {
-    if is_claude_settings_path(path) || is_codex_hook_config_path(path) {
+    if is_claude_settings_path(path)
+        || is_codex_hook_config_path(path)
+        || is_commandcode_settings_path(path)
+    {
         return parse_config(content, kind)
             .is_some_and(|config| nested_event_contains_sentinel_hook(&config, "PreToolUse"));
     }
@@ -452,6 +455,7 @@ fn hook_config_kind(path: &str) -> Option<ConfigKind> {
         return Some(ConfigKind::Json);
     }
     let is_json = is_claude_settings_path(path)
+        || is_commandcode_settings_path(path)
         || p.ends_with(".gemini/settings.json")
         || base == "crush.json";
     is_json.then_some(ConfigKind::Json)
@@ -526,6 +530,7 @@ fn autorun_config_kind(path: &str) -> Option<ConfigKind> {
         return Some(ConfigKind::Json);
     }
     let is_json = is_claude_settings_path(path)
+        || is_commandcode_settings_path(path)
         || p.ends_with(".gemini/settings.json")
         || base == ".mcp.json"
         || base == ".claude.json"
@@ -608,6 +613,24 @@ fn is_claude_settings_path_in(path: &str, configured_dir: Option<&Path>) -> bool
         }
     }
     false
+}
+
+/// Match Command Code's user settings file (`~/.commandcode/settings.json`).
+/// Its `hooks.PreToolUse` shape is the same nested form Claude Code uses, so the
+/// content check is shared. Same suffix rules as [`is_claude_settings_path_in`]:
+/// `.commandcode` must be a real path component (so
+/// `/x/foo.commandcode/settings.json` does not match), `~`-prefixed paths need no
+/// expansion, and the compare is lowercased for macOS's case-insensitive default
+/// FS. There is only one Command Code settings file (no `settings.local.json`
+/// variant), and no relocated-config-dir variable to honor.
+fn is_commandcode_settings_path(path: &str) -> bool {
+    const SUFFIX: &str = ".commandcode/settings.json";
+    let p = path.trim().to_ascii_lowercase();
+    if p == SUFFIX {
+        return true; // bare relative form
+    }
+    p.strip_suffix(SUFFIX)
+        .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
 /// Does the new complete config body still carry an exact supported direct

@@ -136,7 +136,7 @@ pub fn build_report(
     block_count_7d: usize,
 ) -> DoctorReport {
     let hook = match settings {
-        Some(settings) => match install::hooks::inspect_claude_pre_tool(settings) {
+        Some(settings) => match install::hooks::inspect_json_pre_tool(settings) {
             Ok(inspection) => HostHook {
                 config_label: "~/.claude/settings.json".into(),
                 config_exists: true,
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn hooked_command_and_argument_parsing() {
         let s = sentinel_settings();
-        let inspection = install::hooks::inspect_claude_pre_tool(&s).unwrap();
+        let inspection = install::hooks::inspect_json_pre_tool(&s).unwrap();
         assert_eq!(
             inspection.command.as_deref(),
             Some("/usr/local/bin/sentinel evaluate")

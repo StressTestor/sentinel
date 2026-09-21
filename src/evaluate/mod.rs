@@ -68,9 +68,10 @@ impl HookOutput {
 /// so even one that ignores the stdout JSON is covered.
 #[derive(Clone, Copy, PartialEq)]
 pub enum AgentFormat {
-    /// Nested `hookSpecificOutput.permissionDecision` JSON. Claude Code, and
-    /// OpenAI Codex CLI — whose PreToolUse output contract is byte-for-byte the
-    /// same (`~/.codex/config.toml` `[[hooks.PreToolUse]]`).
+    /// Nested `hookSpecificOutput.permissionDecision` JSON. Claude Code, OpenAI
+    /// Codex CLI, and Command Code — whose PreToolUse output contracts are
+    /// byte-for-byte the same (`~/.codex/config.toml` `[[hooks.PreToolUse]]`,
+    /// `~/.commandcode/settings.json` `hooks.PreToolUse`).
     ClaudeCode,
     /// `{"decision":"<token>","reason":...}` + exit 2. token `deny` for Gemini
     /// CLI (`BeforeTool`, `~/.gemini/settings.json`) and Crush (`PreToolUse`);
@@ -81,8 +82,9 @@ pub enum AgentFormat {
 impl AgentFormat {
     pub fn from_name(name: &str) -> AgentFormat {
         match name {
-            // Codex's PreToolUse output is identical to Claude Code's nested shape
-            "claude-code" | "codex" => AgentFormat::ClaudeCode,
+            // Codex's and Command Code's PreToolUse output is identical to
+            // Claude Code's nested shape
+            "claude-code" | "codex" | "command-code" => AgentFormat::ClaudeCode,
             // Gemini CLI / Crush accept the {"decision":"deny",...} form
             "gemini" | "crush" => AgentFormat::Decision("deny"),
             // the documented generic contract (also accepted by Codex's legacy form)

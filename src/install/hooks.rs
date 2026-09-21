@@ -380,7 +380,11 @@ fn event_has_ghost_bridge(entries: &[Value]) -> bool {
         .any(|entry| entry_has_kind(entry, HookCommandKind::GhostBridge))
 }
 
-pub fn inspect_claude_pre_tool(settings: &Value) -> Result<HookInspection, InstallError> {
+/// Inspect a JSON settings file's `hooks.PreToolUse` array for Sentinel
+/// ownership. Agent-agnostic: Claude Code (`~/.claude/settings.json`) and
+/// Command Code (`~/.commandcode/settings.json`) use the same shape, and both
+/// accept the same direct and ghost-mediated command forms.
+pub fn inspect_json_pre_tool(settings: &Value) -> Result<HookInspection, InstallError> {
     let hooks = match settings.get("hooks") {
         None => {
             return Ok(HookInspection {
@@ -1032,7 +1036,7 @@ command = "echo sentinel evaluate"
         install_codex_json_hook(&path, Path::new("/usr/local/bin/sentinel")).unwrap();
         let settings: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let inspection = inspect_claude_pre_tool(&settings).unwrap();
+        let inspection = inspect_json_pre_tool(&settings).unwrap();
         assert_eq!(inspection.ownership, HookOwnership::Direct);
         assert_eq!(inspection.direct_count, 1);
         assert_eq!(
