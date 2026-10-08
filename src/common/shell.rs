@@ -29,7 +29,7 @@ pub fn decode_obfuscation(cmd: &str) -> Option<String> {
 /// expanding it. Quotes and backslash escapes protect whitespace/separators and
 /// are removed from the resulting word, while real command separators remain
 /// tokens. Malformed quoting returns `None`: such a command is not executable.
-pub(crate) fn shell_tokens(command: &str) -> Option<Vec<String>> {
+pub fn shell_tokens(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut token_started = false;

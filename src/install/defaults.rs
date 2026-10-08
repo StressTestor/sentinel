@@ -18,7 +18,7 @@ pub fn write_default_policy(path: &Path, mode: &str) -> Result<bool, InstallErro
     Ok(true)
 }
 
-pub(crate) fn default_policy_content(mode: &str) -> String {
+pub fn default_policy_content(mode: &str) -> String {
     format!(
         r#"# sentinel policy configuration
 # docs: https://github.com/StressTestor/sentinel

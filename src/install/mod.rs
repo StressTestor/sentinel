@@ -42,7 +42,7 @@ impl AgentTarget {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",

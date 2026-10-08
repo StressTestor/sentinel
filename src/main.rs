@@ -1,24 +1,9 @@
-mod audit;
-mod audit_mcp;
-mod audit_trail;
-mod check;
-mod cli;
-mod common;
-mod corpus;
-mod doctor;
-mod evaluate;
-mod install;
-mod lint;
-mod policy;
-mod policy_diff;
-mod policy_migrate;
-mod post_evaluate;
-mod preflight;
-mod selfprotect;
-mod verify;
-
 use clap::Parser;
-use cli::{Cli, Command};
+use sentinel_guard::cli::{Cli, Command};
+use sentinel_guard::{
+    audit, audit_mcp, check, common, doctor, evaluate, install, lint, policy, policy_diff,
+    policy_migrate, post_evaluate, verify,
+};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
