@@ -6,7 +6,22 @@ versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **Self-protect no longer blocks a project-scoped settings file that never
+  carried the sentinel hook.** The hook-removal check is now per file: a
+  mutation is a removal only when the file it rewrites currently carries the
+  sentinel PreToolUse entry (for non-Claude agents, when it is that agent's
+  live hook config). Claude Code merges hooks across scopes, so a new
+  `.claude/settings.local.json` in a project cannot drop a user-level entry;
+  it stays at the policy's warn tier. Observed live as a block-tier false
+  positive on 2026-10-08.
+
 ### Security
+- **`disableAllHooks` is treated as a hook removal.** A Claude settings write
+  from any scope whose resulting document sets `disableAllHooks: true` is
+  blocked whenever a live sentinel hook exists, because that key turns off
+  every hook at once. Previously only the user-level file's own hook entry
+  was inspected.
 - **Close the cd-relative path bypass (audit F-1).** A relative operand after a
   literal `cd` (`cd ~ && cat .ssh/id_rsa`) never reached a `~/.ssh/*` rule
   because candidates were only mined, never resolved against the directory the
