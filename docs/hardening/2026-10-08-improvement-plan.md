@@ -19,7 +19,7 @@ need a spike), **Vibes** (unverified; nothing below ships on a Vibes claim).
 | no fuzz or property tests on the hand-written tokenizer, ANSI-C decoder, brace expander (`proptest` was removed in F15) | tree, verification matrix | Solid |
 | Claude Code ships an OS-level Bash sandbox (Seatbelt / bubblewrap) with `sandbox.filesystem.denyRead` / `denyWrite`, network domain allowlists, `failIfUnavailable`, `allowUnsandboxedCommands`; it covers shell commands only, and hooks run outside it | code.claude.com/docs/en/sandboxing, settings-reference | Solid |
 | PreToolUse hooks can return `hookSpecificOutput.updatedInput`, which replaces the whole tool input object | code.claude.com/docs/en/hooks | Solid |
-| `updatedInput` rewriting Bash `command` specifically works | inferred from "replaces the entire input object" | Directional, spike S2 |
+| `updatedInput` rewriting Bash `command` specifically works | verified live on Claude Code 2.1.295 in the cloud session (see the S4 note): a second PreToolUse hook rewrote `echo S2_ORIGINAL` to `echo S2_REWRITTEN` and the rewritten command ran | Solid |
 | Codex PreToolUse supports input modification | could not reach OpenAI docs from this environment | Vibes, do not build on it |
 
 ## design principles that do not move
@@ -266,7 +266,7 @@ enforced by a test that fails when a predicate rule lacks one).
 | id | question | exit criterion |
 |---|---|---|
 | S1 | Can bubblewrap/Seatbelt deny rules express every directory-shaped bundled rule? Which rules are hook-only? | table of every bundled `deny.paths` rule: compiled, or hook-only with the reason |
-| S2 | Does `updatedInput` rewrite Bash `command`, and does `cd` / `export` persistence survive a wrapped command? | recorded transcript against current Claude Code; only matters for A2 |
+| S2 | Does `updatedInput` rewrite Bash `command`, and does `cd` / `export` persistence survive a wrapped command? | rewrite: answered yes on 2.1.295 (S4 note). `cd` / `export` persistence under a wrapper: still open; only matters for A2 |
 | S3 | brush-parser vs tree-sitter-bash: parse coverage on verify set + FP corpus, build cost on MSRV 1.85 and musl | numbers in a doc, decision recorded |
 | S4 | Does Claude Code apply the sandbox before or after PreToolUse hooks? | observed ordering with a logging hook |
 
