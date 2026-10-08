@@ -1,0 +1,59 @@
+# browser cookie + saved-login + key stores: reading another browser profile's
+# data dir is a credential-theft signal, never a normal dev action -> block the
+# whole user-data tree (Cookies / Login Data / Web Data / Local State all live
+# under it). macOS + Linux locations.
+[[deny.paths]]
+pattern = "~/Library/Cookies/*"
+action = "block"
+reason = "Safari binary cookie store"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Google/Chrome/**"
+action = "block"
+reason = "Chrome profile data (Cookies, Login Data, Local State decryption key)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Chromium/**"
+action = "block"
+reason = "Chromium profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/BraveSoftware/**"
+action = "block"
+reason = "Brave profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Microsoft Edge/**"
+action = "block"
+reason = "Edge profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Firefox/**"
+action = "block"
+reason = "Firefox profile data (logins.json / key4.db / cookies.sqlite)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Arc/User Data/**"
+action = "block"
+reason = "Arc browser profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/.config/google-chrome/**"
+action = "block"
+reason = "Chrome profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.config/chromium/**"
+action = "block"
+reason = "Chromium profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.config/BraveSoftware/**"
+action = "block"
+reason = "Brave profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.mozilla/firefox/**"
+action = "block"
+reason = "Firefox profile data (Linux: logins.json / key4.db)"
+

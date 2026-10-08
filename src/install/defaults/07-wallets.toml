@@ -1,0 +1,11 @@
+# crypto wallets / key material
+[[deny.paths]]
+pattern = "~/.ethereum/keystore/**"
+action = "block"
+reason = "Ethereum keystore (encrypted private keys)"
+
+[[deny.paths]]
+pattern = "**/wallet.dat"
+action = "block"
+reason = "cryptocurrency wallet file"
+

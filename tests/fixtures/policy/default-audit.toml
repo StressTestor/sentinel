@@ -1,0 +1,1165 @@
+# sentinel policy configuration
+# docs: https://github.com/StressTestor/sentinel
+
+[policy]
+revision = "2026-08-07.1" # bundled policy rule generation; used by `sentinel policy-migrate`
+mode = "audit"          # "audit" (log only) or "enforce" (block)
+on_failure = "closed"   # "closed" (kill agent on sentinel crash) or "open" (allow + warn)
+default = "warn"        # default action for unmatched tool calls: "block", "warn", "allow"
+
+# deny rules - evaluated first, in order. first match wins.
+
+[[deny.paths]]
+pattern = "~/.ssh/*"
+action = "block"
+reason = "SSH key access"
+
+[[deny.paths]]
+pattern = "~/.aws/*"
+action = "block"
+reason = "AWS credential access"
+
+[[deny.paths]]
+pattern = "~/.gnupg/*"
+action = "block"
+reason = "GPG keyring access"
+
+[[deny.paths]]
+pattern = "~/.config/gh/*"
+action = "block"
+reason = "GitHub CLI credential access"
+
+[[deny.paths]]
+pattern = "~/.netrc"
+action = "block"
+reason = "netrc credential file"
+
+[[deny.paths]]
+pattern = "/etc/passwd"
+action = "block"
+reason = "system password file"
+
+[[deny.paths]]
+pattern = "/etc/shadow*"
+action = "block"
+reason = "system shadow password file (incl. backups like /etc/shadow-)"
+
+[[deny.paths]]
+pattern = "/etc/master.passwd"
+action = "block"
+reason = "macOS shadowed password hashes"
+
+[[deny.paths]]
+pattern = "/proc/*/environ"
+action = "block"
+reason = "process environment (env-var exfil via file read)"
+
+# --- shai-hulud / Miasma agent-side hardening: self-protect + credential coverage ---
+# Everything below fires only on the AGENT's own tool calls. The supply-chain worms
+# in this family run their real payload inside npm/pip lifecycle-script CHILD
+# processes, which never traverse the PreToolUse hook - Sentinel cannot see that.
+# These rules cover the prompt-injection-drives-the-agent variant of the same TTPs,
+# not the worm self-propagating. See README "what this does and doesn't catch".
+
+# self-protect: a prompt-injected agent must not be able to weaken Sentinel's own
+# policy. Reading/copying-FROM policy.toml is legitimate (backup, inspection), so
+# the PATH rule is warn-tier - a pure read (`cat`, `cp policy.toml backup`) is
+# surfaced, not blocked. Every WRITE/mutation is blocked elsewhere: the policy.toml
+# Bash-mutation command cluster below (sed -i / redirect / tee / cp-as-dest / ...)
+# and the selfprotect module (a Write/Edit/MultiEdit targeting policy.toml is
+# blocked UNCONDITIONALLY - there is no legitimate agent write to it). Your own
+# `vim ~/.sentinel/policy.toml` and `sentinel install` (writes via std::fs, not a
+# tool call) are unaffected. Reconfigure outside the guarded session. A path built
+# from a shell variable or written by a subprocess can still get through.
+[[deny.paths]]
+pattern = "~/.sentinel/policy.toml"
+action = "warn"
+reason = "Sentinel's own enforcement policy - reads warn (backup/inspect ok); writes blocked by the policy.toml command cluster + selfprotect so an injected agent can't disable the guard mid-session (reconfigure outside the agent)"
+
+# The accepted MCP baseline is another Sentinel trust root. Reads stay visible
+# but allowed; typed writes are blocked by selfprotect and shell mutations by
+# the command cluster below. A human can still run `sentinel audit-mcp --update`
+# directly outside an agent hook.
+[[deny.paths]]
+pattern = "~/.sentinel/mcp-baseline.json"
+action = "warn"
+reason = "Sentinel's trusted MCP baseline - reads warn; agent writes and audit-mcp --update are blocked so an injected agent cannot accept its own MCP server"
+
+# self-protect the Sentinel BINARY: deleting/overwriting it disarms the guard
+# (doctor documents a missing binary fails open). Block agent writes and
+# literal-path rm/mv/redirect at the common install locations. A tamper command
+# that names the binary indirectly (`rm "$(command -v sentinel)"`) carries no
+# literal path token - that case is covered by the deny.commands tamper rules
+# below, which are evadable; these literal-path rules are the stronger half.
+[[deny.paths]]
+pattern = "~/.cargo/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (cargo install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+
+[[deny.paths]]
+pattern = "~/.local/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (user-local install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+
+[[deny.paths]]
+pattern = "/usr/local/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (system install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+
+[[deny.paths]]
+pattern = "/opt/homebrew/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (Homebrew install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+
+[[deny.paths]]
+pattern = "~/.npmrc"
+action = "block"
+reason = "npm auth token (.npmrc holds _authToken)"
+
+[[deny.paths]]
+pattern = "~/.kube/config"
+action = "block"
+reason = "kubeconfig cluster credentials (default location)"
+
+[[deny.paths]]
+pattern = "~/.config/gcloud/*"
+action = "block"
+reason = "gcloud credentials (application_default_credentials.json, legacy_credentials)"
+
+[[deny.paths]]
+pattern = "~/.azure/*"
+action = "block"
+reason = "Azure CLI tokens (accessTokens.json / msal cache)"
+
+# --- broadened credential-store coverage (round-two hardening) ---
+# High-value credential/token files and stores that a naive `~/.aws` /`~/.ssh`
+# rule set leaves open. All block-tier: an agent has essentially no legitimate
+# reason to READ another tool's saved-credential store, so the false-positive
+# cost is low and the exfil value is high. Reading is blocked regardless of the
+# tool used (Read/cat/curl/a path mined from a command) - same engine path as
+# the existing credential rules above.
+
+# container / registry auth
+[[deny.paths]]
+pattern = "~/.docker/config.json"
+action = "block"
+reason = "Docker registry auth tokens (base64 auths / credsStore)"
+
+[[deny.paths]]
+pattern = "~/.dockercfg"
+action = "block"
+reason = "legacy Docker registry auth tokens"
+
+[[deny.paths]]
+pattern = "~/.config/containers/auth.json"
+action = "block"
+reason = "Podman/Buildah registry auth tokens"
+
+# git stored credentials (plaintext)
+[[deny.paths]]
+pattern = "~/.git-credentials"
+action = "block"
+reason = "git credential store (plaintext username:password@host)"
+
+[[deny.paths]]
+pattern = "~/.config/git/credentials"
+action = "block"
+reason = "git credential store (XDG location)"
+
+# package-registry / model-hub tokens
+[[deny.paths]]
+pattern = "~/.cache/huggingface/token"
+action = "block"
+reason = "Hugging Face Hub access token"
+
+[[deny.paths]]
+pattern = "~/.huggingface/token"
+action = "block"
+reason = "Hugging Face Hub access token (legacy location)"
+
+[[deny.paths]]
+pattern = "~/.cargo/credentials.toml"
+action = "block"
+reason = "crates.io registry token"
+
+[[deny.paths]]
+pattern = "~/.cargo/credentials"
+action = "block"
+reason = "crates.io registry token (legacy filename)"
+
+# database credentials
+[[deny.paths]]
+pattern = "~/.pgpass"
+action = "block"
+reason = "PostgreSQL password file"
+
+[[deny.paths]]
+pattern = "~/.pg_service.conf"
+action = "block"
+reason = "PostgreSQL service definitions (may carry passwords)"
+
+[[deny.paths]]
+pattern = "~/.my.cnf"
+action = "block"
+reason = "MySQL client config (commonly carries a [client] password)"
+
+[[deny.paths]]
+pattern = "~/.mylogin.cnf"
+action = "block"
+reason = "MySQL obfuscated login path"
+
+# cloud-CLI credential stores not already named (aws/gcloud/azure/kube/gh covered above)
+[[deny.paths]]
+pattern = "~/.config/rclone/rclone.conf"
+action = "block"
+reason = "rclone remote tokens/passwords for cloud storage"
+
+[[deny.paths]]
+pattern = "~/.oci/*"
+action = "block"
+reason = "Oracle Cloud API signing keys / config"
+
+[[deny.paths]]
+pattern = "~/.config/doctl/*"
+action = "block"
+reason = "DigitalOcean CLI access token"
+
+[[deny.paths]]
+pattern = "~/.config/fly/*"
+action = "block"
+reason = "Fly.io API token"
+
+[[deny.paths]]
+pattern = "~/.databrickscfg"
+action = "block"
+reason = "Databricks workspace token"
+
+[[deny.paths]]
+pattern = "~/.terraform.d/credentials.tfrc.json"
+action = "block"
+reason = "Terraform Cloud / registry API token"
+
+# macOS Keychains (the system credential store)
+[[deny.paths]]
+pattern = "~/Library/Keychains/*"
+action = "block"
+reason = "macOS Keychain database (every saved password/token/cert)"
+
+[[deny.paths]]
+pattern = "/Library/Keychains/*"
+action = "block"
+reason = "macOS system Keychain (System.keychain - absolute, not under HOME)"
+
+# editor SecretStorage DBs (VS Code / Cursor / VSCodium / Windsurf) hold OAuth
+# tokens and PATs saved by extensions.
+[[deny.paths]]
+pattern = "**/globalStorage/state.vscdb"
+action = "block"
+reason = "editor SecretStorage database (VS Code/Cursor state.vscdb - OAuth tokens/PATs)"
+
+# browser cookie + saved-login + key stores: reading another browser profile's
+# data dir is a credential-theft signal, never a normal dev action -> block the
+# whole user-data tree (Cookies / Login Data / Web Data / Local State all live
+# under it). macOS + Linux locations.
+[[deny.paths]]
+pattern = "~/Library/Cookies/*"
+action = "block"
+reason = "Safari binary cookie store"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Google/Chrome/**"
+action = "block"
+reason = "Chrome profile data (Cookies, Login Data, Local State decryption key)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Chromium/**"
+action = "block"
+reason = "Chromium profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/BraveSoftware/**"
+action = "block"
+reason = "Brave profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Microsoft Edge/**"
+action = "block"
+reason = "Edge profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Firefox/**"
+action = "block"
+reason = "Firefox profile data (logins.json / key4.db / cookies.sqlite)"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Arc/User Data/**"
+action = "block"
+reason = "Arc browser profile data (cookies / saved logins)"
+
+[[deny.paths]]
+pattern = "~/.config/google-chrome/**"
+action = "block"
+reason = "Chrome profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.config/chromium/**"
+action = "block"
+reason = "Chromium profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.config/BraveSoftware/**"
+action = "block"
+reason = "Brave profile data (Linux)"
+
+[[deny.paths]]
+pattern = "~/.mozilla/firefox/**"
+action = "block"
+reason = "Firefox profile data (Linux: logins.json / key4.db)"
+
+# password managers / secret vaults
+[[deny.paths]]
+pattern = "~/Library/Application Support/1Password/**"
+action = "block"
+reason = "1Password local vault data"
+
+[[deny.paths]]
+pattern = "~/Library/Group Containers/*1password*/**"
+action = "block"
+reason = "1Password group-container vault data"
+
+[[deny.paths]]
+pattern = "~/.config/op/**"
+action = "block"
+reason = "1Password CLI session/config"
+
+[[deny.paths]]
+pattern = "~/.password-store/**"
+action = "block"
+reason = "pass(1) GPG password store"
+
+[[deny.paths]]
+pattern = "~/Library/Application Support/Bitwarden/**"
+action = "block"
+reason = "Bitwarden local vault data"
+
+[[deny.paths]]
+pattern = "**/*.kdbx"
+action = "block"
+reason = "KeePass password database"
+
+# crypto wallets / key material
+[[deny.paths]]
+pattern = "~/.ethereum/keystore/**"
+action = "block"
+reason = "Ethereum keystore (encrypted private keys)"
+
+[[deny.paths]]
+pattern = "**/wallet.dat"
+action = "block"
+reason = "cryptocurrency wallet file"
+
+# `**/` so an absolute, deep path (/Users/me/app/config/.env) matches, not just a
+# single-segment `dir/.env`. This broadens the WARN surface to any path ending in
+# `.env` (vars.env, production.env, *.env.bak); acceptable because it's warn-tier
+# (never block) and such files commonly hold secrets.
+[[deny.paths]]
+pattern = "**/.env"
+action = "warn"
+reason = "environment file may contain secrets"
+
+[[deny.paths]]
+pattern = "**/.env.*"
+action = "warn"
+reason = "environment file may contain secrets"
+
+# agent-config / persistence tripwires - warn, not block: developers legitimately
+# edit these via an agent, so blocking would be a false positive. They surface a
+# write for review without breaking normal config work.
+[[deny.paths]]
+pattern = "**/.claude/settings.json"
+action = "warn"
+reason = "agent write to Claude Code settings (hook/permission surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/settings.local.json"
+action = "warn"
+reason = "agent write to Claude Code local settings (hook/permission surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/skills/**"
+action = "warn"
+reason = "agent write to a Claude Code skill (instruction-injection surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/agents/**"
+action = "warn"
+reason = "agent write to a Claude Code subagent definition (instruction-injection surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/hooks/**"
+action = "warn"
+reason = "agent write to a Claude Code hook script (execution surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.mcp.json"
+action = "warn"
+reason = "agent write to an MCP server config (adds tool/exec surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "~/.codex/*"
+action = "warn"
+reason = "agent write to Codex CLI config - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "~/.gemini/*"
+action = "warn"
+reason = "agent write to Gemini CLI config - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.vscode/tasks.json"
+action = "warn"
+reason = "agent write to VS Code tasks.json (auto-run-on-open surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.github/workflows/*"
+action = "warn"
+reason = "agent write to a GitHub Actions workflow (auto-run-on-push CI + secrets/OIDC surface) - review for unexpected changes"
+
+# warn (not block): matches any path ending in `kubeconfig` (a project-local
+# `kubeconfig`, `admin.kubeconfig`, etc.) - a common kind/k3s/eks convention that
+# developers read and edit, so blocking would be a false positive. Mirrors the
+# */.env warn posture. The default-location ~/.kube/config IS a clean block above.
+[[deny.paths]]
+pattern = "**/kubeconfig"
+action = "warn"
+reason = "possible kubeconfig cluster credentials - review before access"
+
+[[deny.paths]]
+pattern = "~/Library/LaunchAgents/*.plist"
+action = "warn"
+reason = "agent writes a macOS user LaunchAgent (login-persistence unit) - review; devs also script launchd agents"
+
+[[deny.paths]]
+pattern = "~/.config/systemd/user/*.service"
+action = "warn"
+reason = "agent writes a systemd user service (login-persistence unit) - review; devs also script user units"
+
+# recursive-delete rules. these five replaced a single `rm\s+-rf\s+(?:[^\s]+\s+)*/`
+# catch-all that matched ANY token starting with '/', so every temp-dir, worktree
+# and scratchpad cleanup was a block. worse, its token run was unscoped and
+# wandered across `;`/`&&`/`|` onto an unrelated later absolute path. the fix is
+# not to relax the class, it is to name the targets that are actually dangerous.
+# token runs are scoped with [^\s;&|\n] per the guard-tamper rules further down.
+
+# root-equivalent target: /, //, /*, /?*, /[a-z]*, /{..}, /.*, /$VAR. the bare
+# `/` form is the least effective attack (rm and SIP refuse it) - the glob forms
+# are the live ones, so the terminator class accepts glob/brace/expansion
+# metacharacters, not just whitespace.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/+(?:\.{1,2})?(["\x27\s<>;|&]|$|[*?\[{$])'
+action = "block"
+reason = "recursive root deletion (covers /, //, /*, /?*, /[a-z]*, /{..}, /.*, /$VAR)"
+
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|boot|lib|lib64|usr|etc|root|run|srv|proc|sys|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)'
+action = "block"
+reason = "recursive deletion of a system tree"
+
+# Linux /tmp is commonly a real root directory; macOS resolves it through
+# /private/tmp. Protect only the root itself so per-job cleanup remains allowed.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/tmp/?(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "recursive deletion of the machine-wide temporary root"
+
+# whole home / whole volume / mount root / top-level tree, at depth 1-2 ONLY.
+# depth >=3 stays allowed - that is what keeps /Volumes/<disk>/<project>,
+# /mnt/<volume>/<project>, /private/tmp/.../scratchpad and
+# /var/folders/.../T/tmp.* cleanup working. do NOT widen this to any depth, a
+# catch-all absolute-path match is the defect this replaces.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|mnt|media|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "recursive deletion of an entire home directory, volume, mount root, or top-level tree"
+
+# credential dirs in BOTH forms. the absolute /Users/<name>/.ssh form was only
+# ever covered as a side effect of the catch-all, so narrowing without this
+# would have dropped it.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.(ssh|aws|gnupg|config|netrc)'
+action = "block"
+reason = "recursive deletion of credential directory (tilde or absolute home path)"
+
+# wildcard over home dot-entries: `rm -rf ~/.c*` sweeps ~/.claude, ~/.sentinel,
+# ~/.ssh and ~/.aws in one call, and the guard-disarm rules below cannot see it -
+# they need the literal `.claude`/`.sentinel` token and PreToolUse sees the
+# pre-expansion string. scoped to a glob metachar in the dot-entry NAME, so
+# literal deletes (`rm -rf ~/.cargo`) and subpath deletes (`rm -rf ~/.cache/*`)
+# stay allowed.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.[^\s;&|"\x27/]*[*?\[]'
+action = "block"
+reason = "wildcard recursive deletion across home dot-entries (sweeps .ssh/.aws/.claude/.sentinel - guard-disarm)"
+
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(~|\$HOME)/?(\s|$)'
+action = "block"
+reason = "recursive deletion of the entire home directory"
+
+# remote fetch piped into a shell. the shell must sit at a COMMAND position -
+# directly after a pipe, or after a known exec-wrapper (env / nice / sudo / xargs
+# / timeout / ...) that launches it - so `curl x | env sh`, `| /usr/bin/env bash`,
+# `| nice sh`, `| tee f | sh` all block, while a fetched payload piped into a
+# filter whose ARGUMENT merely names a shell (`curl x | grep ssh`, `| grep bash`)
+# does NOT. `[a-z/]*sh` keeps coverage of every `*sh` (sh/bash/zsh/dash/fish/...).
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b[^|]*\|(?:[^|]*\|)*\s*(?:(?:[\w./-]*/)?(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs)\b[^|]*\s)?[a-z/]*sh\b'
+action = "block"
+reason = "pipe to shell execution"
+
+[[deny.commands]]
+pattern = '<\(\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "process substitution of a remote fetch into a shell"
+
+[[deny.commands]]
+pattern = '\$\(\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "command substitution of a remote fetch"
+
+# staged fetch-then-run. the old single rule ended in `\b(ba|z|da)?sh\b`, which
+# matches a FILE EXTENSION (`install.sh`) as readily as a shell command - so
+# `curl -o install.sh URL && wc -l install.sh` blocked. between the separator and
+# the interpreter only enumerated shell constructs are consumable (env
+# assignments, redirections, group-opens, the same wrapper set the pipe-to-shell
+# rule uses), so a bare word like wc/grep/head can never be crossed and a `.sh`
+# extension is unreachable. command normalization consumes modeled wrapper
+# options and their operands before this rule is evaluated.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{1,2}&?[^\s;&|]*|[({!])\s*)*(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)'
+action = "block"
+reason = "staged fetch-then-run (download then execute) - shell interpreter at the next command position"
+
+# the dropper prelude the old rule only caught by accident, through the same
+# `.sh` extension match removed above: `curl -o x.sh URL && chmod +x x.sh && ./x.sh`.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[\w.-]*/)*(?:sudo|doas)\s+)?chmod\s+(?:-\S+\s+)*(?:[augo]*\+[rwXst]*x|[0-7]*[1357])'
+action = "block"
+reason = "staged fetch then chmod +x (dropper prelude to direct execution)"
+
+[[deny.commands]]
+pattern = 'base64\s+-{1,2}d\w*\b.*\|\s*[a-z/]*sh\b'
+action = "block"
+reason = "base64-decode piped to shell"
+
+# interpreter fetch-exec, split into three rules. the old single OR rule keyed on
+# bare words, so `\bexec\b` fired on the FILENAME `fetch-exec.json`, `subprocess`
+# fired on any list-argv call to a trusted CLI, and `requests` fired on the
+# English word. the two halves stay independent on purpose: A is the only rule in
+# the policy covering raw interpreter network egress (everything else keys on
+# curl/wget/nc/dig/scp), and B is what stops base64/string-split payload
+# laundering, which otherwise bypasses every other deny.commands regex at once.
+
+# (A) fetch side: raw network I/O from an inline script. `requests` must be
+# CALLED, `socket` must be socket.socket()/create_connection - not bare words.
+# Command normalization restores lexically correlated Python network aliases.
+[[deny.commands]]
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(urllib|httplib|http\.client|net/http|open-uri|requests\.[A-Za-z_]+\(|socket\.socket\(|socket\.create_connection|Net::HTTP|require\(\s*[\x27"](http|https|net|dgram|tls)[\x27"]\s*\)|import\(\s*[\x27"](http|https|net)[\x27"]|fetch\(\s*[\x27"`]https?://)'
+action = "block"
+reason = "inline interpreter script performing raw network I/O (fetch / exfil / reverse shell)"
+
+# (B) exec side, dangerous subset only: shell-string execution, fd hijack,
+# dynamic eval. list-argv subprocess.run([...]) to a fixed CLI is deliberately
+# absent, `.exec(` method calls are excluded via [^.\w] so sqlite db.exec() is
+# unaffected, and `exec(` rather than the bare word keeps `docker compose exec`
+# and `codex exec --help` out.
+[[deny.commands]]
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(os\.system\(|os\.popen\(|os\.dup2|pty\.spawn|shell\s*=\s*True|child_process|\bexecSync\(|\bexecFileSync\(|\bspawnSync\(|(^|[^.\w])exec\(|(^|[^.\w])eval\(|IO\.popen|(^|[^.\w])system\()'
+action = "block"
+reason = "inline interpreter script executing a shell string / hijacking fds / evaluating dynamic code (payload laundering)"
+
+# literal list/tuple argv subprocess calls stay allowed for fixed trusted CLIs,
+# but a shell as argv[0] is still shell-string execution and restores arbitrary
+# payload parsing. The optional `args=` spelling is equivalent.
+[[deny.commands]]
+pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*subprocess\.(run|Popen|call|check_call|check_output)\s*\(\s*(?:(?:args\s*=\s*)?(?:\[|\()\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"]|.*?\bexecutable\s*=\s*[\x27\"](?:/[^/\x27\"]+)*\/?(?:ba|z|da|k|c|tc|fi|a)?sh[\x27\"])'
+action = "block"
+reason = "inline interpreter subprocess argv launches a shell (payload laundering)"
+
+# (C) additive: fetch primitive and exec primitive co-occur, catching shapes that
+# slip past A and B individually (bare `requests` plus list-argv subprocess).
+[[deny.commands]]
+pattern = '(?s)\b(python3?|perl|ruby|node|php|osascript)\b\s+-\w*[ce]\b(?:.*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|\bhttps?\b).*(os\.system|\bexec\b|\beval\b|popen|subprocess|child_process)|.*(os\.system|\bexec\b|\beval\b|popen|subprocess|child_process).*(urllib|requests|socket|httplib|http\.client|net/http|open-uri|\bhttps?\b))'
+action = "block"
+reason = "interpreter fetch-exec / inline remote code execution - fetch primitive and exec primitive co-occur"
+
+# interpreter inline-code that READS a credential file via a RUNTIME-ASSEMBLED
+# path. A literal `~/.aws/credentials` in `-c`/`-e` is already mined into
+# deny.paths; the gap is the concatenated/expanded form
+# (`readFileSync(process.env.HOME+'/.ssh/id_rsa')`,
+# `open(os.path.expanduser('~/.aws/credentials'))`), where the token carries no
+# `~`/`$HOME` prefix so path-mining's anchored rule can't see it. Require BOTH a
+# file-read/expand primitive AND a credential path fragment, so a plain
+# `readFileSync('./pkg.json')` does not match (low FP).
+[[deny.commands]]
+pattern = '\b(node|deno|bun|python3?|ruby|perl|php)\b\s+(-\w*[ce]\b|--eval\b).*(readFileSync|readFile|read_text|File\.read|IO\.read|open\(|expanduser|fs\.read|Pathname).*(/\.ssh/|\.ssh/id_|/\.aws/|\.aws/cred|/\.gnupg/|/\.netrc|/\.config/gh|credentials|id_rsa|id_ed25519|id_ecdsa|keychain|/\.docker/|/\.npmrc|/\.kube/)'
+action = "block"
+reason = "interpreter inline-code reading a credential file via a runtime-assembled path (exfiltration)"
+
+[[deny.commands]]
+pattern = '`\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "backtick substitution of a remote fetch"
+
+[[deny.commands]]
+pattern = 'curl\s+.*@~?/?\.?(ssh|aws|gnupg|netrc|config)'
+action = "block"
+reason = "curl exfiltration of credential file"
+
+[[deny.commands]]
+pattern = 'curl\s+.*@/etc/(passwd|shadow|master\.passwd)'
+action = "block"
+reason = "curl exfiltration of system file"
+
+[[deny.commands]]
+pattern = '(?i)\b(env|printenv|set|export|declare)\b\s*\|\s*grep\b.*(key|secret|token|pass|auth|aws|gcp|azure|cred|api|access|private)'
+action = "block"
+reason = "environment variable exfiltration"
+
+[[deny.commands]]
+pattern = '\b(env|printenv|set|export|declare)\b\s*\|\s*(curl|wget|nc|ncat|telnet|fetch)\b'
+action = "block"
+reason = "environment piped straight to the network (exfiltration)"
+
+[[deny.commands]]
+pattern = '\bfind\b\s+(/|~|\$HOME|\.)\S*.*-i?name\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|\.key|\.gpg|\.kdbx)'
+action = "block"
+reason = "filesystem scan for credential files"
+
+[[deny.commands]]
+pattern = '\b(locate|mdfind)\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|secring|\.kdbx)'
+action = "block"
+reason = "credential filesystem scan via locate/mdfind"
+
+# --- secret exfil that carries NO network pipe (the env>file / key-export class) ---
+# The existing env rules require `env | grep secret` or `env | curl`. These cover
+# the dump-to-stdout / dump-to-file / key-export forms that match neither: the
+# agent stages the secret on one turn, exfiltrates on the next.
+
+# macOS Keychain bulk dump - never a legitimate agent action.
+[[deny.commands]]
+pattern = '\bsecurity\s+dump-keychain\b'
+action = "block"
+reason = "macOS Keychain bulk dump (every saved password/token)"
+
+# macOS Keychain single-secret extraction: the `-w` flag prints the password to
+# stdout. Without `-w` it only prints attributes, so require it (low FP).
+[[deny.commands]]
+pattern = '\bsecurity\s+find-(generic|internet)-password\b.*\s-w\b'
+action = "block"
+reason = "macOS Keychain password extraction (security find-*-password -w)"
+
+# exporting GPG PRIVATE key material (public-key --export does not match).
+[[deny.commands]]
+pattern = '\bgpg[0-9]?\b.*--export-secret-(keys|subkeys)\b'
+action = "block"
+reason = "GPG secret-key export (private key material exfil)"
+
+# full environment dumped to a FILE or `tee` (staging for next-turn exfil). The
+# flag group consumes only leading `-flags`, so `env FOO=bar cmd > out` (env used
+# to RUN a command) does NOT match - only a bare `env`/`printenv` dump does.
+[[deny.commands]]
+pattern = '(^|[;&|]\s*)(env|printenv)\s*(-\S+\s*)*(>>?|\|\s*tee\b)'
+action = "warn"
+reason = "full environment dumped to a file/tee - review for credential staging"
+
+# reading a single secret-looking env var by name (printenv AWS_SECRET_ACCESS_KEY).
+[[deny.commands]]
+pattern = '\bprintenv\b\s+\S*(?i:secret|token|api_?key|access_?key|password|passwd|auth)'
+action = "warn"
+reason = "printenv of a secret-looking variable - review for credential exfil"
+
+# git's stored-credential helpers print the saved username/password on stdout.
+[[deny.commands]]
+pattern = '\bgit\s+credential(-[a-z]+)?\s+(fill|get)\b'
+action = "warn"
+reason = "git credential helper invoked to print stored credentials - review"
+
+# macOS Directory Service password/hash extraction - no benign agent use.
+[[deny.commands]]
+pattern = '\bdscl\b.*-read.*(?i:password|shadowhash|authenticationauthority)'
+action = "block"
+reason = "dscl directory-service password/hash extraction"
+
+# reading a preferences plist that names a secret (defaults read ... apiToken).
+# WARN: devs read plists legitimately, so surface only the secret-named reads.
+[[deny.commands]]
+pattern = '\bdefaults\s+read\b.*(?i:keychain|credential|password|token|secret|api_?key|oauth)'
+action = "warn"
+reason = "defaults read of a secret-named preference - review for credential exfil"
+
+# --- FIX A2: tamper-by-name against the Sentinel binary (guard-disarm) ---
+# These catch the indirect form that carries no literal install path
+# (`rm "$(command -v sentinel)"`), which the deny.paths binary rules above cannot
+# see. Command patterns are EVADABLE (variable assembly, aliasing) - they raise
+# cost, they are not airtight; the literal-path rules above are the stronger half.
+# BLOCK rules; placed before the plain-curl WARN rules so first-match-wins keeps
+# them at block tier. Legit `which sentinel` / `command -v sentinel` /
+# `sentinel install` / `cargo install sentinel-guard` / `sentinel doctor` do NOT
+# match - each requires a destructive/disarming verb plus a sentinel target.
+# Verb set widened beyond rm/mv/ln/cp to chmod/chflags/strip/truncate/dd: making
+# the binary non-executable, immutable, or zero-length disarms the guard just as
+# deleting it does (doctor documents a missing/broken binary fails open).
+[[deny.commands]]
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b[^;&|\n]*\bsentinel-guard\b'
+action = "block"
+reason = "destructive/disarming operation against the Sentinel crate binary (sentinel-guard) - guard-disarm tamper"
+
+# the `/sentinel` must END the token (whitespace, quote, end-of-string, redirect,
+# or separator) so a dev checkout DIRECTORY named sentinel (`rm -rf
+# ~/projects/sentinel/target`) or a sentinel-prefixed file (`/tmp/sentinel-build`)
+# is NOT a false positive - only a path whose final component is the binary itself.
+[[deny.commands]]
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate)\b[^;&|\n]*/sentinel(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "destructive/disarming operation against a path ending in /sentinel - guard-disarm tamper"
+
+[[deny.commands]]
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b.*\$\((command -v|which)\s+sentinel\)'
+action = "block"
+reason = "destructive/disarming operation against $(command -v sentinel) / $(which sentinel) - guard-disarm tamper by indirect path"
+
+# overwrite/truncate the binary via a redirect or dd `of=` onto the resolved
+# path (`: > $(command -v sentinel)`, `dd of=$(which sentinel)`). No rm/mv/ln/cp
+# verb is present, so the rules above miss it.
+[[deny.commands]]
+pattern = '(>>?|\bof=)\s*"?\$\((command -v|which)\s+sentinel\)'
+action = "block"
+reason = "overwrite/truncate the Sentinel binary via $(command -v sentinel) redirect - guard-disarm tamper"
+
+# coreutils `install` over the binary. Anchored to a command boundary so
+# `cargo install sentinel-guard` (install preceded by `cargo`) does NOT match -
+# only a bare `install SRC <sentinel-path>` does.
+[[deny.commands]]
+pattern = '(^|[;&|]\s*)install\s+.*(/sentinel(["\x27\s<>;|&]|$)|\$\((command -v|which)\s+sentinel\))'
+action = "block"
+reason = "install(1) overwriting the Sentinel binary - guard-disarm tamper"
+
+# overwrite/truncate a binary at a NON-standard install path via a bare redirect
+# or `dd of=` - no rm/mv/ln/cp verb, and the literal path isn't one of the four
+# deny.paths locations, so both halves above miss. Final component must be exactly
+# `sentinel` (terminated), so a redirect to `sentinel.log` or a dir is not caught.
+[[deny.commands]]
+pattern = '(>>?\|?|\bof=)\s*"?\S*/sentinel(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwrite/truncate a path ending in /sentinel via redirect or dd - guard-disarm tamper"
+
+# the agent invoking `sentinel uninstall` removes the PreToolUse hook outright.
+# Reconfiguring/uninstalling is a human action to take OUTSIDE the guarded
+# session, not something an injected agent should be able to do mid-run.
+[[deny.commands]]
+pattern = '\bsentinel(-guard)?\b\s+(-\S+\s+)*uninstall\b'
+action = "block"
+reason = "agent invoked `sentinel uninstall` - removes the guard's hook (reconfigure outside the agent)"
+
+# deleting/moving the agent's config dir is a TOTAL disarm: the PreToolUse hook
+# registration lives in ~/.claude/settings.json, so `rm -rf ~/.claude` (or moving
+# the settings file) drops the guard for every future session. Anchored to the
+# user-home `.claude` and only the dir itself (with or without a trailing
+# slash) or its settings file - a subdir cleanup (`rm -rf
+# ~/.claude/projects/old`) does NOT match (it can't disarm).
+[[deny.commands]]
+pattern = '\b(rm|mv)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/settings(\.local)?\.json|/)?(["\x27\s;|&]|$)'
+action = "block"
+reason = "deleting/moving ~/.claude or its settings.json removes the PreToolUse hook (guard-disarm)"
+
+# deleting/moving ~/.sentinel removes the policy file the hook loads. A missing
+# policy currently fails closed (deny), but it pairs with a HOME-repoint/race into
+# a real disarm and erases the audit trail - block it. (READING ~/.sentinel/*,
+# e.g. the audit log, is untouched: this is a command rule on rm/mv only.)
+[[deny.commands]]
+pattern = '\b(rm|mv|truncate|chflags)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.sentinel(/|["\x27\s;|&]|$)'
+action = "block"
+reason = "deleting/moving ~/.sentinel removes the guard's policy + audit trail (guard-disarm)"
+
+# rewriting .claude/settings.json from a SHELL child process (sed -i / perl -i /
+# awk -i / a truncating redirect / tee / sponge) is the disarm that selfprotect
+# CANNOT see: its content-check only inspects Write/Edit/MultiEdit tool calls,
+# not a Bash subprocess. The settings.json path mines to a WARN; the engine now
+# lets these BLOCK rules override it. Precise: a mutating verb + the settings
+# target (a plain `cat`/`grep`/`sed -n` read is NOT matched). Edit it outside the
+# guarded session.
+# the settings(.local).json target must END at a path terminator (quote / space
+# / separator / redirect / end), so a benign backup like `> settings.json.bak`
+# (final component is NOT the live settings file) does not false-block.
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
+
+# line editors (ed/ex) rewrite in place with no -i flag, no redirect, no tee.
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor (ed/ex) rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
+
+# truncating/overwriting redirect (`>`, `>>`, `>|` clobber) onto the settings file.
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting .claude/settings.json via redirect - can strip the PreToolUse hook (guard-disarm)"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreToolUse hook (guard-disarm)"
+
+# replacing the settings file with attacker content via cp/install/ln/dd, or
+# zeroing it via truncate, all neutralize the hook just like mv does (which the
+# ~/.claude delete rule already blocks). End-anchored so settings.json must be
+# the DESTINATION (last path, modulo trailing flags) - `cp settings.json backup`
+# (reading it OUT) stays at the warn-tier path rule, not blocked.
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.claude/settings(\.local)?\.json(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing .claude/settings.json via cp/install/ln/dd/truncate - can strip the PreToolUse hook (guard-disarm)"
+
+# rewriting ~/.sentinel/policy.toml from a SHELL child process is the disarm the
+# selfprotect content-check CANNOT see (it inspects only Write/Edit/MultiEdit tool
+# calls, not a Bash subprocess). policy.toml's path rule mines to WARN so reads /
+# copies-OUT pass; these BLOCK rules override that WARN for a mutation. Mirrors the
+# .claude/settings.json cluster above, retargeted to policy.toml. `rm`/`mv`/
+# `truncate`/`chflags` of ~/.sentinel are already covered by the ~/.sentinel rule
+# above, so they are NOT repeated here. Reconfigure outside the guarded session.
+#
+# the sed/gsed/perl/awk `-i` member deliberately uses `.*` (NOT the [^;&|\n]*
+# separator-narrowing applied to the rest): a real in-place script legitimately
+# carries `;` `|` `&` as literals inside its program text (`sed -i 's/a/b/;s/c/d/'`),
+# so narrowing this one rule would let an in-place policy rewrite slip through. The
+# other members use [^;&|\n]* so an innocent verb in one command segment can't reach
+# the policy.toml target in another (the separator-scope fix already in this file).
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of ~/.sentinel/policy.toml - can flip enforce->audit or drop rules (guard-disarm)"
+
+# line editors (ed/ex) rewrite in place with no -i flag, no redirect, no tee.
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor (ed/ex) rewrite of ~/.sentinel/policy.toml - can flip enforce->audit or drop rules (guard-disarm)"
+
+# truncating/overwriting redirect (`>`, `>>`, `>|` clobber) onto the policy file.
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting ~/.sentinel/policy.toml via redirect - can flip enforce->audit or drop rules (guard-disarm)"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting ~/.sentinel/policy.toml via tee/sponge - can flip enforce->audit or drop rules (guard-disarm)"
+
+# replacing the policy file with attacker content via cp/install/ln/dd, or zeroing
+# it via truncate. End-anchored so policy.toml must be the DESTINATION (last path,
+# modulo trailing flags) - `cp ~/.sentinel/policy.toml backup` (reading it OUT)
+# stays at the warn-tier path rule, not blocked.
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.sentinel/policy\.toml(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing ~/.sentinel/policy.toml via cp/install/ln/dd/truncate - can flip enforce->audit or drop rules (guard-disarm)"
+
+# The MCP baseline is an accepted trust set, so an agent must not rewrite it or
+# invoke the explicit acceptance operation. These rules affect only commands
+# evaluated through the hook; a human invoking the CLI directly remains free to
+# review and update the baseline.
+[[deny.commands]]
+pattern = '(?:^|[;&|]\s*)(?:(?:sudo|doas|env|command|exec|nohup)\s+)*["\x27]?(?:\S*/)?sentinel["\x27]?\s+audit-mcp\b[^;&|\n]*--update(["\x27\s;|&]|$)'
+action = "block"
+reason = "agent-triggered audit-mcp --update would let an injected agent accept its own MCP configuration"
+
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of the trusted MCP baseline"
+
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor rewrite of the trusted MCP baseline"
+
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting the trusted MCP baseline via redirect"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting the trusted MCP baseline via tee/sponge"
+
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.sentinel/mcp-baseline\.json(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing the trusted MCP baseline"
+
+# --- FIX C: data-exfil via curl/wget/fetch carrying DATA/UPLOAD flags ---
+# Existing curl rules only catch pipe-to-shell, $(curl, backtick-curl, staged
+# -o+run, and @credfile. A bare data POST/upload (`curl --data "$(env)"`,
+# `curl -d @<dotenv>`, `wget --post-file=<secrets>`, `curl -T <keyfile>`) matched
+# NOTHING. Plain `curl -d 'k=v'` is common in API testing → default WARN; ESCALATE
+# to BLOCK only when the payload references a command substitution, an @file, or a
+# secret-looking env var. BLOCK rules MUST precede the WARN rule (first match wins).
+# Residual: DNS/ICMP tunneling, `git push` to an attacker remote, and MCP-tool
+# egress are NOT covered; a PreToolUse hook sees only the agent's own curl/wget,
+# not a child process's network calls.
+
+# data/upload flag whose argument is a command substitution $( or backtick
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--data(-binary|-raw|-urlencode)?|--form|--upload-file|--post-file|--post-data|\s-d\b|\s-F\b|\s-T\b)[= ].*(\$\(|`)'
+action = "block"
+reason = "curl/wget data upload sourced from a command substitution (exfiltration)"
+
+# data/upload flag whose argument is an @file
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--data(-binary|-raw|-urlencode)?|--form|--upload-file|--post-file|--post-data|\s-d\b|\s-F\b|\s-T\b)[= ]@?\S*@'
+action = "block"
+reason = "curl/wget data upload sourced from an @file (exfiltration)"
+
+# upload flags that take a file directly (-T / --upload-file / --post-file=)
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--upload-file|--post-file|\s-T\b)[= ]'
+action = "block"
+reason = "curl/wget file upload (-T/--upload-file/--post-file - exfiltration)"
+
+# GLUED short-flag forms with NO space/= separator: `curl -d@FILE`, `-T/path`,
+# `-d$(cmd)`. The spaced/`=` forms above are caught; the glued form carried no
+# separator and slipped the ENTIRE data-exfil family with a one-character change.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[dFT]@'
+action = "block"
+reason = "curl/wget @file upload glued to a short flag (-d@/-T@ - exfiltration)"
+
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-T[/~.]'
+action = "block"
+reason = "curl/wget file upload glued to -T (-T/path - exfiltration)"
+
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[dFT]\$\('
+action = "block"
+reason = "curl/wget data/upload sourced from a command substitution glued to a short flag (exfiltration)"
+
+# data/upload flag whose argument references a secret-looking env var.
+# curl flags are case-sensitive (-d=data vs -D=dump-header, -F=form vs -f=fail),
+# so the flag alternation is case-SENSITIVE like its sibling rules; only the
+# command name and env-var NAME matches are case-insensitive, via inline (?i:...) groups.
+[[deny.commands]]
+pattern = '(?i:\b(curl|wget|fetch)\b).*(--data(-binary|-raw|-urlencode)?|--form|--post-data|\s-d\b|\s-F\b)[= ]\S*\$\{?(?i:[a-z_]*(secret|token|key|password|aws_))'
+action = "block"
+reason = "curl/wget data upload referencing a secret-looking env var (exfiltration)"
+
+# secret-looking env var carried in the URL or an -H/--header (NO data flag) -
+# the most direct GET-based exfil, which every data-flag rule above misses. WARN
+# (not block): a legit `Authorization: Bearer $TOKEN` is everyday, so surface for
+# review rather than break it - the same posture as the plain-data WARN below.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*https?://\S*\$\{?(?i:[a-z_]*(secret|token|key|password|aws_|auth))'
+action = "warn"
+reason = "curl/wget URL carries a secret-looking env var - review for credential exfil"
+
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(-H|--header)\b.*\$\{?(?i:[a-z_]*(secret|token|key|password|aws_|auth))'
+action = "warn"
+reason = "curl/wget request header carries a secret-looking env var - review for credential exfil"
+
+# any OTHER short data/upload flag glued to a literal value (`-dvalue`, `-Fk=v`).
+# The BLOCK rules above already took the @file / command-sub / -T-path forms.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[dFT]\S'
+action = "warn"
+reason = "curl/wget short data/upload flag with a glued value - review for exfil (common in API testing, so warn)"
+
+# /dev/tcp redirection exfil (bash network redirect)
+[[deny.commands]]
+pattern = '>\s*/dev/tcp/'
+action = "block"
+reason = "redirect to /dev/tcp (raw socket exfiltration)"
+
+# nc / ncat fed from a file via input redirection. the redirect must belong to
+# the nc invocation itself: no unquoted/unescaped command separator (&, ;, |) may
+# sit between the nc token and the `<`, so `nc -z host 80 && cat x < /dev/null`
+# is not a match, but quoted/escaped separators inside nc args still block.
+[[deny.commands]]
+pattern = '\b(nc|ncat)\b(?:\\.|"(?:\\.|[^"\\])*"|\x27[^\x27]*\x27|[^&;|"\x27\\])*<\s*\S'
+action = "block"
+reason = "nc/ncat reading a file from stdin (raw socket exfiltration)"
+
+# DEFAULT WARN: any curl/wget carrying a data/upload flag that wasn't caught by a
+# BLOCK rule above (plain `curl -d 'k=v'` is common in API testing). Plain GETs and
+# pure downloads (-o/-O) are NOT data/upload flags, so they stay allowed.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--data(-binary|-raw|-urlencode)?|--form|--upload-file|--post-file|--post-data|\s-d\b|\s-F\b|\s-T\b)[= ]'
+action = "warn"
+reason = "curl/wget carrying a data/upload flag - review for credential exfiltration (common in legit API testing, so warn not block)"
+
+# --- egress channels the curl/wget rules don't cover ---
+# DNS tunnelling: a resolver query whose NAME is fed by a command substitution
+# is data exfil (block); a TXT/ANY lookup is the high-bandwidth response channel
+# (warn). A plain A-record lookup is too common to flag (documented residual).
+[[deny.commands]]
+pattern = '\b(dig|nslookup|host|drill|kdig)\b.*\$\('
+action = "block"
+reason = "DNS query name fed by a command substitution (DNS exfiltration)"
+
+[[deny.commands]]
+pattern = '\b(dig|nslookup|host|drill|kdig)\b.*\b(TXT|ANY|NULL|CNAME)\b'
+action = "warn"
+reason = "DNS TXT/ANY lookup - possible DNS exfiltration channel, review"
+
+# git as an exfil transport: a remote URL that embeds a credential is block; a
+# push / remote-add to a literal https URL (rather than a named remote) is warn.
+# `git push origin main` (named remote) carries no URL and stays allowed.
+[[deny.commands]]
+pattern = '\bgit\s+(push|remote\s+add|clone|fetch)\b.*https?://[^/\s]*:[^/\s@]*@'
+action = "block"
+reason = "git transport to a URL with an embedded credential (exfiltration)"
+
+[[deny.commands]]
+pattern = '\bgit\s+(push|remote\s+add)\b.*https?://'
+action = "warn"
+reason = "git push / remote-add to a literal https URL (not a named remote) - review for exfil"
+
+# file-transfer / cloud-upload binaries. A cred-named source already blocks via
+# path-mining; these warn on the egress itself so a secret in an un-modeled path
+# is surfaced. WARN (these are common in legit deploy/backup scripts).
+[[deny.commands]]
+pattern = '\b(scp|rsync)\b.*(\s[\w.-]+@[\w.-]+:|[\w.-]+::|rsync://)'
+action = "warn"
+reason = "scp/rsync to a remote host (ssh, daemon ::, or rsync:// URL) - review for data exfiltration"
+
+# alternative HTTP clients carry the same @file upload / data-post syntax as
+# curl, so naming only curl/wget/fetch leaves a one-binary substitution open.
+# httpie's binary is `http`/`https` with a leading METHOD; `xh`/`curlie` by name.
+[[deny.commands]]
+pattern = '\b(xh|httpie|curlie)\b\s+\S'
+action = "warn"
+reason = "alternative HTTP client (xh/httpie/curlie) - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '(^|[;&|]\s*)https?\s+(GET|POST|PUT|PATCH|DELETE|HEAD)\b'
+action = "warn"
+reason = "httpie request (http METHOD url) - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '\brclone\s+(copy|sync|move|copyto)\b'
+action = "warn"
+reason = "rclone transfer to a remote - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '\b(croc|magic-wormhole|portal)\b\s+\S'
+action = "warn"
+reason = "croc/magic-wormhole peer transfer - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '\b(aws\s+s3|gsutil|gcloud\s+storage|az\s+storage)\b.*\b(cp|sync|mv|copy|upload)\b'
+action = "warn"
+reason = "cloud object-store upload - review for data exfiltration"
+
+[[deny.commands]]
+pattern = 'chmod\s+777\s+.*'
+action = "warn"
+reason = "world-writable permissions"
+
+# agent-driven self-propagation tripwires - warn: these also fire on every
+# legitimate release / repo creation, so they surface for review rather than block.
+[[deny.commands]]
+pattern = '\b(npm|pnpm|yarn|bun)\s+(-\S+\s+)*publish\b'
+action = "warn"
+reason = "agent invoked a package `publish` - could be a propagation/dead-drop step; also fires on every legitimate release"
+
+[[deny.commands]]
+pattern = '\bnpm\s+token\s+(create|revoke)\b'
+action = "warn"
+reason = "agent created/revoked an npm token - could be propagation credential setup; also fires on legit token management"
+
+[[deny.commands]]
+pattern = '\bgh\s+repo\s+create\b.*(--public(?:\s|$)|--visibility[= ]public\b)'
+action = "warn"
+reason = "agent invoked `gh repo create --public` - could host a payload / dead-drop; also fires on legit public-repo creation"
+
+[[deny.secrets]]
+pattern = '\b(AKIA|ASIA)[0-9A-Z]{16}\b'
+action = "block"
+reason = "AWS access key ID (long-term AKIA + temporary ASIA)"
+
+[[deny.secrets]]
+pattern = '(gh[posru]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})'
+action = "block"
+reason = "GitHub token (classic or fine-grained PAT)"
+
+[[deny.secrets]]
+pattern = '\bsk-(ant-)?[A-Za-z0-9_-]{20,}'
+action = "block"
+reason = "OpenAI / Anthropic API key"
+
+[[deny.secrets]]
+pattern = 'npm_[A-Za-z0-9]{36}'
+action = "block"
+reason = "npm access token"
+
+[[deny.secrets]]
+pattern = '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'
+action = "block"
+reason = "private key material"
+
+# credential-content coverage expansion - high-confidence secret formats (block).
+# MUST stay AFTER the private-key rule above: a GCP service-account file matches
+# both the private-key rule (block) and the gcp_sa rule below (warn); first match
+# wins, so the private key has to be reached first or it silently downgrades.
+# Also note deny.paths warn matches are held while deny.secrets is evaluated:
+# a block-tier secret written INTO a warn-tier path still blocks, so agent
+# config/MCP warning surfaces cannot downgrade credential leaks to allow.
+[[deny.secrets]]
+pattern = 'AccountKey=[A-Za-z0-9+/]{86}=='
+action = "block"
+reason = "Azure Storage account key in a connection string"
+
+[[deny.secrets]]
+pattern = 'SharedAccessKey=[A-Za-z0-9+/]{40,}='
+action = "block"
+reason = "Azure Service Bus / Event Hubs SAS key in a connection string"
+
+[[deny.secrets]]
+pattern = 'client-key-data:\s*[A-Za-z0-9+/]{200,}={0,2}'
+action = "block"
+reason = "kubeconfig client private key (base64 client-key-data)"
+
+# lower-confidence credential signatures - warn, not block, so they don't
+# false-block ordinary code (e.g. a public referer-restricted API key, or an
+# `hvs.<ident>` member access in Vault-integration code).
+[[deny.secrets]]
+pattern = '(?i)private_key_id.*@[a-z0-9.-]+\.gserviceaccount\.com'
+action = "warn"
+reason = "content resembles a GCP service-account key file (private_key_id + gserviceaccount.com)"
+
+[[deny.secrets]]
+pattern = '\bAIza[0-9A-Za-z_-]{35}\b'
+action = "warn"
+reason = "Google API key in written content (may be a referer-restricted public client key)"
+
+[[deny.secrets]]
+pattern = '\bhvs\.[A-Za-z0-9_-]{24,}'
+action = "warn"
+reason = "possible HashiCorp Vault service token (hvs.) - also appears as member access in Vault-integration code"
+
+# allow rules - if present, paths not matching any allow rule get the default action.
+# uncomment and customize for your project:
+
+# [[allow.paths]]
+# pattern = "./src/**"
+# note = "project source"
+
+# [[allow.paths]]
+# pattern = "./tests/**"
+# note = "test files"

@@ -1,0 +1,17 @@
+# agent-driven self-propagation tripwires - warn: these also fire on every
+# legitimate release / repo creation, so they surface for review rather than block.
+[[deny.commands]]
+pattern = '\b(npm|pnpm|yarn|bun)\s+(-\S+\s+)*publish\b'
+action = "warn"
+reason = "agent invoked a package `publish` - could be a propagation/dead-drop step; also fires on every legitimate release"
+
+[[deny.commands]]
+pattern = '\bnpm\s+token\s+(create|revoke)\b'
+action = "warn"
+reason = "agent created/revoked an npm token - could be propagation credential setup; also fires on legit token management"
+
+[[deny.commands]]
+pattern = '\bgh\s+repo\s+create\b.*(--public(?:\s|$)|--visibility[= ]public\b)'
+action = "warn"
+reason = "agent invoked `gh repo create --public` - could host a payload / dead-drop; also fires on legit public-repo creation"
+

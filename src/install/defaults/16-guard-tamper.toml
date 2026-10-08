@@ -1,0 +1,205 @@
+# --- FIX A2: tamper-by-name against the Sentinel binary (guard-disarm) ---
+# These catch the indirect form that carries no literal install path
+# (`rm "$(command -v sentinel)"`), which the deny.paths binary rules above cannot
+# see. Command patterns are EVADABLE (variable assembly, aliasing) - they raise
+# cost, they are not airtight; the literal-path rules above are the stronger half.
+# BLOCK rules; placed before the plain-curl WARN rules so first-match-wins keeps
+# them at block tier. Legit `which sentinel` / `command -v sentinel` /
+# `sentinel install` / `cargo install sentinel-guard` / `sentinel doctor` do NOT
+# match - each requires a destructive/disarming verb plus a sentinel target.
+# Verb set widened beyond rm/mv/ln/cp to chmod/chflags/strip/truncate/dd: making
+# the binary non-executable, immutable, or zero-length disarms the guard just as
+# deleting it does (doctor documents a missing/broken binary fails open).
+[[deny.commands]]
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b[^;&|\n]*\bsentinel-guard\b'
+action = "block"
+reason = "destructive/disarming operation against the Sentinel crate binary (sentinel-guard) - guard-disarm tamper"
+
+# the `/sentinel` must END the token (whitespace, quote, end-of-string, redirect,
+# or separator) so a dev checkout DIRECTORY named sentinel (`rm -rf
+# ~/projects/sentinel/target`) or a sentinel-prefixed file (`/tmp/sentinel-build`)
+# is NOT a false positive - only a path whose final component is the binary itself.
+[[deny.commands]]
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate)\b[^;&|\n]*/sentinel(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "destructive/disarming operation against a path ending in /sentinel - guard-disarm tamper"
+
+[[deny.commands]]
+pattern = '\b(rm|mv|ln|cp|chmod|chflags|strip|truncate|dd)\b.*\$\((command -v|which)\s+sentinel\)'
+action = "block"
+reason = "destructive/disarming operation against $(command -v sentinel) / $(which sentinel) - guard-disarm tamper by indirect path"
+
+# overwrite/truncate the binary via a redirect or dd `of=` onto the resolved
+# path (`: > $(command -v sentinel)`, `dd of=$(which sentinel)`). No rm/mv/ln/cp
+# verb is present, so the rules above miss it.
+[[deny.commands]]
+pattern = '(>>?|\bof=)\s*"?\$\((command -v|which)\s+sentinel\)'
+action = "block"
+reason = "overwrite/truncate the Sentinel binary via $(command -v sentinel) redirect - guard-disarm tamper"
+
+# coreutils `install` over the binary. Anchored to a command boundary so
+# `cargo install sentinel-guard` (install preceded by `cargo`) does NOT match -
+# only a bare `install SRC <sentinel-path>` does.
+[[deny.commands]]
+pattern = '(^|[;&|]\s*)install\s+.*(/sentinel(["\x27\s<>;|&]|$)|\$\((command -v|which)\s+sentinel\))'
+action = "block"
+reason = "install(1) overwriting the Sentinel binary - guard-disarm tamper"
+
+# overwrite/truncate a binary at a NON-standard install path via a bare redirect
+# or `dd of=` - no rm/mv/ln/cp verb, and the literal path isn't one of the four
+# deny.paths locations, so both halves above miss. Final component must be exactly
+# `sentinel` (terminated), so a redirect to `sentinel.log` or a dir is not caught.
+[[deny.commands]]
+pattern = '(>>?\|?|\bof=)\s*"?\S*/sentinel(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwrite/truncate a path ending in /sentinel via redirect or dd - guard-disarm tamper"
+
+# the agent invoking `sentinel uninstall` removes the PreToolUse hook outright.
+# Reconfiguring/uninstalling is a human action to take OUTSIDE the guarded
+# session, not something an injected agent should be able to do mid-run.
+[[deny.commands]]
+pattern = '\bsentinel(-guard)?\b\s+(-\S+\s+)*uninstall\b'
+action = "block"
+reason = "agent invoked `sentinel uninstall` - removes the guard's hook (reconfigure outside the agent)"
+
+# deleting/moving the agent's config dir is a TOTAL disarm: the PreToolUse hook
+# registration lives in ~/.claude/settings.json, so `rm -rf ~/.claude` (or moving
+# the settings file) drops the guard for every future session. Anchored to the
+# user-home `.claude` and only the dir itself (with or without a trailing
+# slash) or its settings file - a subdir cleanup (`rm -rf
+# ~/.claude/projects/old`) does NOT match (it can't disarm).
+[[deny.commands]]
+pattern = '\b(rm|mv)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.claude(/settings(\.local)?\.json|/)?(["\x27\s;|&]|$)'
+action = "block"
+reason = "deleting/moving ~/.claude or its settings.json removes the PreToolUse hook (guard-disarm)"
+
+# deleting/moving ~/.sentinel removes the policy file the hook loads. A missing
+# policy currently fails closed (deny), but it pairs with a HOME-repoint/race into
+# a real disarm and erases the audit trail - block it. (READING ~/.sentinel/*,
+# e.g. the audit log, is untouched: this is a command rule on rm/mv only.)
+[[deny.commands]]
+pattern = '\b(rm|mv|truncate|chflags)\b[^;&|\n]*(~|\$HOME|/Users/[^/ ]+|/home/[^/ ]+)/\.sentinel(/|["\x27\s;|&]|$)'
+action = "block"
+reason = "deleting/moving ~/.sentinel removes the guard's policy + audit trail (guard-disarm)"
+
+# rewriting .claude/settings.json from a SHELL child process (sed -i / perl -i /
+# awk -i / a truncating redirect / tee / sponge) is the disarm that selfprotect
+# CANNOT see: its content-check only inspects Write/Edit/MultiEdit tool calls,
+# not a Bash subprocess. The settings.json path mines to a WARN; the engine now
+# lets these BLOCK rules override it. Precise: a mutating verb + the settings
+# target (a plain `cat`/`grep`/`sed -n` read is NOT matched). Edit it outside the
+# guarded session.
+# the settings(.local).json target must END at a path terminator (quote / space
+# / separator / redirect / end), so a benign backup like `> settings.json.bak`
+# (final component is NOT the live settings file) does not false-block.
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
+
+# line editors (ed/ex) rewrite in place with no -i flag, no redirect, no tee.
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor (ed/ex) rewrite of .claude/settings.json - can strip the PreToolUse hook (guard-disarm)"
+
+# truncating/overwriting redirect (`>`, `>>`, `>|` clobber) onto the settings file.
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting .claude/settings.json via redirect - can strip the PreToolUse hook (guard-disarm)"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.claude/settings(\.local)?\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting .claude/settings.json via tee/sponge - can strip the PreToolUse hook (guard-disarm)"
+
+# replacing the settings file with attacker content via cp/install/ln/dd, or
+# zeroing it via truncate, all neutralize the hook just like mv does (which the
+# ~/.claude delete rule already blocks). End-anchored so settings.json must be
+# the DESTINATION (last path, modulo trailing flags) - `cp settings.json backup`
+# (reading it OUT) stays at the warn-tier path rule, not blocked.
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.claude/settings(\.local)?\.json(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing .claude/settings.json via cp/install/ln/dd/truncate - can strip the PreToolUse hook (guard-disarm)"
+
+# rewriting ~/.sentinel/policy.toml from a SHELL child process is the disarm the
+# selfprotect content-check CANNOT see (it inspects only Write/Edit/MultiEdit tool
+# calls, not a Bash subprocess). policy.toml's path rule mines to WARN so reads /
+# copies-OUT pass; these BLOCK rules override that WARN for a mutation. Mirrors the
+# .claude/settings.json cluster above, retargeted to policy.toml. `rm`/`mv`/
+# `truncate`/`chflags` of ~/.sentinel are already covered by the ~/.sentinel rule
+# above, so they are NOT repeated here. Reconfigure outside the guarded session.
+#
+# the sed/gsed/perl/awk `-i` member deliberately uses `.*` (NOT the [^;&|\n]*
+# separator-narrowing applied to the rest): a real in-place script legitimately
+# carries `;` `|` `&` as literals inside its program text (`sed -i 's/a/b/;s/c/d/'`),
+# so narrowing this one rule would let an in-place policy rewrite slip through. The
+# other members use [^;&|\n]* so an innocent verb in one command segment can't reach
+# the policy.toml target in another (the separator-scope fix already in this file).
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of ~/.sentinel/policy.toml - can flip enforce->audit or drop rules (guard-disarm)"
+
+# line editors (ed/ex) rewrite in place with no -i flag, no redirect, no tee.
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor (ed/ex) rewrite of ~/.sentinel/policy.toml - can flip enforce->audit or drop rules (guard-disarm)"
+
+# truncating/overwriting redirect (`>`, `>>`, `>|` clobber) onto the policy file.
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting ~/.sentinel/policy.toml via redirect - can flip enforce->audit or drop rules (guard-disarm)"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.sentinel/policy\.toml(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting ~/.sentinel/policy.toml via tee/sponge - can flip enforce->audit or drop rules (guard-disarm)"
+
+# replacing the policy file with attacker content via cp/install/ln/dd, or zeroing
+# it via truncate. End-anchored so policy.toml must be the DESTINATION (last path,
+# modulo trailing flags) - `cp ~/.sentinel/policy.toml backup` (reading it OUT)
+# stays at the warn-tier path rule, not blocked.
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.sentinel/policy\.toml(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing ~/.sentinel/policy.toml via cp/install/ln/dd/truncate - can flip enforce->audit or drop rules (guard-disarm)"
+
+# The MCP baseline is an accepted trust set, so an agent must not rewrite it or
+# invoke the explicit acceptance operation. These rules affect only commands
+# evaluated through the hook; a human invoking the CLI directly remains free to
+# review and update the baseline.
+[[deny.commands]]
+pattern = '(?:^|[;&|]\s*)(?:(?:sudo|doas|env|command|exec|nohup)\s+)*["\x27]?(?:\S*/)?sentinel["\x27]?\s+audit-mcp\b[^;&|\n]*--update(["\x27\s;|&]|$)'
+action = "block"
+reason = "agent-triggered audit-mcp --update would let an injected agent accept its own MCP configuration"
+
+[[deny.commands]]
+pattern = '\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "in-place shell rewrite of the trusted MCP baseline"
+
+[[deny.commands]]
+pattern = '\b(ed|ex)\b\s+\S*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "line-editor rewrite of the trusted MCP baseline"
+
+[[deny.commands]]
+pattern = '>>?\|?\s*"?\S*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "truncating/overwriting the trusted MCP baseline via redirect"
+
+[[deny.commands]]
+pattern = '\b(tee|sponge)\b[^;&|\n]*\.sentinel/mcp-baseline\.json(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "overwriting the trusted MCP baseline via tee/sponge"
+
+[[deny.commands]]
+pattern = '\b(cp|install|ln|dd|truncate)\b[^;&|\n]*\.sentinel/mcp-baseline\.json(\s+-\S+)*\s*$'
+action = "block"
+reason = "replacing/zeroing the trusted MCP baseline"
+
