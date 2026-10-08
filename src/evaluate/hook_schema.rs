@@ -24,7 +24,9 @@ pub struct HookInput {
 
     /// Claude Code's per-call tool use id. The SAME value arrives in the
     /// PreToolUse and PostToolUse payloads for one tool call (verified against
-    /// Claude Code 2.1.207), which makes it the pre↔post join key in the audit
+    /// Claude Code 2.1.207 and 2.1.295; the 2.1.295 payload also carries
+    /// `scratchpad_dir`, `prompt_id`, `permission_mode` and `effort`, which
+    /// land in `_extra`), which makes it the pre↔post join key in the audit
     /// trail. Lenient on purpose: absent, empty, or non-string values become
     /// `None` — a malformed id must never make the whole payload unparseable,
     /// because an unparseable payload is a *degraded input* and can change the

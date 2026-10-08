@@ -1,0 +1,80 @@
+name: nightly
+
+# Longer-running parser checks that do not belong on every pull request: ten
+# minutes of libFuzzer per target and the Bash differential harness.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - shell_tokens
+          - decode_obfuscation
+          - brace_expand_checked
+          - parse_apply_patch
+          - evaluate_raw
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> fuzz/target
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz for ten minutes
+        env:
+          TARGET: ${{ matrix.target }}
+        # No sanitizer: the targets exercise safe Rust and hunt panics and
+        # property violations; AddressSanitizer made evaluate_raw run at well
+        # under one execution per second, which wasted the budget.
+        run: |
+          cargo fuzz run --sanitizer none "$TARGET" -- \
+            -max_total_time=600 \
+            -timeout=30 \
+            -rss_limit_mb=2048 \
+            -print_final_stats=1
+      - name: show crash artifacts
+        if: failure()
+        run: |
+          if [ -d fuzz/artifacts ]; then
+            find fuzz/artifacts -type f | while read -r file; do
+              echo "== $file"
+              base64 "$file"
+            done
+          fi
+
+  differential:
+    name: differential (bash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: bash word resolution against sentinel
+        env:
+          SENTINEL_DIFF_FRAGMENTS: "20000"
+        run: cargo test --locked --test differential_shell -- --ignored --nocapture
