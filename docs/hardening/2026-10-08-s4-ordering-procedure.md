@@ -74,3 +74,20 @@ Nothing about the ordering can be observed without a sandbox that starts.
 | hook sees the original command | | |
 | `updatedInput` rewrites Bash `command` | | |
 | rewritten command runs sandboxed | | |
+
+## live observations from the cloud session (2026-10-08, Claude Code 2.1.295)
+
+The sandbox part could not run, but the hook contract was exercised live by
+installing the M1 build of sentinel into the session's own
+`~/.claude/settings.json` while the session was running.
+
+| observation | result | tag |
+|---|---|---|
+| a PreToolUse hook added to `~/.claude/settings.json` mid-session takes effect without a restart | yes, the next Bash tool call was evaluated | Solid for this harness (cloud session, no `/hooks` review step); not checked for the interactive CLI |
+| exit 2 plus the nested deny JSON blocks the call | yes; the model saw `PreToolUse:Bash hook error: SSH key access` | Solid |
+| the PreToolUse payload carries `tool_use_id` | yes; the audit line recorded it and `sentinel why <id>` resolved it | Solid |
+| `sentinel install`, `status`, `doctor --strict` against the live config | all green, activation reported active | Solid |
+| adding a second hook (the `updatedInput` rewrite probe) through the Edit tool | denied by the harness's self-modification classifier, so S2 stays open | n/a |
+
+The S2 `updatedInput` check therefore still needs the local run above, or a
+session where editing the hook table is permitted.
