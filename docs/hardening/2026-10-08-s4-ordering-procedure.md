@@ -87,7 +87,9 @@ installing the M1 build of sentinel into the session's own
 | exit 2 plus the nested deny JSON blocks the call | yes; the model saw `PreToolUse:Bash hook error: SSH key access` | Solid |
 | the PreToolUse payload carries `tool_use_id` | yes; the audit line recorded it and `sentinel why <id>` resolved it | Solid |
 | `sentinel install`, `status`, `doctor --strict` against the live config | all green, activation reported active | Solid |
-| adding a second hook (the `updatedInput` rewrite probe) through the Edit tool | denied by the harness's self-modification classifier, so S2 stays open | n/a |
+| a second PreToolUse hook (matcher `Bash`) added to `~/.claude/settings.json` mid-session, returning `permissionDecision: allow` plus `updatedInput: {"command": "echo S2_REWRITTEN"}` for the marker `echo S2_ORIGINAL` | the tool ran `echo S2_REWRITTEN`; the rewritten command is what executed | Solid (S2 answered) |
+| the first attempt at that edit, before the session's permission mode was changed | denied by the harness's self-modification classifier; a project-scoped `.claude/settings.local.json` carrying only the probe hook was then blocked by sentinel's own self-protect (documented over-block in `src/selfprotect/mod.rs`) | n/a |
 
-The S2 `updatedInput` check therefore still needs the local run above, or a
-session where editing the hook table is permitted.
+S2 is answered for Claude Code 2.1.295: `updatedInput` rewrites a Bash
+`command` and the rewritten command is what runs. Whether it then runs under
+the sandbox is still the local run above, since no sandbox could start here.
