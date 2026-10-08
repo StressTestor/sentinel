@@ -90,6 +90,8 @@ fn escalate_autorun_injection(
                 action: Action::Block,
                 reason: Some(reason),
                 matched_rule: Some("selfprotect: autorun inspection failed".into()),
+                rule_id: Some("selfprotect:autorun-inspection-failed".into()),
+                witness: None,
             };
         }
     };
@@ -112,6 +114,8 @@ fn escalate_autorun_injection(
                         .into(),
                 ),
                 matched_rule: Some("selfprotect: autorun-injection".into()),
+                rule_id: Some("selfprotect:autorun-injection".into()),
+                witness: None,
             };
         }
     }
@@ -125,12 +129,16 @@ pub(crate) fn degraded(engine: &PolicyEngine, reason: impl Into<String>) -> Pipe
             action: Action::Allow,
             reason: Some(format!("{reason} — allowing (audit/fail-open)")),
             matched_rule: Some("on_failure: open".into()),
+            rule_id: Some("on_failure:open".into()),
+            witness: None,
         }
     } else {
         PolicyDecision {
             action: Action::Block,
             reason: Some(format!("{reason} — failing closed")),
             matched_rule: Some("on_failure: closed".into()),
+            rule_id: Some("on_failure:closed".into()),
+            witness: None,
         }
     };
     PipelineResult::Degraded { reason, decision }
