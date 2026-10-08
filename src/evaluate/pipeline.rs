@@ -157,6 +157,35 @@ mod tests {
     }
 
     #[test]
+    fn ansi_c_obfuscation_of_spaced_and_braced_credential_paths_is_blocked() {
+        // Found by the bash differential harness: the decoded view used to be
+        // re-tokenized at the decoded space (two harmless candidates) and lost
+        // brace provenance, so both reads passed although bash performs them.
+        for command in [
+            "cat ~/Library/$'Application\\x20Support'/Google/Chrome/Default/Cookies",
+            "cat ~/.ss$'h'/{id_rsa,known_hosts}",
+        ] {
+            let raw = serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": command}
+            })
+            .to_string();
+            let result = evaluate_raw(&engine(), &raw);
+            assert_eq!(result.decision().action, Action::Block, "{command}");
+        }
+        // the quoted form of the same literal text is still not a brace list
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat /tmp/$'\\x7b'a,b}"}
+        })
+        .to_string();
+        assert_eq!(
+            evaluate_raw(&engine(), &raw).decision().action,
+            Action::Allow
+        );
+    }
+
+    #[test]
     fn autorun_is_part_of_the_shared_pipeline() {
         let content = serde_json::json!({
             "hooks": {

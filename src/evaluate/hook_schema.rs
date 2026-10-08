@@ -134,14 +134,19 @@ impl HookInput {
             // ANSI-C `$'\x2f...'` quote or `${IFS}` word-split is still seen.
             // Additive: the original tokens are kept; this only adds candidates.
             if let Some(decoded) = crate::common::shell::decode_obfuscation(cmd) {
-                // Brace expansion runs before ANSI-C/parameter expansion. The
-                // decoded view is additive path evidence only; it cannot confer
-                // shell-brace provenance that was absent in the original word.
-                paths.extend(
-                    extract_paths_from_command(&decoded)
-                        .into_iter()
-                        .map(|candidate| candidate.path),
-                );
+                // Brace expansion runs before ANSI-C/parameter expansion, so a
+                // brace that only appears after decoding must not expand; the
+                // decoder re-quotes such bodies, so the decoded view carries
+                // provenance exactly for braces that were unquoted in the
+                // original word (`~/.ss$'h'/{id_rsa,x}` reaches `~/.ssh/*`).
+                for extracted in extract_paths_from_command(&decoded) {
+                    if extracted.shell_expand_braces
+                        && !shell_expansion_paths.contains(&extracted.path)
+                    {
+                        shell_expansion_paths.push(extracted.path.clone());
+                    }
+                    paths.push(extracted.path);
+                }
             }
         }
 
@@ -882,6 +887,27 @@ mod tests {
         // single-quoted too
         let s = extract_paths_from_command("cp '/etc/master.passwd' /tmp/x");
         assert!(s.iter().any(|p| p.path == "/etc/master.passwd"));
+    }
+
+    #[test]
+    fn decoded_view_keeps_provenance_of_original_braces_only() {
+        // braces unquoted in the original word expand in the decoded view too
+        let call =
+            tc(r#"{"tool_name":"Bash","tool_input":{"command":"cat ~/.ss$'h'/{id_rsa,x}"}}"#);
+        assert!(call.paths.contains(&"~/.ssh/{id_rsa,x}".to_string()));
+        assert!(call
+            .shell_expansion_paths
+            .contains(&"~/.ssh/{id_rsa,x}".to_string()));
+        // a brace that only exists after decoding is literal in bash
+        let call = tc(r#"{"tool_name":"Bash","tool_input":{"command":"cat /tmp/$'\\x7b'a,b}"}}"#);
+        assert!(call.shell_expansion_paths.is_empty(), "{call:?}");
+        // a decoded space stays inside one path candidate
+        let call = tc(
+            r#"{"tool_name":"Bash","tool_input":{"command":"cat ~/Library/$'Application\\x20Support'/Google/Chrome/Default/Cookies"}}"#,
+        );
+        assert!(call
+            .paths
+            .contains(&"~/Library/Application Support/Google/Chrome/Default/Cookies".to_string()));
     }
 
     #[test]
