@@ -248,6 +248,64 @@ pub fn lint_overlay(main: &PolicyEngine, overlay: &Overlay, project_root: &Path)
     findings
 }
 
+/// What is wrong with a `match = { ... }` block: keys outside the vocabulary,
+/// a predicate with an empty list or string, or a block with no predicate.
+/// Each is an error: the engine ignores an unknown key and an empty list can
+/// never hold, so the rule would be weaker than it reads.
+fn match_block_problems(spec: &crate::policy::schema::MatchSpec) -> Vec<String> {
+    let mut problems = Vec::new();
+    for key in spec.unknown.keys() {
+        problems.push(format!(
+            "match block has unknown key {key:?} (known: exec, has_flag, operand_under, piped_to, then_exec, interpreter_eval)"
+        ));
+    }
+    if spec.is_empty() {
+        problems.push("match block lists no predicate".into());
+    }
+    let lists = [
+        ("exec", &spec.exec),
+        ("has_flag", &spec.has_flag),
+        ("piped_to", &spec.piped_to),
+        ("then_exec", &spec.then_exec),
+    ];
+    for (name, list) in lists {
+        if let Some(values) = list {
+            if values.is_empty() || values.iter().any(String::is_empty) {
+                problems.push(format!(
+                    "match.{name} must be a non-empty list of non-empty strings"
+                ));
+            }
+        }
+    }
+    if spec
+        .operand_under
+        .as_deref()
+        .is_some_and(|dir| dir.trim_end_matches('/').is_empty())
+    {
+        problems.push("match.operand_under must name a directory".into());
+    }
+    if let Some(eval) = &spec.interpreter_eval {
+        for key in eval.unknown.keys() {
+            problems.push(format!(
+                "match.interpreter_eval has unknown key {key:?} (known: interpreters, contains)"
+            ));
+        }
+        if eval.interpreters.is_empty() || eval.interpreters.iter().any(String::is_empty) {
+            problems.push(
+                "match.interpreter_eval.interpreters must be a non-empty list of non-empty strings"
+                    .into(),
+            );
+        }
+        if eval.contains.is_empty() || eval.contains.iter().any(String::is_empty) {
+            problems.push(
+                "match.interpreter_eval.contains must be a non-empty list of non-empty strings"
+                    .into(),
+            );
+        }
+    }
+    problems
+}
+
 fn is_broad_allow(pattern: &str) -> bool {
     matches!(
         pattern.trim(),
@@ -261,9 +319,11 @@ pub fn lint_engine(engine: &PolicyEngine) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // 1. regexes that don't compile - a deny.commands/deny.secrets rule that can
-    //    never match is a silent hole.
+    //    never match is a silent hole. A deny.commands rule may carry a `match`
+    //    block instead of a pattern; one with neither, or with a malformed
+    //    block (unknown key, empty list), is the same kind of hole.
     for r in &rules {
-        if matches!(r.section, "deny.commands" | "deny.secrets") {
+        if matches!(r.section, "deny.commands" | "deny.secrets") && !r.pattern.is_empty() {
             if let Err(e) = Regex::new(r.pattern) {
                 findings.push(Finding {
                     error: true,
@@ -274,19 +334,45 @@ pub fn lint_engine(engine: &PolicyEngine) -> Vec<Finding> {
                 });
             }
         }
+        if r.section == "deny.commands" {
+            match r.matcher {
+                None if r.pattern.is_empty() => findings.push(Finding {
+                    error: true,
+                    message: format!(
+                        "deny.commands: rule {} has neither a pattern nor a match block (never matches)",
+                        r.id
+                    ),
+                }),
+                Some(spec) => {
+                    for problem in match_block_problems(spec) {
+                        findings.push(Finding {
+                            error: true,
+                            message: format!("deny.commands: rule {}: {problem}", r.id),
+                        });
+                    }
+                }
+                None => {}
+            }
+        } else if r.pattern.is_empty() {
+            findings.push(Finding {
+                error: true,
+                message: format!("{}: rule {} has an empty pattern", r.section, r.id),
+            });
+        }
     }
 
     // 2. Exact (section, pattern) duplicates. A warning holds its decision while
     //    evaluation continues, so a later blocking duplicate can still matter.
     //    Report repetition without claiming the later rule is unreachable.
-    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    let mut seen: HashSet<(&str, String)> = HashSet::new();
     for r in &rules {
-        if !seen.insert((r.section, r.pattern)) {
+        if !seen.insert((r.section, r.display())) {
             findings.push(Finding {
                 error: false,
                 message: format!(
                     "{}: duplicate pattern {:?}; review the actions and ordering before removing either rule",
-                    r.section, r.pattern
+                    r.section,
+                    r.display()
                 ),
             });
         }
@@ -421,6 +507,93 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.error && f.message.contains("invalid regex")));
+    }
+
+    #[test]
+    fn match_blocks_are_validated() {
+        let clean = engine(
+            r#"
+[policy]
+mode = "enforce"
+
+[[deny.commands]]
+id = "a"
+pattern = 'curl.*\|\s*sh'
+match = { exec = ["curl"], piped_to = ["sh"] }
+action = "block"
+reason = "r"
+
+[[deny.commands]]
+id = "b"
+match = { interpreter_eval = { interpreters = ["python3"], contains = ["os.system("] } }
+action = "block"
+reason = "r"
+"#,
+        );
+        assert!(lint_engine(&clean).is_empty(), "{:?}", lint_engine(&clean));
+
+        let broken = engine(
+            r#"
+[policy]
+mode = "enforce"
+
+[[deny.commands]]
+id = "neither"
+action = "block"
+reason = "r"
+
+[[deny.commands]]
+id = "unknown-key"
+match = { exec = ["curl"], pipes_to = ["sh"] }
+action = "block"
+reason = "r"
+
+[[deny.commands]]
+id = "empty-list"
+match = { exec = [], then_exec = ["sh"] }
+action = "block"
+reason = "r"
+
+[[deny.commands]]
+id = "no-predicate"
+match = {}
+action = "block"
+reason = "r"
+
+[[deny.commands]]
+id = "bad-eval"
+match = { interpreter_eval = { interpreters = ["python3"], contains = [], extra = 1 } }
+action = "block"
+reason = "r"
+
+[[deny.commands]]
+id = "bad-dir"
+match = { operand_under = "/" }
+action = "block"
+reason = "r"
+"#,
+        );
+        let errors: Vec<String> = lint_engine(&broken)
+            .into_iter()
+            .filter(|f| f.error)
+            .map(|f| f.message)
+            .collect();
+        let expect = [
+            "rule neither has neither a pattern nor a match block",
+            "rule unknown-key: match block has unknown key \"pipes_to\"",
+            "rule empty-list: match.exec must be a non-empty list",
+            "rule no-predicate: match block lists no predicate",
+            "rule bad-eval: match.interpreter_eval has unknown key \"extra\"",
+            "rule bad-eval: match.interpreter_eval.contains must be a non-empty list",
+            "rule bad-dir: match.operand_under must name a directory",
+        ];
+        for needle in expect {
+            assert!(
+                errors.iter().any(|e| e.contains(needle)),
+                "missing {needle:?} in {errors:?}"
+            );
+        }
+        assert_eq!(errors.len(), expect.len(), "{errors:?}");
     }
 
     #[test]

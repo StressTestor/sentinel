@@ -23,7 +23,9 @@ fn to_tuples(engine: &PolicyEngine) -> Vec<RuleTuple> {
         .map(|r| {
             (
                 r.section.into(),
-                r.pattern.into(),
+                // the pattern, or the match block for a match-only command
+                // rule, so two such rules are not the same empty identity
+                r.display(),
                 r.action.into(),
                 r.reason.into(),
             )
@@ -58,12 +60,16 @@ fn quote_pattern(section: &str, pattern: &str) -> String {
 }
 
 fn format_rule((section, pattern, action, reason): &RuleTuple) -> String {
-    let pat = quote_pattern(section, pattern);
     if section == "allow.paths" {
-        format!("[[{section}]]\npattern = {pat}\nnote = {reason:?}\n")
-    } else {
-        format!("[[{section}]]\npattern = {pat}\naction = {action:?}\nreason = {reason:?}\n")
+        let pat = quote_pattern(section, pattern);
+        return format!("[[{section}]]\npattern = {pat}\nnote = {reason:?}\n");
     }
+    // a match-only command rule's identity is its rendered block
+    let rule_line = match pattern.strip_prefix("match = ") {
+        Some(block) => format!("match = {block}"),
+        None => format!("pattern = {}", quote_pattern(section, pattern)),
+    };
+    format!("[[{section}]]\n{rule_line}\naction = {action:?}\nreason = {reason:?}\n")
 }
 
 pub fn run(args: PolicyDiffArgs) -> Result<(), Box<dyn std::error::Error>> {
