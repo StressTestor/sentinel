@@ -91,7 +91,10 @@ sentinel/
 │   │   ├── state.rs        Claude/Codex installed and activated state; ~/.sentinel/install-state.json record of sentinel-written sandbox entries
 │   │   ├── sandbox.rs      sandbox bridge: deny.paths -> sandbox.filesystem.denyRead/denyWrite projection, reconciliation, drift inspection
 │   │   ├── hooks.rs        direct/Ghost ownership reconciliation + atomic writes
-│   │   └── defaults.rs     default policy.toml generator
+│   │   ├── defaults.rs     default policy.toml generator (header + family loader)
+│   │   └── defaults/       bundled deny rules, one TOML file per family, NN- prefix
+│   │                       is evaluation order; pinned byte for byte by
+│   │                       tests/fixtures/policy/
 │   ├── policy_migrate.rs   revision detection + validated three-way migration
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger (0600/0700, symlink-refusing,
@@ -101,7 +104,8 @@ sentinel/
 │   ├── sandbox_install.rs  sandbox bridge install/reinstall/uninstall, doctor drift, self-protect through the real binary
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
-│       └── corpus/         test attack sequences (3 TOML files)
+│       ├── corpus/         test attack sequences (3 TOML files)
+│       └── policy/         pinned default-enforce/default-audit policy.toml (byte-identity regression anchor)
 ├── scripts/
 │   ├── ad5-network-lint.sh network-import boundary gate
 │   ├── docs-claims-check.sh verifier-count + public-command claims gate

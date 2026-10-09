@@ -1,5 +1,8 @@
 /target
 
+# spike harnesses are standalone crates; keep their build output out
+spike/s3-parser/target
+
 # secrets never belong in the repo; .env.example stays tracked
 .env
 .env.*

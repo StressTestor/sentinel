@@ -28,6 +28,16 @@ versioning.
   `install --sandbox`. Paths with whitespace are withheld pending a live
   test, and no live Claude Code run is recorded yet.
 
+### Changed
+- The bundled policy rules moved out of one `format!` string in
+  `src/install/defaults.rs` into per-family TOML files under
+  `src/install/defaults/` (`01-credential-paths.toml` through
+  `20-secrets.toml`), loaded with `include_str!` and concatenated in a fixed
+  order. The generated `policy.toml` is unchanged: no rule, comment, or
+  whitespace differs, and `tests/fixtures/policy/default-{enforce,audit}.toml`
+  now pin the bundled policy byte for byte. A deliberate rule change must
+  update those fixtures in the same commit.
+
 ### Security
 - **Close the cd-relative path bypass (audit F-1).** A relative operand after a
   literal `cd` (`cd ~ && cat .ssh/id_rsa`) never reached a `~/.ssh/*` rule
