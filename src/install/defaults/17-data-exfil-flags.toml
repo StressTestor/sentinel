@@ -1,0 +1,100 @@
+# --- FIX C: data-exfil via curl/wget/fetch carrying DATA/UPLOAD flags ---
+# Existing curl rules only catch pipe-to-shell, $(curl, backtick-curl, staged
+# -o+run, and @credfile. A bare data POST/upload (`curl --data "$(env)"`,
+# `curl -d @<dotenv>`, `wget --post-file=<secrets>`, `curl -T <keyfile>`) matched
+# NOTHING. Plain `curl -d 'k=v'` is common in API testing → default WARN; ESCALATE
+# to BLOCK only when the payload references a command substitution, an @file, or a
+# secret-looking env var. BLOCK rules MUST precede the WARN rule (first match wins).
+# Residual: DNS/ICMP tunneling, `git push` to an attacker remote, and MCP-tool
+# egress are NOT covered; a PreToolUse hook sees only the agent's own curl/wget,
+# not a child process's network calls.
+
+# data/upload flag whose argument is a command substitution $( or backtick
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--data(-binary|-raw|-urlencode)?|--form|--upload-file|--post-file|--post-data|\s-d\b|\s-F\b|\s-T\b)[= ].*(\$\(|`)'
+action = "block"
+reason = "curl/wget data upload sourced from a command substitution (exfiltration)"
+
+# data/upload flag whose argument is an @file
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--data(-binary|-raw|-urlencode)?|--form|--upload-file|--post-file|--post-data|\s-d\b|\s-F\b|\s-T\b)[= ]@?\S*@'
+action = "block"
+reason = "curl/wget data upload sourced from an @file (exfiltration)"
+
+# upload flags that take a file directly (-T / --upload-file / --post-file=)
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--upload-file|--post-file|\s-T\b)[= ]'
+action = "block"
+reason = "curl/wget file upload (-T/--upload-file/--post-file - exfiltration)"
+
+# GLUED short-flag forms with NO space/= separator: `curl -d@FILE`, `-T/path`,
+# `-d$(cmd)`. The spaced/`=` forms above are caught; the glued form carried no
+# separator and slipped the ENTIRE data-exfil family with a one-character change.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[dFT]@'
+action = "block"
+reason = "curl/wget @file upload glued to a short flag (-d@/-T@ - exfiltration)"
+
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-T[/~.]'
+action = "block"
+reason = "curl/wget file upload glued to -T (-T/path - exfiltration)"
+
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[dFT]\$\('
+action = "block"
+reason = "curl/wget data/upload sourced from a command substitution glued to a short flag (exfiltration)"
+
+# data/upload flag whose argument references a secret-looking env var.
+# curl flags are case-sensitive (-d=data vs -D=dump-header, -F=form vs -f=fail),
+# so the flag alternation is case-SENSITIVE like its sibling rules; only the
+# command name and env-var NAME matches are case-insensitive, via inline (?i:...) groups.
+[[deny.commands]]
+pattern = '(?i:\b(curl|wget|fetch)\b).*(--data(-binary|-raw|-urlencode)?|--form|--post-data|\s-d\b|\s-F\b)[= ]\S*\$\{?(?i:[a-z_]*(secret|token|key|password|aws_))'
+action = "block"
+reason = "curl/wget data upload referencing a secret-looking env var (exfiltration)"
+
+# secret-looking env var carried in the URL or an -H/--header (NO data flag) -
+# the most direct GET-based exfil, which every data-flag rule above misses. WARN
+# (not block): a legit `Authorization: Bearer $TOKEN` is everyday, so surface for
+# review rather than break it - the same posture as the plain-data WARN below.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*https?://\S*\$\{?(?i:[a-z_]*(secret|token|key|password|aws_|auth))'
+action = "warn"
+reason = "curl/wget URL carries a secret-looking env var - review for credential exfil"
+
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(-H|--header)\b.*\$\{?(?i:[a-z_]*(secret|token|key|password|aws_|auth))'
+action = "warn"
+reason = "curl/wget request header carries a secret-looking env var - review for credential exfil"
+
+# any OTHER short data/upload flag glued to a literal value (`-dvalue`, `-Fk=v`).
+# The BLOCK rules above already took the @file / command-sub / -T-path forms.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[dFT]\S'
+action = "warn"
+reason = "curl/wget short data/upload flag with a glued value - review for exfil (common in API testing, so warn)"
+
+# /dev/tcp redirection exfil (bash network redirect)
+[[deny.commands]]
+pattern = '>\s*/dev/tcp/'
+action = "block"
+reason = "redirect to /dev/tcp (raw socket exfiltration)"
+
+# nc / ncat fed from a file via input redirection. the redirect must belong to
+# the nc invocation itself: no unquoted/unescaped command separator (&, ;, |) may
+# sit between the nc token and the `<`, so `nc -z host 80 && cat x < /dev/null`
+# is not a match, but quoted/escaped separators inside nc args still block.
+[[deny.commands]]
+pattern = '\b(nc|ncat)\b(?:\\.|"(?:\\.|[^"\\])*"|\x27[^\x27]*\x27|[^&;|"\x27\\])*<\s*\S'
+action = "block"
+reason = "nc/ncat reading a file from stdin (raw socket exfiltration)"
+
+# DEFAULT WARN: any curl/wget carrying a data/upload flag that wasn't caught by a
+# BLOCK rule above (plain `curl -d 'k=v'` is common in API testing). Plain GETs and
+# pure downloads (-o/-O) are NOT data/upload flags, so they stay allowed.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*(--data(-binary|-raw|-urlencode)?|--form|--upload-file|--post-file|--post-data|\s-d\b|\s-F\b|\s-T\b)[= ]'
+action = "warn"
+reason = "curl/wget carrying a data/upload flag - review for credential exfiltration (common in legit API testing, so warn not block)"
+
