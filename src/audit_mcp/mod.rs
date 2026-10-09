@@ -8,13 +8,12 @@
 //! or tokens.
 
 use crate::cli::AuditMcpArgs;
+use crate::common::{decode_hex, encode_hex, random_salt, write_private_atomic};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASELINE_VERSION: u32 = 1;
 
@@ -60,8 +59,8 @@ pub fn run(args: AuditMcpArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.update {
         let salt = match &baseline_state {
-            BaselineState::Current(baseline) => decode_hex(&baseline.salt)?,
-            BaselineState::Missing | BaselineState::Legacy => random_salt()?,
+            BaselineState::Current(baseline) => decode_hex(&baseline.salt, "MCP baseline")?,
+            BaselineState::Missing | BaselineState::Legacy => random_salt("MCP baseline")?,
         };
         let trusted = digest_servers(&servers, &salt)?;
         let baseline = Baseline {
@@ -98,7 +97,7 @@ pub fn run(args: AuditMcpArgs) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            let salt = decode_hex(&baseline.salt)?;
+            let salt = decode_hex(&baseline.salt, "MCP baseline")?;
             let current = digest_servers(&servers, &salt)?;
             compare(&baseline.servers, &current)
         }
@@ -441,38 +440,6 @@ fn split_server_key(key: &str) -> (&str, &str) {
     key.split_once('\u{1f}').unwrap_or(("unknown", key))
 }
 
-fn random_salt() -> Result<Vec<u8>, String> {
-    let mut salt = vec![0_u8; 32];
-    getrandom::fill(&mut salt)
-        .map_err(|error| format!("failed to create MCP baseline salt: {error}"))?;
-    Ok(salt)
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("invalid MCP baseline salt".into());
-    }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let text =
-                std::str::from_utf8(pair).map_err(|_| "invalid MCP baseline salt".to_string())?;
-            u8::from_str_radix(text, 16).map_err(|_| "invalid MCP baseline salt".to_string())
-        })
-        .collect()
-}
-
 fn load_baseline(path: &Path) -> Result<BaselineState, String> {
     let Some(text) = read_optional(path)? else {
         return Ok(BaselineState::Missing);
@@ -487,63 +454,9 @@ fn load_baseline(path: &Path) -> Result<BaselineState, String> {
 }
 
 fn save_baseline(path: &Path, baseline: &Baseline) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "MCP baseline path has no parent".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create MCP baseline directory: {error}"))?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    // attempt-suffixed + AlreadyExists retry: a predictable pid-only temp name
-    // lets a pre-created file wedge every future --update (2026-08-14 audit).
     let content = serde_json::to_vec_pretty(baseline)
         .map_err(|error| format!("failed to encode MCP baseline: {error}"))?;
-    let mut staged: Option<std::path::PathBuf> = None;
-    let result = (|| -> Result<(), String> {
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = None;
-        for attempt in 0..1000_u32 {
-            let candidate = parent.join(format!(
-                ".mcp-baseline.{}.{stamp}.{attempt}.tmp",
-                std::process::id()
-            ));
-            match options.open(&candidate) {
-                Ok(opened) => {
-                    staged = Some(candidate);
-                    file = Some(opened);
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("failed to stage MCP baseline: {error}")),
-            }
-        }
-        let Some(mut file) = file else {
-            return Err("could not allocate a unique baseline temp file".into());
-        };
-        file.write_all(&content)
-            .map_err(|error| format!("failed to stage MCP baseline: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("failed to sync MCP baseline: {error}"))?;
-        let temp = staged.as_deref().expect("a successful open stages a temp");
-        std::fs::rename(temp, path)
-            .map_err(|error| format!("failed to atomically replace MCP baseline: {error}"))?;
-        staged = None; // renamed away: nothing left to clean up
-        Ok(())
-    })();
-    if result.is_err() {
-        if let Some(temp) = staged {
-            let _ = std::fs::remove_file(temp);
-        }
-    }
-    result
+    write_private_atomic(path, &content, "mcp-baseline", "MCP baseline")
 }
 
 #[cfg(test)]
@@ -566,11 +479,5 @@ mod tests {
             digest_servers(&[first], &[7; 32]).unwrap(),
             digest_servers(&[second], &[7; 32]).unwrap()
         );
-    }
-
-    #[test]
-    fn hex_round_trip() {
-        let bytes = (0_u8..32).collect::<Vec<_>>();
-        assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
     }
 }
