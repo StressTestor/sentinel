@@ -1,0 +1,72 @@
+# agent-config / persistence tripwires - warn, not block: developers legitimately
+# edit these via an agent, so blocking would be a false positive. They surface a
+# write for review without breaking normal config work.
+[[deny.paths]]
+pattern = "**/.claude/settings.json"
+action = "warn"
+reason = "agent write to Claude Code settings (hook/permission surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/settings.local.json"
+action = "warn"
+reason = "agent write to Claude Code local settings (hook/permission surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/skills/**"
+action = "warn"
+reason = "agent write to a Claude Code skill (instruction-injection surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/agents/**"
+action = "warn"
+reason = "agent write to a Claude Code subagent definition (instruction-injection surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.claude/hooks/**"
+action = "warn"
+reason = "agent write to a Claude Code hook script (execution surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.mcp.json"
+action = "warn"
+reason = "agent write to an MCP server config (adds tool/exec surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "~/.codex/*"
+action = "warn"
+reason = "agent write to Codex CLI config - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "~/.gemini/*"
+action = "warn"
+reason = "agent write to Gemini CLI config - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.vscode/tasks.json"
+action = "warn"
+reason = "agent write to VS Code tasks.json (auto-run-on-open surface) - review for unexpected changes"
+
+[[deny.paths]]
+pattern = "**/.github/workflows/*"
+action = "warn"
+reason = "agent write to a GitHub Actions workflow (auto-run-on-push CI + secrets/OIDC surface) - review for unexpected changes"
+
+# warn (not block): matches any path ending in `kubeconfig` (a project-local
+# `kubeconfig`, `admin.kubeconfig`, etc.) - a common kind/k3s/eks convention that
+# developers read and edit, so blocking would be a false positive. Mirrors the
+# */.env warn posture. The default-location ~/.kube/config IS a clean block above.
+[[deny.paths]]
+pattern = "**/kubeconfig"
+action = "warn"
+reason = "possible kubeconfig cluster credentials - review before access"
+
+[[deny.paths]]
+pattern = "~/Library/LaunchAgents/*.plist"
+action = "warn"
+reason = "agent writes a macOS user LaunchAgent (login-persistence unit) - review; devs also script launchd agents"
+
+[[deny.paths]]
+pattern = "~/.config/systemd/user/*.service"
+action = "warn"
+reason = "agent writes a systemd user service (login-persistence unit) - review; devs also script user units"
+

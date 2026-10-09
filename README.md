@@ -128,6 +128,8 @@ reason = "AWS access key in command args"
 
 deny rules evaluate first. glob patterns for paths, regex for commands and secrets.
 
+every rule can carry an optional `id` (`id = "cred-paths/ssh"`). a rule without one is addressed as `<section>:<8 hex of sha256(pattern)>`, so an audit line names the same rule after a reorder. every block or warn in `~/.sentinel/audit.jsonl` records that id plus a bounded witness: the canonicalized path, the matched command fragment, or the tool name. secret rules record the id only, never the match. `sentinel why` joins the most recent block or warn (or every line for a `tool_use_id`) back to the rule text and its line in `policy.toml`. nothing in the trail is a payload.
+
 ## one deterministic tier, on purpose
 
 sentinel is a single deterministic policy engine. no heuristics, no ML, no behavioral scoring in the decision path.
@@ -144,7 +146,7 @@ earlier prototypes explored heuristic and model-assisted analyzers. neither ship
 
 the self-propagating npm/pypi worms in the shai-hulud / Miasma family inject persistence and steal credentials through package lifecycle scripts. the default policy now covers the part of that an agent runtime can actually see:
 
-- **self-protect.** the agent can't disable the guard. blocked: writing `~/.sentinel/policy.toml`; overwriting, `chmod -x`-ing, `chflags`-ing, `strip`-ing, `truncate`-ing, `install`-ing over, or `rm`-ing the `sentinel` binary (literal paths and the `$(command -v sentinel)` indirect form); `sentinel uninstall`; deleting `~/.claude` or `~/.sentinel`; rewriting `~/.claude/settings.json` to drop the hook - both as a Write/Edit (content-aware: a settings edit that keeps the `sentinel evaluate` hook stays warn, one that removes it escalates to block) and as a shell child process (`sed -i`, a truncating redirect, `tee` targeting the settings file); and editing the audit trail (`~/.sentinel/audit.jsonl` is 0600, symlink-refusing, and tamper-covered, so an injected agent can't scrub its own block record). a guard that lets an injected agent flip itself to audit mode, delete the cop, or unhook itself is not a guard.
+- **self-protect.** the agent can't disable the guard. blocked: writing `~/.sentinel/policy.toml`; overwriting, `chmod -x`-ing, `chflags`-ing, `strip`-ing, `truncate`-ing, `install`-ing over, or `rm`-ing the `sentinel` binary (literal paths and the `$(command -v sentinel)` indirect form); `sentinel uninstall`; deleting `~/.claude` or `~/.sentinel`; rewriting `~/.claude/settings.json` to drop the hook - both as a Write/Edit (content-aware and per file: an edit that keeps the `sentinel evaluate` hook stays warn, one that removes it from the file that carries it escalates to block, and `"disableAllHooks": true` in any settings scope is a block while a live hook exists; a project-scoped settings file that never had the hook is ordinary settings work) and as a shell child process (`sed -i`, a truncating redirect, `tee` targeting the settings file); and editing the audit trail (`~/.sentinel/audit.jsonl` is 0600, symlink-refusing, and tamper-covered, so an injected agent can't scrub its own block record). a guard that lets an injected agent flip itself to audit mode, delete the cop, or unhook itself is not a guard.
 - **credential coverage.** beyond `~/.ssh` / `~/.aws` / `~/.gnupg`: docker/podman registry auth, `~/.git-credentials`, HuggingFace/crates tokens, `~/.pgpass` / `~/.my.cnf`, rclone/oci/doctl/fly/databricks/terraform configs, macOS Keychains (user and system), every major browser's cookie + saved-login store, 1Password / Bitwarden / pass / KeePass vaults, crypto wallets, and editor SecretStorage DBs - all block.
 - **exfil without a network pipe.** `gpg --export-secret-keys`, `security dump-keychain` / `find-*-password -w`, `dscl -read … Password` block; `env`/`printenv` dumped to a file, a secret-named `printenv`, and `git credential fill` warn. the prior rules only matched a pipe into grep or a network tool.
 - **egress channels.** DNS tunnelling (a resolver query name fed by a command substitution blocks; TXT/ANY lookups warn), git used as transport (a remote URL with an embedded credential blocks; push/remote-add to a literal https URL warns), and scp/rsync/rclone/cloud-upload (warn).
@@ -174,6 +176,7 @@ sentinel uninstall --agent <name>  remove direct Claude Code or Codex hooks
 sentinel evaluate [--agent <name>]  evaluate a tool call (called by the hook)
 sentinel post-evaluate    scan a tool RESULT for secret shapes (PostToolUse hook; detection only)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
+sentinel why [<tool_use_id>]  explain a block or warn already in the audit trail: rule id, rule text, what matched
 sentinel verify           replay pinned attacks through the policy, assert each is caught
 sentinel doctor --agent <name> --strict  validate activation + probe hook liveness
 sentinel audit-mcp [--strict]  compare configured MCP servers with the accepted baseline

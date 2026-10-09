@@ -26,6 +26,10 @@ pub struct CheckOutcome {
     /// what the deny/allow rules say in isolation
     pub rule_action: String,
     pub matched_rule: Option<String>,
+    /// addressable id of the matched rule or enforcement layer (see `sentinel why`)
+    pub rule_id: Option<String>,
+    /// what matched (path, bounded command fragment, tool name); never a secret
+    pub witness: Option<String>,
     pub reason: Option<String>,
     /// the paths the engine extracted from the call (what deny.paths sees)
     pub extracted_paths: Vec<String>,
@@ -79,6 +83,8 @@ pub fn evaluate_check(engine: &PolicyEngine, raw: &str) -> CheckOutcome {
         tool_name,
         rule_action: decision.action.to_string(),
         matched_rule: decision.matched_rule,
+        rule_id: decision.rule_id,
+        witness: decision.witness,
         reason: decision.reason,
         extracted_paths: display_paths,
         command,
@@ -140,6 +146,12 @@ fn print_human(o: &CheckOutcome) {
     match &o.matched_rule {
         Some(rule) => {
             println!("rule:      {} -> {}", rule, o.rule_action);
+            if let Some(id) = &o.rule_id {
+                println!("rule id:   {id}");
+            }
+            if let Some(witness) = &o.witness {
+                println!("witness:   {witness}");
+            }
             if let Some(reason) = &o.reason {
                 println!("reason:    {reason}");
             }

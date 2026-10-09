@@ -45,6 +45,8 @@ sentinel/
 │   ├── lib.rs              library surface: the same module tree, used by fuzz/ and tests/
 │   ├── main.rs             CLI entry, subcommand dispatch
 │   ├── cli.rs              clap arg definitions
+│   ├── why/
+│   │   └── mod.rs          `sentinel why`: join an audit line's rule id to the installed policy
 │   ├── common/
 │   │   ├── mod.rs
 │   │   ├── normalize.rs    encoded-text normalization (HTML-entity decode, Unicode format-char strip, NFKC) — secret path only
@@ -90,7 +92,10 @@ sentinel/
 │   │   ├── activation.rs   Codex public hooks API activation/trust probe
 │   │   ├── state.rs        Claude/Codex installed and activated state
 │   │   ├── hooks.rs        direct/Ghost ownership reconciliation + atomic writes
-│   │   └── defaults.rs     default policy.toml generator
+│   │   ├── defaults.rs     default policy.toml generator (header + family loader)
+│   │   └── defaults/       bundled deny rules, one TOML file per family, NN- prefix
+│   │                       is evaluation order; pinned byte for byte by
+│   │                       tests/fixtures/policy/
 │   ├── policy_migrate.rs   revision detection + validated three-way migration
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger (0600/0700, symlink-refusing,
@@ -103,7 +108,8 @@ sentinel/
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
 │       ├── corpus/         test attack sequences (3 TOML files)
-│       └── hooks/          Codex payloads + claude-code-<version>-*.json, VERIFIED_CLAUDE_CODE_VERSION
+│       ├── hooks/          Codex payloads + claude-code-<version>-*.json, VERIFIED_CLAUDE_CODE_VERSION
+│       └── policy/         pinned default-enforce/default-audit policy.toml (byte-identity regression anchor)
 ├── scripts/
 │   ├── ad5-network-lint.sh network-import boundary gate
 │   ├── docs-claims-check.sh verifier-count + public-command claims gate
@@ -551,6 +557,7 @@ never silently flips them to enforce.
 | `sentinel install --audit` | install in audit mode (log only) |
 | `sentinel uninstall --agent <name>` | remove direct Claude Code or Codex hooks |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
+| `sentinel why [<tool_use_id>] [--json]` | explain a decision already in the audit trail: rule id, rule text and policy line, bounded witness (read-only; never the payload) |
 | `sentinel verify [--policy <file>]` | replay the pinned 64/64 attack and benign cases; nonzero on a mismatch |
 | `sentinel doctor --agent <name> [--strict] [--json]` | inspect activation and policy, then probe the actual hook chain with a known-bad canary |
 | `sentinel audit-mcp [--strict]` | compare current MCP config with an explicitly accepted baseline |

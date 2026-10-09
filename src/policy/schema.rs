@@ -104,6 +104,10 @@ fn default_default() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyPathRule {
+    /// Optional stable identifier for `sentinel why`, audit lines, and future
+    /// per-rule overrides. Absent → derived from the section and pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub pattern: String,
     pub action: String,
     pub reason: String,
@@ -111,6 +115,10 @@ pub struct DenyPathRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyCommandRule {
+    /// Optional stable identifier for `sentinel why`, audit lines, and future
+    /// per-rule overrides. Absent → derived from the section and pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub pattern: String,
     pub action: String,
     pub reason: String,
@@ -118,6 +126,10 @@ pub struct DenyCommandRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenySecretRule {
+    /// Optional stable identifier for `sentinel why`, audit lines, and future
+    /// per-rule overrides. Absent → derived from the section and pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub pattern: String,
     pub action: String,
     pub reason: String,
@@ -130,6 +142,10 @@ pub struct DenySecretRule {
 /// false positive for every MCP user).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyToolRule {
+    /// Optional stable identifier for `sentinel why`, audit lines, and future
+    /// per-rule overrides. Absent → derived from the section and pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub pattern: String,
     pub action: String,
     pub reason: String,
@@ -137,8 +153,38 @@ pub struct DenyToolRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllowPathRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub pattern: String,
     pub note: Option<String>,
+}
+
+/// The characters an explicit rule id may use. Ids appear in audit lines,
+/// `sentinel why` output, and shell arguments, so the alphabet stays small.
+pub fn is_valid_rule_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b':'))
+}
+
+/// The id a rule is addressed by: its explicit `id` when set, otherwise
+/// `<section>:<first 8 hex of sha256(pattern)>`. The derived form is stable
+/// across reorderings and edits to `action`/`reason`, and changes exactly when
+/// the pattern changes, so an audit line written today still names the same
+/// rule after a policy reorder.
+pub fn rule_id(explicit: Option<&str>, section: &str, pattern: &str) -> String {
+    if let Some(id) = explicit {
+        return id.to_string();
+    }
+    format!("{section}:{}", pattern_digest8(pattern))
+}
+
+fn pattern_digest8(pattern: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(pattern.as_bytes());
+    digest[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// parse a policy TOML string into a finalized PolicyConfig
@@ -203,6 +249,46 @@ mode = "audit"
         assert_eq!(config.policy.mode, "audit");
         assert_eq!(config.policy.on_failure, "closed");
         assert!(config.deny_paths.is_empty());
+    }
+
+    #[test]
+    fn explicit_id_parses_and_absent_id_derives_from_section_and_pattern() {
+        let toml = r#"
+[policy]
+mode = "enforce"
+
+[[deny.paths]]
+id = "cred-paths/ssh"
+pattern = "~/.ssh/*"
+action = "block"
+reason = "SSH key access"
+
+[[deny.paths]]
+pattern = "~/.aws/*"
+action = "block"
+reason = "AWS credential access"
+"#;
+        let config = parse_policy(toml).unwrap();
+        assert_eq!(config.deny_paths[0].id.as_deref(), Some("cred-paths/ssh"));
+        assert_eq!(config.deny_paths[1].id, None);
+        let derived = rule_id(None, "deny.paths", "~/.aws/*");
+        assert!(derived.starts_with("deny.paths:"), "{derived}");
+        assert_eq!(derived.len(), "deny.paths:".len() + 8);
+        // stable: same pattern, same id; different pattern, different id
+        assert_eq!(derived, rule_id(None, "deny.paths", "~/.aws/*"));
+        assert_ne!(derived, rule_id(None, "deny.paths", "~/.aws/**"));
+        assert_ne!(derived, rule_id(None, "deny.commands", "~/.aws/*"));
+        assert_eq!(rule_id(Some("x"), "deny.paths", "~/.aws/*"), "x");
+    }
+
+    #[test]
+    fn rule_id_alphabet_is_bounded() {
+        assert!(is_valid_rule_id("cred-paths/ssh"));
+        assert!(is_valid_rule_id("fetch_exec.curl:v2"));
+        assert!(!is_valid_rule_id(""));
+        assert!(!is_valid_rule_id("has space"));
+        assert!(!is_valid_rule_id("quote\""));
+        assert!(!is_valid_rule_id(&"a".repeat(129)));
     }
 
     #[test]

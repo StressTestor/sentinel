@@ -1,0 +1,46 @@
+# remote fetch piped into a shell. the shell must sit at a COMMAND position -
+# directly after a pipe, or after a known exec-wrapper (env / nice / sudo / xargs
+# / timeout / ...) that launches it - so `curl x | env sh`, `| /usr/bin/env bash`,
+# `| nice sh`, `| tee f | sh` all block, while a fetched payload piped into a
+# filter whose ARGUMENT merely names a shell (`curl x | grep ssh`, `| grep bash`)
+# does NOT. `[a-z/]*sh` keeps coverage of every `*sh` (sh/bash/zsh/dash/fish/...).
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b[^|]*\|(?:[^|]*\|)*\s*(?:(?:[\w./-]*/)?(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs)\b[^|]*\s)?[a-z/]*sh\b'
+action = "block"
+reason = "pipe to shell execution"
+
+[[deny.commands]]
+pattern = '<\(\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "process substitution of a remote fetch into a shell"
+
+[[deny.commands]]
+pattern = '\$\(\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "command substitution of a remote fetch"
+
+# staged fetch-then-run. the old single rule ended in `\b(ba|z|da)?sh\b`, which
+# matches a FILE EXTENSION (`install.sh`) as readily as a shell command - so
+# `curl -o install.sh URL && wc -l install.sh` blocked. between the separator and
+# the interpreter only enumerated shell constructs are consumable (env
+# assignments, redirections, group-opens, the same wrapper set the pipe-to-shell
+# rule uses), so a bare word like wc/grep/head can never be crossed and a `.sh`
+# extension is unreachable. command normalization consumes modeled wrapper
+# options and their operands before this rule is evaluated.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{1,2}&?[^\s;&|]*|[({!])\s*)*(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)'
+action = "block"
+reason = "staged fetch-then-run (download then execute) - shell interpreter at the next command position"
+
+# the dropper prelude the old rule only caught by accident, through the same
+# `.sh` extension match removed above: `curl -o x.sh URL && chmod +x x.sh && ./x.sh`.
+[[deny.commands]]
+pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[\w.-]*/)*(?:sudo|doas)\s+)?chmod\s+(?:-\S+\s+)*(?:[augo]*\+[rwXst]*x|[0-7]*[1357])'
+action = "block"
+reason = "staged fetch then chmod +x (dropper prelude to direct execution)"
+
+[[deny.commands]]
+pattern = 'base64\s+-{1,2}d\w*\b.*\|\s*[a-z/]*sh\b'
+action = "block"
+reason = "base64-decode piped to shell"
+

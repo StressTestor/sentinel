@@ -36,6 +36,41 @@ versioning.
 - Weekly workflow (`.github/workflows/claude-code-version-watch.yml`) that
   compares the published `@anthropic-ai/claude-code` version with the verified
   one and opens or refreshes a tracking issue when it has moved.
+- **Rule ids and decision witnesses.** Every policy rule accepts an optional
+  `id`; a rule without one is addressed as `<section>:<8 hex of
+  sha256(pattern)>`. `PolicyDecision`, `sentinel check --json`, and each
+  `audit.jsonl` line now carry `rule_id` and a bounded `witness` (the
+  canonicalized path, the matched command fragment from whichever form
+  matched, or the tool name). Secret rules record the id only. Self-protect,
+  preflight, and failure-posture decisions use fixed `selfprotect:*`,
+  `preflight:*`, and `on_failure:*` ids. Old audit lines still parse; lines
+  with neither field are byte-identical to the previous format.
+- **`sentinel why [<tool_use_id>] [--json]`.** Explains the most recent block
+  or warn (or every line for one tool call) from the audit trail: rule id,
+  rule text and `policy.toml` line, witness, or the fixed layer that decided.
+  Read-only; it never replays or logs anything.
+- `sentinel policy-lint` rejects an explicit rule id outside
+  `[A-Za-z0-9._/:-]{1,128}` and any id used by two rules.
+
+### Fixed
+- **Self-protect no longer blocks a project-scoped settings file that never
+  carried the sentinel hook.** The hook-removal check is now per file: a
+  mutation is a removal only when the file it rewrites currently carries the
+  sentinel PreToolUse entry (for non-Claude agents, when it is that agent's
+  live hook config). Claude Code merges hooks across scopes, so a new
+  `.claude/settings.local.json` in a project cannot drop a user-level entry;
+  it stays at the policy's warn tier. Observed live as a block-tier false
+  positive on 2026-10-08.
+
+### Changed
+- The bundled policy rules moved out of one `format!` string in
+  `src/install/defaults.rs` into per-family TOML files under
+  `src/install/defaults/` (`01-credential-paths.toml` through
+  `20-secrets.toml`), loaded with `include_str!` and concatenated in a fixed
+  order. The generated `policy.toml` is unchanged: no rule, comment, or
+  whitespace differs, and `tests/fixtures/policy/default-{enforce,audit}.toml`
+  now pin the bundled policy byte for byte. A deliberate rule change must
+  update those fixtures in the same commit.
 
 ### Security
 - **Keep ANSI-C decoded text one shell word (found by the bash differential
@@ -51,6 +86,11 @@ versioning.
   brace provenance for braces that were unquoted in the original word, so
   `cat ~/.ss$'h'/{id_rsa,x}` reaches `~/.ssh/*`. Decoding is idempotent, which
   the fuzz target checks.
+- **`disableAllHooks` is treated as a hook removal.** A Claude settings write
+  from any scope whose resulting document sets `disableAllHooks: true` is
+  blocked whenever a live sentinel hook exists, because that key turns off
+  every hook at once. Previously only the user-level file's own hook entry
+  was inspected.
 - **Close the cd-relative path bypass (audit F-1).** A relative operand after a
   literal `cd` (`cd ~ && cat .ssh/id_rsa`) never reached a `~/.ssh/*` rule
   because candidates were only mined, never resolved against the directory the

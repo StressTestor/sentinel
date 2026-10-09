@@ -1,0 +1,35 @@
+[[deny.commands]]
+pattern = '`\s*(curl|wget|fetch)\b'
+action = "block"
+reason = "backtick substitution of a remote fetch"
+
+[[deny.commands]]
+pattern = 'curl\s+.*@~?/?\.?(ssh|aws|gnupg|netrc|config)'
+action = "block"
+reason = "curl exfiltration of credential file"
+
+[[deny.commands]]
+pattern = 'curl\s+.*@/etc/(passwd|shadow|master\.passwd)'
+action = "block"
+reason = "curl exfiltration of system file"
+
+[[deny.commands]]
+pattern = '(?i)\b(env|printenv|set|export|declare)\b\s*\|\s*grep\b.*(key|secret|token|pass|auth|aws|gcp|azure|cred|api|access|private)'
+action = "block"
+reason = "environment variable exfiltration"
+
+[[deny.commands]]
+pattern = '\b(env|printenv|set|export|declare)\b\s*\|\s*(curl|wget|nc|ncat|telnet|fetch)\b'
+action = "block"
+reason = "environment piped straight to the network (exfiltration)"
+
+[[deny.commands]]
+pattern = '\bfind\b\s+(/|~|\$HOME|\.)\S*.*-i?name\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|\.key|\.gpg|\.kdbx)'
+action = "block"
+reason = "filesystem scan for credential files"
+
+[[deny.commands]]
+pattern = '\b(locate|mdfind)\b.*(credentials|id_rsa|id_ed25519|id_ecdsa|authorized_keys|\.pem|secring|\.kdbx)'
+action = "block"
+reason = "credential filesystem scan via locate/mdfind"
+
