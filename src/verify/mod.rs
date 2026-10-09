@@ -616,6 +616,68 @@ mod tests {
         assert_eq!(result.decision().action, Action::Warn);
     }
 
+    /// Timing loop over the verify set, for the regex-cache follow-up (#10).
+    /// Not a gate: run on demand with
+    /// `cargo test --lib -- --ignored --nocapture timing_over_verify_cases`
+    /// and compare the per-call figures before and after a matcher change.
+    /// Use an optimized build (`--release`) for figures that mean anything;
+    /// `SENTINEL_TIMING_ROUNDS` sets the round count (default 3).
+    #[test]
+    #[ignore]
+    fn timing_over_verify_cases() {
+        use crate::evaluate::hook_schema::HookInput;
+        use std::time::Instant;
+
+        let rounds: usize = std::env::var("SENTINEL_TIMING_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3);
+        let engine = default_engine();
+        let inputs: Vec<String> = cases().into_iter().map(|c| c.input).collect();
+        let calls: Vec<_> = inputs
+            .iter()
+            .map(|raw| {
+                serde_json::from_str::<HookInput>(raw)
+                    .unwrap()
+                    .normalize()
+                    .unwrap()
+                    .to_tool_call()
+            })
+            .collect();
+
+        // policy only: PolicyEngine::evaluate on pre-normalized calls
+        let started = Instant::now();
+        let mut checksum = 0_usize;
+        for _ in 0..rounds {
+            for call in &calls {
+                checksum += (engine.evaluate(call).action == Action::Block) as usize;
+            }
+        }
+        let policy_only = started.elapsed();
+
+        // the whole hook pipeline, as the live hook and the fuzz target run it
+        let started = Instant::now();
+        for _ in 0..rounds {
+            for raw in &inputs {
+                checksum += (pipeline::evaluate_raw(&engine, raw).decision().action
+                    == Action::Block) as usize;
+            }
+        }
+        let full_pipeline = started.elapsed();
+
+        let per_call = |elapsed: std::time::Duration| {
+            elapsed.as_secs_f64() * 1e6 / (rounds * calls.len()) as f64
+        };
+        println!(
+            "timing: {} cases x {rounds} rounds; PolicyEngine::evaluate {:.1} us/call ({:.2?} total); evaluate_raw {:.1} us/call ({:.2?} total); checksum {checksum}",
+            calls.len(),
+            per_call(policy_only),
+            policy_only,
+            per_call(full_pipeline),
+            full_pipeline
+        );
+    }
+
     #[test]
     fn verify_detects_a_disarmed_policy() {
         // a policy with the rules stripped must FAIL verify - proves the gate bites

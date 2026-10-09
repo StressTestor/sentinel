@@ -90,6 +90,8 @@ audit evidence comes from the selected agent's structured output. these verdicts
 
 these are point-in-time checks. they prove that the current configuration and canary path work; they cannot prove continuous enforcement after the check. Codex trust remains a separate host decision, so approve the hook in `/hooks` and rerun strict doctor. deleting the hooked binary during an already-running agent session can still fail open.
 
+`sentinel install` for Claude Code also registers `sentinel session-check` as a SessionStart hook (matcher `startup|resume`) and pins the SHA-256 of the installed binary and of `~/.sentinel/policy.toml` in `~/.sentinel/install-state.json`. at every session start the check compares the live hook entry, the binary the entry points at, the policy, and (when the sandbox bridge is recorded) the sandbox projection with those pins. a SessionStart hook cannot block, so the check always exits 0: on a mismatch it prints one `sentinel: ...` line per finding to stdout, which Claude Code adds to the model's context, and the same line to stderr for you; on a clean check it prints nothing. `sentinel session-check --json` prints `{"ok", "findings", "pins"}` with the digests and never the payload. an install from before the pins existed reports as unpinned, not as a failure; `sentinel install` re-pins after an intentional policy edit or a binary upgrade, `policy-migrate --apply` re-pins the policy it rewrote, and `doctor` has a row for the hook and the pins. this is the same point-in-time evidence as doctor, taken at a moment the agent is guaranteed to be starting rather than when you remember to run it.
+
 ## sandbox bridge (opt-in)
 
 the hook sees the agent's tool calls. it does not see the `open()` a child process makes inside `npm install`, `python -c`, or a script the agent wrote a moment earlier. Claude Code's own sandbox (bubblewrap on Linux, Seatbelt on macOS) does see those, and it takes deny lists in the same `settings.json` the hook lives in. `sentinel install --sandbox` compiles the policy's directory-shaped `deny.paths` rules into those lists:
@@ -238,6 +240,7 @@ sentinel check '<json>'   dry-run a tool call against the policy and explain the
 sentinel why [<tool_use_id>]  explain a block or warn already in the audit trail: rule id, rule text, what matched
 sentinel verify           replay pinned attacks through the policy, assert each is caught
 sentinel doctor --agent <name> --strict  validate activation + probe hook liveness
+sentinel session-check [--json]  compare the hook entry, binary digest, policy digest, and sandbox projection with the install pins (SessionStart hook; context only, always exit 0)
 sentinel audit-mcp [--strict]  compare configured MCP servers with the accepted baseline
 sentinel audit-mcp --update  explicitly accept the current MCP set
 sentinel policy-migrate --check  report whether the policy needs migration

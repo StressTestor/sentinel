@@ -150,6 +150,121 @@ fn sandbox_lines(sandbox: &SandboxDoctor, lines: &mut Vec<(Level, String)>) {
     }
 }
 
+/// the SessionStart integrity check as doctor sees it (Claude Code only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCheckDoctor {
+    /// the host has no SessionStart hook (Codex): no line
+    NotApplicable,
+    /// the settings or the state file could not be read
+    Unreadable(String),
+    Inspected {
+        /// a sentinel-owned `session-check` entry under hooks.SessionStart
+        hook_registered: bool,
+        binary_pinned: bool,
+        policy_pinned: bool,
+    },
+}
+
+impl SessionCheckDoctor {
+    fn to_json(&self) -> Value {
+        match self {
+            SessionCheckDoctor::NotApplicable => Value::Null,
+            SessionCheckDoctor::Unreadable(error) => serde_json::json!({"error": error}),
+            SessionCheckDoctor::Inspected {
+                hook_registered,
+                binary_pinned,
+                policy_pinned,
+            } => serde_json::json!({
+                "hook_registered": hook_registered,
+                "binary_pinned": binary_pinned,
+                "policy_pinned": policy_pinned,
+            }),
+        }
+    }
+}
+
+/// Doctor line for the SessionStart integrity check. A missing entry or a
+/// missing pin is a warning, not a failure: the check is context only, and an
+/// install from before it existed must keep passing `--strict`.
+fn session_check_lines(session_check: &SessionCheckDoctor, lines: &mut Vec<(Level, String)>) {
+    match session_check {
+        SessionCheckDoctor::NotApplicable => {}
+        SessionCheckDoctor::Unreadable(error) => lines.push((
+            Level::Warn,
+            format!("session-check: cannot inspect the SessionStart hook or its pins - {error}"),
+        )),
+        SessionCheckDoctor::Inspected {
+            hook_registered,
+            binary_pinned,
+            policy_pinned,
+        } => {
+            let pins = match (binary_pinned, policy_pinned) {
+                (true, true) => None,
+                (false, false) => Some("no binary or policy digest is pinned"),
+                (false, true) => Some("no binary digest is pinned"),
+                (true, false) => Some("no policy digest is pinned"),
+            };
+            match (hook_registered, pins) {
+                (true, None) => lines.push((
+                    Level::Ok,
+                    "session-check: SessionStart hook registered; binary and policy digests pinned in ~/.sentinel/install-state.json".into(),
+                )),
+                (true, Some(pins)) => lines.push((
+                    Level::Warn,
+                    format!("session-check: SessionStart hook registered but {pins} (re-run `sentinel install` to pin the current binary and policy)"),
+                )),
+                (false, None) => lines.push((
+                    Level::Warn,
+                    "session-check: digests are pinned but no SessionStart hook runs the check (re-run `sentinel install`)".into(),
+                )),
+                (false, Some(pins)) => lines.push((
+                    Level::Warn,
+                    format!("session-check: no SessionStart hook registered and {pins} (re-run `sentinel install` to add the integrity check)"),
+                )),
+            }
+        }
+    }
+}
+
+/// Gather the SessionStart integrity check state for the doctor.
+fn gather_session_check(
+    target: AgentTarget,
+    settings_path: &std::path::Path,
+) -> SessionCheckDoctor {
+    if target != AgentTarget::ClaudeCode {
+        return SessionCheckDoctor::NotApplicable;
+    }
+    let settings = if settings_path.exists() {
+        match std::fs::read_to_string(settings_path)
+            .map_err(|error| error.to_string())
+            .and_then(|content| {
+                serde_json::from_str::<Value>(&content).map_err(|error| error.to_string())
+            }) {
+            Ok(settings) => settings,
+            Err(error) => return SessionCheckDoctor::Unreadable(error),
+        }
+    } else {
+        serde_json::json!({})
+    };
+    let hook_registered = match install::hooks::session_check_commands(&settings) {
+        Ok(commands) => !commands.is_empty(),
+        Err(error) => return SessionCheckDoctor::Unreadable(error.to_string()),
+    };
+    let state = match install::state::install_state_path()
+        .map_err(|error| error.to_string())
+        .and_then(|path| {
+            install::state::load_install_state(&path).map_err(|error| error.to_string())
+        }) {
+        Ok(state) => state,
+        Err(error) => return SessionCheckDoctor::Unreadable(error),
+    };
+    SessionCheckDoctor::Inspected {
+        hook_registered,
+        binary_pinned: state.binary_sha256.is_some(),
+        policy_pinned: state.policy_sha256.is_some(),
+    }
+}
+
 /// Gather the bridge state for the doctor. Any I/O problem with a recorded
 /// bridge is reported, never silently read as "not installed".
 fn gather_sandbox(
@@ -312,6 +427,7 @@ pub fn build_report(
         canary,
         block_count_7d,
         &SandboxDoctor::NotInstalled,
+        &SessionCheckDoctor::NotApplicable,
     )
 }
 
@@ -321,6 +437,7 @@ pub fn build_report_for_host(
     canary: CanaryRaw,
     block_count_7d: usize,
     sandbox: &SandboxDoctor,
+    session_check: &SessionCheckDoctor,
 ) -> DoctorReport {
     let mut lines: Vec<(Level, String)> = Vec::new();
 
@@ -421,6 +538,9 @@ pub fn build_report_for_host(
 
     // sandbox bridge (Claude Code only, opt-in)
     sandbox_lines(sandbox, &mut lines);
+
+    // SessionStart integrity check (Claude Code only, context only)
+    session_check_lines(session_check, &mut lines);
 
     // audit trail (count is already restricted to the current mode by the caller)
     let verb = if is_audit { "would-block" } else { "blocked" };
@@ -668,7 +788,15 @@ pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let sandbox = gather_sandbox(target, &state.config_path, &engine);
-    let report = build_report_for_host(&hook, policy, canary, block_count_7d, &sandbox);
+    let session_check = gather_session_check(target, &state.config_path);
+    let report = build_report_for_host(
+        &hook,
+        policy,
+        canary,
+        block_count_7d,
+        &sandbox,
+        &session_check,
+    );
 
     if args.json {
         let arr: Vec<Value> = report
@@ -686,6 +814,7 @@ pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
                 "checks": arr,
                 "trust_ramp": report.trust_ramp,
                 "sandbox": sandbox.to_json(),
+                "session_check": session_check.to_json(),
             }))?
         );
     } else {
@@ -973,7 +1102,86 @@ mod tests {
             CanaryRaw::Denied,
             0,
             &sandbox,
+            &SessionCheckDoctor::NotApplicable,
         )
+    }
+
+    fn session_check_report(session_check: SessionCheckDoctor) -> DoctorReport {
+        let hook = HostHook {
+            config_label: "~/.claude/settings.json".into(),
+            config_exists: true,
+            ownership: HookOwnership::Direct,
+            command: Some("/usr/local/bin/sentinel evaluate".into()),
+            activation: Activation::Active,
+        };
+        build_report_for_host(
+            &hook,
+            Ok(PolicyInfo {
+                mode: "enforce".into(),
+                self_protect: true,
+            }),
+            CanaryRaw::Denied,
+            0,
+            &SandboxDoctor::NotInstalled,
+            &session_check,
+        )
+    }
+
+    #[test]
+    fn session_check_row_is_ok_when_wired_and_a_warning_otherwise() {
+        let wired = session_check_report(SessionCheckDoctor::Inspected {
+            hook_registered: true,
+            binary_pinned: true,
+            policy_pinned: true,
+        });
+        assert!(wired.healthy);
+        assert!(wired.lines.iter().any(|(level, line)| {
+            *level == Level::Ok && line.starts_with("session-check: SessionStart hook registered")
+        }));
+
+        // an install from before the check: strict still passes, the row warns
+        let older = session_check_report(SessionCheckDoctor::Inspected {
+            hook_registered: false,
+            binary_pinned: false,
+            policy_pinned: false,
+        });
+        assert!(older.healthy, "{:?}", older.lines);
+        assert!(older.lines.iter().any(|(level, line)| {
+            *level == Level::Warn && line.contains("no SessionStart hook registered")
+        }));
+
+        let half = session_check_report(SessionCheckDoctor::Inspected {
+            hook_registered: true,
+            binary_pinned: true,
+            policy_pinned: false,
+        });
+        assert!(half.healthy);
+        assert!(half.lines.iter().any(|(level, line)| {
+            *level == Level::Warn && line.contains("no policy digest is pinned")
+        }));
+
+        let unreadable = session_check_report(SessionCheckDoctor::Unreadable("bad json".into()));
+        assert!(unreadable.healthy);
+        assert!(unreadable
+            .lines
+            .iter()
+            .any(|(level, line)| *level == Level::Warn && line.contains("bad json")));
+
+        let codex = session_check_report(SessionCheckDoctor::NotApplicable);
+        assert!(!codex
+            .lines
+            .iter()
+            .any(|(_, line)| line.starts_with("session-check:")));
+        assert_eq!(SessionCheckDoctor::NotApplicable.to_json(), Value::Null);
+        assert_eq!(
+            SessionCheckDoctor::Inspected {
+                hook_registered: true,
+                binary_pinned: false,
+                policy_pinned: true
+            }
+            .to_json()["binary_pinned"],
+            false
+        );
     }
 
     fn pinned_inspection() -> SandboxInspection {

@@ -7,6 +7,25 @@ versioning.
 ## [Unreleased]
 
 ### Added
+- **SessionStart integrity check (E1).** `sentinel session-check` compares
+  the live install with the pins `sentinel install` now writes into
+  `~/.sentinel/install-state.json` (`binary_sha256`, `policy_sha256`): the
+  PreToolUse hook entry and its activation, the SHA-256 of the binary that
+  entry executes, the SHA-256 of `~/.sentinel/policy.toml`, and the sandbox
+  projection when a bridge is recorded (keys, `filesystem.disabled`, drift).
+  `sentinel install` for Claude Code registers it under `hooks.SessionStart`
+  (matcher `startup|resume`) through the same ownership reconciliation as the
+  PreToolUse entry; `uninstall` removes it and clears the pins;
+  `policy-migrate --apply` re-pins the policy it rewrote. A SessionStart hook
+  cannot block, so the command always exits 0: one `sentinel: ...` line per
+  finding on stdout (added to the model's context) and on stderr, nothing on
+  a clean check, and `--json` prints `{"ok", "findings", "pins"}` with
+  digests and never the payload. Absent pins are reported as unpinned, not
+  failed, so existing installs keep working. `doctor` gains a
+  `session-check:` row (warn, never a `--strict` failure) and a
+  `session_check` object in `--json`. Self-protect does not treat the
+  SessionStart entry as the hook: removing only that entry stays at the
+  policy's warn tier.
 - **Sandbox bridge (opt-in, Claude Code only).** `sentinel install --sandbox`
   compiles the policy's directory-shaped `deny.paths` rules into Claude Code's
   `sandbox.filesystem.denyRead` / `denyWrite` lists and pins
@@ -128,6 +147,27 @@ versioning.
   positive on 2026-10-08.
 
 ### Changed
+- **Command and secret regexes compile once per engine, and a command is
+  normalized once per call (follow-up #10).** `PolicyEngine` compiled every
+  `deny.commands` and `deny.secrets` pattern with `Regex::new` on each
+  `evaluate`, and the command matcher recomputed the canonicalized, lexical,
+  and de-obfuscated forms of the command for every rule, rebuilding the
+  Python alias normalizer's fixed regexes each time. The rule patterns are
+  now compiled when the engine is built (`from_toml_str`, `from_config`,
+  `with_overlay`) into parallel `Vec<Option<Regex>>` tables; an invalid
+  pattern compiles to `None`, still never matches, and is warned about once
+  at load instead of on every call (`policy-lint` keeps reporting it). The
+  candidate forms are computed once per evaluate (`matcher::CommandForms`,
+  same forms, same order, same conditions) and every rule runs over them,
+  and the normalizer's fixed regexes are `OnceLock` statics. The matcher
+  gains `command_match_witness_compiled`, `command_match_witness_forms`,
+  and `matches_secret_normalized_compiled`; the string-taking functions
+  remain and delegate to them. No decision changes: the verify set, the
+  false-positive regression corpus, and the differential harness are
+  unchanged. An ignored `timing_over_verify_cases` test records the
+  before/after figures, which are in the pull request. A `match`-only rule
+  (empty `pattern`) has no regex entry and is decided by its `match` block
+  as before.
 - The bundled policy revision is `2026-10-09.1`. `policy-migrate` recognizes
   `2026-08-07.1` as a published generation and migrates it forward by adding
   the four `match` blocks; every older baseline is reconstructed without

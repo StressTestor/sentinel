@@ -910,30 +910,77 @@ pub fn command_match_witness(pattern: &str, command: &str) -> Option<String> {
             return None;
         }
     };
-    if let Some(found) = re.find(command) {
-        return Some(found.as_str().to_string());
-    }
-    let normalized = normalize_command(command);
-    if normalized != command {
-        if let Some(found) = re.find(&normalized) {
-            return Some(found.as_str().to_string());
+    command_match_witness_compiled(&re, command)
+}
+
+/// `command_match_witness` over an already compiled rule regex: the forms are
+/// computed for this one call. The engine uses [`CommandForms`] directly so
+/// the normalization runs once per command rather than once per rule.
+pub fn command_match_witness_compiled(re: &Regex, command: &str) -> Option<String> {
+    command_match_witness_forms(re, &CommandForms::new(command))
+}
+
+/// The candidate forms of one command that every `deny.commands` rule is
+/// tested against, in match order: the raw text, the canonicalized form when
+/// it differs, the lexical rm-operand form when it can differ from both, and
+/// the shell-de-obfuscated form when there is one. They depend only on the
+/// command, so the engine computes them once per evaluate and runs each
+/// compiled rule over the same forms; the order and the conditions are the
+/// ones `command_match_witness` has always used, so no decision moves.
+pub struct CommandForms {
+    raw: String,
+    normalized: Option<String>,
+    lexical: Option<String>,
+    decoded: Option<String>,
+}
+
+impl CommandForms {
+    pub fn new(command: &str) -> Self {
+        let normalized = normalize_command(command);
+        let normalized = (normalized != command).then_some(normalized);
+        // Filesystem and lexical resolution can intentionally diverge only
+        // for rm operands with dot components. Keep the lexical candidate
+        // additive without doubling normalization work for every ordinary
+        // command.
+        let lexical = if command.contains("rm") && command.contains("/.") {
+            let lexical = normalize_command_inner(command, false);
+            (lexical != command && normalized.as_deref() != Some(lexical.as_str()))
+                .then_some(lexical)
+        } else {
+            None
+        };
+        Self {
+            raw: command.to_string(),
+            normalized,
+            lexical,
+            decoded: crate::common::shell::decode_obfuscation(command),
         }
     }
-    // Filesystem and lexical resolution can intentionally diverge only
-    // for rm operands with dot components. Keep the lexical candidate
-    // additive without doubling normalization work for every ordinary
-    // command/rule pair.
-    if command.contains("rm") && command.contains("/.") {
-        let lexical = normalize_command_inner(command, false);
-        if lexical != command && lexical != normalized {
-            if let Some(found) = re.find(&lexical) {
-                return Some(found.as_str().to_string());
-            }
-        }
+
+    fn candidates(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.raw.as_str())
+            .chain(self.normalized.as_deref())
+            .chain(self.lexical.as_deref())
+            .chain(self.decoded.as_deref())
     }
-    crate::common::shell::decode_obfuscation(command)
-        .as_deref()
-        .and_then(|decoded| re.find(decoded).map(|found| found.as_str().to_string()))
+}
+
+/// `command_match_witness` over a compiled rule regex and precomputed forms:
+/// the text the rule matched in the first form that matches.
+pub fn command_match_witness_forms(re: &Regex, forms: &CommandForms) -> Option<String> {
+    forms
+        .candidates()
+        .find_map(|candidate| re.find(candidate).map(|found| found.as_str().to_string()))
+}
+
+/// A regex compiled on first use and shared by every later call. Each
+/// invocation site gets its own static, so the pattern must be fixed text
+/// (a literal, or a `format!` over consts).
+macro_rules! static_regex {
+    ($pattern:expr) => {{
+        static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        RE.get_or_init(|| Regex::new($pattern).expect("static regex"))
+    }};
 }
 
 /// Canonicalize runtime-equivalent command spellings for additive matching:
@@ -1550,8 +1597,7 @@ fn remote_url_basename(url: &str) -> Option<&str> {
 /// argument before its needles are searched.
 pub(crate) fn normalize_python_network_aliases(command: &str) -> String {
     let mut out = command.to_string();
-    let import_alias =
-        Regex::new(r"\bimport\s+socket\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let import_alias = static_regex!(r"\bimport\s+socket\s+as\s+([A-Za-z_]\w*)");
     let aliases: Vec<String> = import_alias
         .captures_iter(command)
         .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string()))
@@ -1581,12 +1627,10 @@ pub(crate) fn normalize_python_network_aliases(command: &str) -> String {
             .into_owned();
     }
 
-    let dynamic_import =
-        Regex::new(r#"__import__\s*\(\s*['"]socket['"]\s*\)"#).expect("static regex");
+    let dynamic_import = static_regex!(r#"__import__\s*\(\s*['"]socket['"]\s*\)"#);
     out = dynamic_import.replace_all(&out, "socket").into_owned();
 
-    let requests_alias =
-        Regex::new(r"\bimport\s+requests\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let requests_alias = static_regex!(r"\bimport\s+requests\s+as\s+([A-Za-z_]\w*)");
     let aliases: Vec<String> = requests_alias
         .captures_iter(command)
         .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string()))
@@ -1605,8 +1649,7 @@ pub(crate) fn normalize_python_network_aliases(command: &str) -> String {
         .expect("escaped alias regex");
         out = getattr.replace_all(&out, "requests.$1(").into_owned();
     }
-    let dynamic_import =
-        Regex::new(r#"__import__\s*\(\s*['"]requests['"]\s*\)"#).expect("static regex");
+    let dynamic_import = static_regex!(r#"__import__\s*\(\s*['"]requests['"]\s*\)"#);
     out = dynamic_import.replace_all(&out, "requests").into_owned();
 
     for (primitive, callable) in python_from_imports(command, "requests") {
@@ -1620,11 +1663,22 @@ pub(crate) fn normalize_python_network_aliases(command: &str) -> String {
 }
 
 fn python_from_imports(command: &str, module: &str) -> Vec<(String, String)> {
-    let from_import = Regex::new(&format!(
-        r"\bfrom\s+{}\s+import\s+([^;\n]+)",
-        regex::escape(module)
-    ))
-    .expect("escaped module regex");
+    // the three modules the normalizers ask about compile once; any other
+    // module (none today) takes the dynamic path
+    let dynamic;
+    let from_import: &Regex = match module {
+        "socket" => static_regex!(r"\bfrom\s+socket\s+import\s+([^;\n]+)"),
+        "requests" => static_regex!(r"\bfrom\s+requests\s+import\s+([^;\n]+)"),
+        "subprocess" => static_regex!(r"\bfrom\s+subprocess\s+import\s+([^;\n]+)"),
+        _ => {
+            dynamic = Regex::new(&format!(
+                r"\bfrom\s+{}\s+import\s+([^;\n]+)",
+                regex::escape(module)
+            ))
+            .expect("escaped module regex");
+            &dynamic
+        }
+    };
     from_import
         .captures_iter(command)
         .filter_map(|capture| capture.get(1))
@@ -1654,14 +1708,12 @@ fn python_from_imports(command: &str, module: &str) -> Vec<(String, String)> {
 
 fn normalize_python_subprocess_aliases(command: &str) -> String {
     const CALLS: &str = "run|Popen|call|check_call|check_output";
-    let dynamic_import =
-        Regex::new(r#"__import__\s*\(\s*['"]subprocess['"]\s*\)"#).expect("static regex");
+    let dynamic_import = static_regex!(r#"__import__\s*\(\s*['"]subprocess['"]\s*\)"#);
     let mut out = dynamic_import
         .replace_all(command, "subprocess")
         .into_owned();
 
-    let import_alias =
-        Regex::new(r"\bimport\s+subprocess\s+as\s+([A-Za-z_]\w*)").expect("static regex");
+    let import_alias = static_regex!(r"\bimport\s+subprocess\s+as\s+([A-Za-z_]\w*)");
     let mut aliases = vec!["subprocess".to_string()];
     aliases.extend(
         import_alias
@@ -1669,14 +1721,27 @@ fn normalize_python_subprocess_aliases(command: &str) -> String {
             .filter_map(|capture| capture.get(1).map(|alias| alias.as_str().to_string())),
     );
     for alias in aliases {
-        let escaped = regex::escape(&alias);
-        let direct =
-            Regex::new(&format!(r"\b{escaped}\s*\.\s*({CALLS})\b")).expect("escaped alias regex");
+        // the literal `subprocess` alias runs on every command: its two
+        // regexes compile once; a declared alias takes the dynamic path
+        let (dynamic_direct, dynamic_getattr);
+        let (direct, getattr): (&Regex, &Regex) = if alias == "subprocess" {
+            (
+                static_regex!(&format!(r"\bsubprocess\s*\.\s*({CALLS})\b")),
+                static_regex!(&format!(
+                    r#"getattr\s*\(\s*subprocess\s*,\s*['"]({CALLS})['"]\s*\)"#
+                )),
+            )
+        } else {
+            let escaped = regex::escape(&alias);
+            dynamic_direct = Regex::new(&format!(r"\b{escaped}\s*\.\s*({CALLS})\b"))
+                .expect("escaped alias regex");
+            dynamic_getattr = Regex::new(&format!(
+                r#"getattr\s*\(\s*{escaped}\s*,\s*['"]({CALLS})['"]\s*\)"#
+            ))
+            .expect("escaped alias regex");
+            (&dynamic_direct, &dynamic_getattr)
+        };
         out = direct.replace_all(&out, "subprocess.$1").into_owned();
-        let getattr = Regex::new(&format!(
-            r#"getattr\s*\(\s*{escaped}\s*,\s*['"]({CALLS})['"]\s*\)"#
-        ))
-        .expect("escaped alias regex");
         out = getattr.replace_all(&out, "subprocess.$1").into_owned();
     }
 
@@ -1689,8 +1754,7 @@ fn normalize_python_subprocess_aliases(command: &str) -> String {
             )
         })
         .collect();
-    let assigned = Regex::new(&format!(r"\b([A-Za-z_]\w*)\s*=\s*subprocess\.({CALLS})\b"))
-        .expect("static callable regex");
+    let assigned = static_regex!(&format!(r"\b([A-Za-z_]\w*)\s*=\s*subprocess\.({CALLS})\b"));
     let assignment_source = out.clone();
     callable_aliases.extend(
         assigned
@@ -1741,10 +1805,7 @@ fn normalize_python_subprocess_aliases(command: &str) -> String {
             .into_owned();
     }
 
-    if Regex::new(r"\bfrom\s+subprocess\s+import\s+\*")
-        .expect("static regex")
-        .is_match(command)
-    {
+    if static_regex!(r"\bfrom\s+subprocess\s+import\s+\*").is_match(command) {
         out.push_str(" subprocess.run(dynamic_argv)");
     }
     out
@@ -1762,8 +1823,7 @@ fn is_python_identifier(value: &str) -> bool {
 /// If argv[0] is assembled at runtime, synthesize a shell-argv witness so the
 /// existing subprocess deny rule retains the broad rule's fail-closed behavior.
 fn normalize_dynamic_subprocess_argv(command: &str) -> String {
-    let call = Regex::new(r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(")
-        .expect("static regex");
+    let call = static_regex!(r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(");
     let dynamic = call.find_iter(command).any(|matched| {
         let Some(arguments) = python_call_arguments(&command[matched.end()..]) else {
             return true;
@@ -1808,7 +1868,7 @@ fn python_call_arguments(after_open: &str) -> Option<&str> {
 }
 
 fn has_dynamic_executable(arguments: &str) -> bool {
-    let executable = Regex::new(r"\bexecutable\s*=\s*").expect("static regex");
+    let executable = static_regex!(r"\bexecutable\s*=\s*");
     let dynamic = executable.find_iter(arguments).any(|matched| {
         let value = arguments[matched.end()..].trim_start();
         if let Some(rest) = value.strip_prefix("None") {
@@ -1873,17 +1933,21 @@ fn quoted_literal_end(value: &str) -> Option<usize> {
 /// per-payload, not per-rule. For one-off checks use `matches_secret`.
 pub fn matches_secret_normalized(pattern: &str, raw: &str, normalized: &str) -> bool {
     match Regex::new(pattern) {
-        Ok(re) => {
-            if re.is_match(raw) {
-                return true;
-            }
-            normalized != raw && re.is_match(normalized)
-        }
+        Ok(re) => matches_secret_normalized_compiled(&re, raw, normalized),
         Err(_) => {
             tracing::warn!("invalid secret pattern: {pattern}");
             false
         }
     }
+}
+
+/// `matches_secret_normalized` over an already compiled rule regex (the
+/// engine's hot path; see `command_match_witness_compiled`).
+pub fn matches_secret_normalized_compiled(re: &Regex, raw: &str, normalized: &str) -> bool {
+    if re.is_match(raw) {
+        return true;
+    }
+    normalized != raw && re.is_match(normalized)
 }
 
 /// convert a glob pattern to an anchored regex string.

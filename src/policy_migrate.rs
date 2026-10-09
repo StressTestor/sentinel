@@ -519,8 +519,8 @@ pub fn apply_path(path: &Path) -> Result<Option<AppliedMigration>, MigrationErro
 }
 
 pub fn run(args: PolicyMigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let path = match args.policy {
-        Some(path) => path,
+    let path = match &args.policy {
+        Some(path) => path.clone(),
         None => resolve_policy_path()?,
     };
     if args.check {
@@ -569,6 +569,25 @@ pub fn run(args: PolicyMigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
                 println!("backup: {}", applied.backup_path.display());
                 for change in &applied.changes {
                     println!("  - {change}");
+                }
+                // the installed policy was just rewritten by sentinel, so the
+                // session-check pin follows it; an explicit --policy file is
+                // not the installed one and is left unpinned
+                if args.policy.is_none() {
+                    match crate::install::state::install_state_path()
+                        .map_err(|error| error.to_string())
+                        .and_then(|state_path| {
+                            crate::install::state::refresh_policy_pin(&state_path, &path)
+                                .map_err(|error| error.to_string())
+                        }) {
+                        Ok(true) => println!(
+                            "re-pinned the policy digest for `sentinel session-check`"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => eprintln!(
+                            "warning: migrated, but the policy digest could not be re-pinned ({error}); `sentinel session-check` will report the policy until `sentinel install` runs again"
+                        ),
+                    }
                 }
             }
         }

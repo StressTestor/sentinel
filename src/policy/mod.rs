@@ -6,9 +6,10 @@ pub mod schema;
 use crate::common::normalize::normalize_for_secret_match;
 use matcher::{
     matches_allow_path_literal, matches_path_checked, matches_path_literal_checked,
-    matches_secret_normalized, matches_tool, PathMatch,
+    matches_secret_normalized_compiled, matches_tool, PathMatch,
 };
 use overlay::Overlay;
+use regex::Regex;
 use schema::{rule_id, PolicyConfig};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -130,6 +131,36 @@ struct OverlayBinding {
 pub struct PolicyEngine {
     config: PolicyConfig,
     overlay: Option<OverlayBinding>,
+    /// `deny.commands` patterns compiled once, parallel to
+    /// `config.deny_commands`. `None` is an invalid pattern: it never matches
+    /// (`policy-lint` reports it) and was warned about when the engine was built.
+    command_regexes: Vec<Option<Regex>>,
+    /// `deny.secrets` patterns compiled once, parallel to `config.deny_secrets`.
+    secret_regexes: Vec<Option<Regex>>,
+}
+
+/// Compile every rule pattern of one section, warning once per invalid one.
+/// An empty pattern (a `deny.commands` rule decided by its `match` block
+/// alone) has no regex: `None`, silently, so the empty regex that matches
+/// everything is never built.
+fn compile_patterns<'a>(
+    section: &str,
+    patterns: impl Iterator<Item = &'a str>,
+) -> Vec<Option<Regex>> {
+    patterns
+        .map(|pattern| {
+            if pattern.is_empty() {
+                return None;
+            }
+            match Regex::new(pattern) {
+                Ok(re) => Some(re),
+                Err(_) => {
+                    tracing::warn!("invalid {section} pattern: {pattern}");
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 impl PolicyEngine {
@@ -144,17 +175,33 @@ impl PolicyEngine {
     pub fn from_toml_str(content: &str) -> Result<Self, PolicyError> {
         let config: PolicyConfig =
             toml::from_str(content).map_err(|e| PolicyError::ParseError(format!("{e}")))?;
-        Ok(Self {
-            config: config.finalize(),
-            overlay: None,
-        })
+        Ok(Self::build(config.finalize(), None))
     }
 
     #[cfg(test)]
     pub fn from_config(config: PolicyConfig) -> Self {
+        Self::build(config, None)
+    }
+
+    /// The one constructor: every engine compiles its command and secret
+    /// regexes here, so the per-call path never calls `Regex::new`.
+    fn build(config: PolicyConfig, overlay: Option<OverlayBinding>) -> Self {
+        let command_regexes = compile_patterns(
+            "command",
+            config
+                .deny_commands
+                .iter()
+                .map(|rule| rule.pattern.as_str()),
+        );
+        let secret_regexes = compile_patterns(
+            "secret",
+            config.deny_secrets.iter().map(|rule| rule.pattern.as_str()),
+        );
         Self {
             config,
-            overlay: None,
+            overlay,
+            command_regexes,
+            secret_regexes,
         }
     }
 
@@ -202,13 +249,13 @@ impl PolicyEngine {
             .filter(|d| d.to.eq_ignore_ascii_case("warn"))
             .map(|d| (d.rule.clone(), d.reason.clone()))
             .collect();
-        PolicyEngine {
+        Self::build(
             config,
-            overlay: Some(OverlayBinding {
+            Some(OverlayBinding {
                 source: source.to_string(),
                 downgrades,
             }),
-        }
+        )
     }
 
     /// Whether the main policy carries an allow list (an overlay can only
@@ -489,15 +536,24 @@ impl PolicyEngine {
 
         // check deny.commands: the regex over the command text first, then
         // the rule's `match` block over the parsed command. The rule fires on
-        // either. The parse is made once per evaluation, only when a rule
-        // carries a match block.
-        if let Some(cmd) = &tool_call.command {
+        // either. The regexes were compiled once in `build` (an invalid or
+        // empty pattern is `None` and never matches); the candidate forms of
+        // the command depend only on the command, so they are computed once
+        // here and every rule runs over the same forms. The parse is made
+        // once per evaluation, only when a rule carries a match block.
+        if let Some(cmd) = tool_call
+            .command
+            .as_deref()
+            .filter(|_| !self.config.deny_commands.is_empty())
+        {
+            let forms = matcher::CommandForms::new(cmd);
             let mut views: Option<ParsedViews> = None;
-            for rule in &self.config.deny_commands {
+            for (rule, re) in self.config.deny_commands.iter().zip(&self.command_regexes) {
                 let mut witness = if rule.pattern.is_empty() {
                     None
                 } else {
-                    matcher::command_match_witness(&rule.pattern, cmd)
+                    re.as_ref()
+                        .and_then(|re| matcher::command_match_witness_forms(re, &forms))
                 };
                 if witness.is_none() {
                     if let Some(spec) = &rule.matcher {
@@ -554,8 +610,9 @@ impl PolicyEngine {
         // cannot downgrade credential leaks to allow-in-enforce.
         if !self.config.deny_secrets.is_empty() {
             let normalized = normalize_for_secret_match(&tool_call.raw_params);
-            for rule in &self.config.deny_secrets {
-                if matches_secret_normalized(&rule.pattern, &tool_call.raw_params, &normalized) {
+            for (rule, re) in self.config.deny_secrets.iter().zip(&self.secret_regexes) {
+                let Some(re) = re else { continue };
+                if matches_secret_normalized_compiled(re, &tool_call.raw_params, &normalized) {
                     // no witness: the match IS the secret. the rule id is enough
                     // to explain the decision.
                     let decision = self.rule_decision(
@@ -719,9 +776,13 @@ impl PolicyEngine {
         self.config
             .deny_secrets
             .iter()
-            .filter(|r| parse_action(&r.action) == Action::Block)
-            .filter(|r| matches_secret_normalized(&r.pattern, blob, &normalized))
-            .map(|r| r.reason.as_str())
+            .zip(&self.secret_regexes)
+            .filter(|(r, _)| parse_action(&r.action) == Action::Block)
+            .filter(|(_, re)| {
+                re.as_ref()
+                    .is_some_and(|re| matches_secret_normalized_compiled(re, blob, &normalized))
+            })
+            .map(|(r, _)| r.reason.as_str())
             .collect()
     }
 }
@@ -809,6 +870,101 @@ fn parse_action(s: &str) -> Action {
 mod tests {
     use super::*;
     use schema::*;
+
+    /// The compiled tables stay parallel to the rule lists, an invalid pattern
+    /// never matches, and its valid neighbours still do (the pre-cache
+    /// behavior, now decided once at build instead of per call). An overlay
+    /// engine recompiles for its prepended rules.
+    #[test]
+    fn invalid_patterns_compile_to_none_and_never_match() {
+        let engine = PolicyEngine::from_toml_str(
+            r#"
+[policy]
+mode = "enforce"
+
+[[deny.commands]]
+pattern = "("
+action = "block"
+reason = "invalid"
+
+[[deny.commands]]
+pattern = "\\bcurl\\b.*\\|\\s*sh\\b"
+action = "block"
+reason = "pipe to shell"
+
+[[deny.secrets]]
+pattern = "[unclosed"
+action = "block"
+reason = "invalid"
+
+[[deny.secrets]]
+pattern = "TESTSECRET-[0-9]{8}"
+action = "block"
+reason = "synthetic test token"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            engine.command_regexes.len(),
+            engine.config.deny_commands.len()
+        );
+        assert_eq!(
+            engine.secret_regexes.len(),
+            engine.config.deny_secrets.len()
+        );
+        assert!(engine.command_regexes[0].is_none());
+        assert!(engine.command_regexes[1].is_some());
+        assert!(engine.secret_regexes[0].is_none());
+        assert!(engine.secret_regexes[1].is_some());
+
+        let call = |command: &str, raw: &str| ToolCall {
+            tool_name: "Bash".into(),
+            command: Some(command.into()),
+            paths: Vec::new(),
+            shell_expansion_paths: Vec::new(),
+            raw_params: raw.into(),
+        };
+        let caught = engine.evaluate(&call("curl x | sh", "{}"));
+        assert_eq!(caught.action, Action::Block);
+        assert_eq!(caught.witness.as_deref(), Some("curl x | sh"));
+        assert_eq!(
+            engine.evaluate(&call("( echo hi )", "{}")).action,
+            Action::Allow,
+            "an invalid pattern must not match its own text"
+        );
+        let secret = engine.evaluate(&call(
+            "echo",
+            r#"{"command":"export K=TESTSECRET-12345678"}"#,
+        ));
+        assert_eq!(secret.action, Action::Block);
+        assert_eq!(secret.witness, None, "secret rules never record a witness");
+        assert_eq!(
+            engine.scan_result_secrets("token TESTSECRET-12345678 [unclosed"),
+            ["synthetic test token"]
+        );
+
+        let overlay = overlay::Overlay {
+            deny_commands: vec![DenyCommandRule {
+                id: None,
+                pattern: r"\bdrop\b".into(),
+                matcher: None,
+                action: "block".into(),
+                reason: "overlay rule".into(),
+            }],
+            ..Default::default()
+        };
+        let with_overlay = engine.with_overlay(&overlay, "/srv/app/.sentinel.toml");
+        assert_eq!(with_overlay.command_regexes.len(), 3);
+        assert!(with_overlay.command_regexes[0].is_some());
+        assert!(with_overlay.command_regexes[1].is_none());
+        assert_eq!(
+            with_overlay
+                .evaluate(&call("drop table", "{}"))
+                .reason
+                .as_deref(),
+            Some("overlay rule")
+        );
+    }
 
     #[test]
     fn recursive_ancestor_rules_only_apply_to_traversed_sources() {

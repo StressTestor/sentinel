@@ -97,14 +97,32 @@ fn sync_parent_dir(parent: &Path) {
 fn sync_parent_dir(_parent: &Path) {}
 
 /// the hook events sentinel owns, for uninstall cleanup.
-const SENTINEL_HOOK_EVENTS: &[&str] = &["PreToolUse", "PostToolUse"];
+const SENTINEL_HOOK_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "SessionStart"];
+
+/// the SessionStart sources the integrity check runs on. `clear` and
+/// `compact` keep the same process and the same settings, so the check at
+/// `startup` and `resume` already covers them.
+const SESSION_CHECK_MATCHER: &str = "startup|resume";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookCommandKind {
     DirectPre,
     DirectPost,
+    /// `sentinel session-check [--agent <name>]`, the SessionStart integrity
+    /// check. Context only: it is not the hook that enforces anything, so
+    /// self-protect never counts it as the live PreToolUse entry.
+    DirectSessionCheck,
     GhostBridge,
     Other,
+}
+
+/// which sentinel-owned command kind lives under a hook event
+fn owned_kind_for_event(event: &str) -> HookCommandKind {
+    match event {
+        "PostToolUse" => HookCommandKind::DirectPost,
+        "SessionStart" => HookCommandKind::DirectSessionCheck,
+        _ => HookCommandKind::DirectPre,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +164,16 @@ pub fn classify_hook_command(command: &str) -> HookCommandKind {
             [_, post_evaluate] if post_evaluate == "post-evaluate"
         ) {
             return HookCommandKind::DirectPost;
+        }
+        if matches!(
+            argv.as_slice(),
+            [_, session_check] if session_check == "session-check"
+        ) || matches!(
+            argv.as_slice(),
+            [_, session_check, agent_flag, _]
+                if session_check == "session-check" && agent_flag == "--agent"
+        ) {
+            return HookCommandKind::DirectSessionCheck;
         }
     }
     if argv.len() == 4
@@ -252,6 +280,24 @@ pub fn install_post_hook(settings_path: &Path, sentinel_binary: &Path) -> Result
     )
 }
 
+/// install the sentinel SessionStart integrity check (`sentinel session-check`)
+/// for Claude Code. Context only: SessionStart cannot block, so the entry
+/// reports drift between the live install and the pins written at install
+/// time into the model's context and to stderr. Registered by every Claude
+/// Code install; idempotent; removed by uninstall.
+pub fn install_session_check_hook(
+    settings_path: &Path,
+    sentinel_binary: &Path,
+) -> Result<(), InstallError> {
+    add_sentinel_hook_with_matcher(
+        settings_path,
+        sentinel_binary,
+        "SessionStart",
+        "session-check",
+        SESSION_CHECK_MATCHER,
+    )
+}
+
 pub fn install_codex_json_hook(
     hooks_path: &Path,
     sentinel_binary: &Path,
@@ -295,6 +341,16 @@ fn add_sentinel_hook(
     event: &str,
     subcommand: &str,
 ) -> Result<(), InstallError> {
+    add_sentinel_hook_with_matcher(settings_path, sentinel_binary, event, subcommand, ".*")
+}
+
+fn add_sentinel_hook_with_matcher(
+    settings_path: &Path,
+    sentinel_binary: &Path,
+    event: &str,
+    subcommand: &str,
+    matcher: &str,
+) -> Result<(), InstallError> {
     let mut settings = read_settings(settings_path)?;
 
     if settings.get("hooks").is_none() {
@@ -322,7 +378,7 @@ fn add_sentinel_hook(
         quote_shell_word(&sentinel_binary.to_string_lossy())
     );
     let entry = json!({
-        "matcher": ".*",
+        "matcher": matcher,
         "hooks": [{ "type": "command", "command": cmd }]
     });
 
@@ -353,8 +409,8 @@ pub fn uninstall_hook(settings_path: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-/// check if a hook entry belongs to sentinel (either the evaluate or the
-/// post-evaluate hook).
+/// check if a hook entry belongs to sentinel (the evaluate, post-evaluate, or
+/// session-check hook).
 fn entry_has_kind(entry: &Value, kind: HookCommandKind) -> bool {
     if let Some(hooks_arr) = entry.get("hooks").and_then(|h| h.as_array()) {
         for hook in hooks_arr {
@@ -372,6 +428,34 @@ fn entry_has_kind(entry: &Value, kind: HookCommandKind) -> bool {
 fn is_sentinel_hook(entry: &Value) -> bool {
     entry_has_kind(entry, HookCommandKind::DirectPre)
         || entry_has_kind(entry, HookCommandKind::DirectPost)
+        || entry_has_kind(entry, HookCommandKind::DirectSessionCheck)
+}
+
+/// The sentinel-owned `session-check` commands registered under
+/// `hooks.SessionStart` in a Claude settings document (normally one). Used by
+/// doctor to report whether the integrity check is wired up.
+pub fn session_check_commands(settings: &Value) -> Result<Vec<String>, InstallError> {
+    let entries = match settings.get("hooks") {
+        None => return Ok(Vec::new()),
+        Some(Value::Object(hooks)) => match hooks.get("SessionStart") {
+            None => return Ok(Vec::new()),
+            Some(Value::Array(entries)) => entries,
+            Some(_) => {
+                return Err(InstallError::ReadError(
+                    "hooks.SessionStart is not an array".into(),
+                ))
+            }
+        },
+        Some(_) => return Err(InstallError::ReadError("hooks is not an object".into())),
+    };
+    Ok(entries
+        .iter()
+        .filter_map(|entry| entry.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|handler| handler.get("command").and_then(Value::as_str))
+        .filter(|command| classify_hook_command(command) == HookCommandKind::DirectSessionCheck)
+        .map(str::to_string)
+        .collect())
 }
 
 fn event_has_ghost_bridge(entries: &[Value]) -> bool {
@@ -441,11 +525,7 @@ pub fn inspect_claude_pre_tool(settings: &Value) -> Result<HookInspection, Insta
 }
 
 fn remove_direct_handlers(entries: &mut Vec<Value>, event: &str) {
-    let owned_kind = if event == "PostToolUse" {
-        HookCommandKind::DirectPost
-    } else {
-        HookCommandKind::DirectPre
-    };
+    let owned_kind = owned_kind_for_event(event);
     for entry in entries.iter_mut() {
         if let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
             handlers.retain(|handler| {
@@ -590,11 +670,7 @@ fn remove_codex_direct_handlers(
     let groups = groups_item.as_array_of_tables_mut().ok_or_else(|| {
         InstallError::WriteError(format!("hooks.{event} is not an array of tables"))
     })?;
-    let owned_kind = if event == "PostToolUse" {
-        HookCommandKind::DirectPost
-    } else {
-        HookCommandKind::DirectPre
-    };
+    let owned_kind = owned_kind_for_event(event);
     for group in groups.iter_mut() {
         let Some(handlers_item) = group.get_mut("hooks") else {
             continue;
@@ -892,6 +968,91 @@ mod tests {
             "the sentinel post-evaluate hook must be removed"
         );
         assert!(!is_sentinel_hook(&post[0]), "prettier.sh must survive");
+    }
+
+    #[test]
+    fn session_check_hook_registers_under_sessionstart_and_is_idempotent() {
+        let existing = r#"{
+            "hooks": {
+                "SessionStart": [
+                    {"matcher": "startup", "hooks": [{"type": "command", "command": "echo welcome"}]}
+                ]
+            }
+        }"#;
+        let (_dir, path) = temp_settings(existing);
+        let bin = Path::new("/usr/local/bin/sentinel");
+        install_hook(&path, bin).unwrap();
+        install_session_check_hook(&path, bin).unwrap();
+        install_session_check_hook(&path, bin).unwrap();
+
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let start = s["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(
+            start.len(),
+            2,
+            "user entry kept, sentinel entry not duplicated"
+        );
+        assert_eq!(start[0]["hooks"][0]["command"], "echo welcome");
+        assert_eq!(start[1]["matcher"], SESSION_CHECK_MATCHER);
+        assert_eq!(
+            start[1]["hooks"][0]["command"],
+            "/usr/local/bin/sentinel session-check"
+        );
+        assert!(is_sentinel_hook(&start[1]));
+        assert_eq!(
+            session_check_commands(&s).unwrap(),
+            ["/usr/local/bin/sentinel session-check"]
+        );
+        // the PreToolUse inspection does not count the SessionStart entry
+        let inspection = inspect_claude_pre_tool(&s).unwrap();
+        assert_eq!(inspection.direct_count, 1);
+        assert_eq!(
+            inspection.command.as_deref(),
+            Some("/usr/local/bin/sentinel evaluate")
+        );
+
+        // a repointed install replaces the entry rather than adding one
+        install_session_check_hook(&path, Path::new("/new/sentinel")).unwrap();
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            session_check_commands(&s).unwrap(),
+            ["/new/sentinel session-check"]
+        );
+        assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
+
+        uninstall_hook(&path).unwrap();
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let start = s["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(start.len(), 1, "uninstall removes only the sentinel entry");
+        assert_eq!(start[0]["hooks"][0]["command"], "echo welcome");
+        assert!(session_check_commands(&s).unwrap().is_empty());
+        assert!(s["hooks"]["PreToolUse"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_check_commands_are_classified_by_argv() {
+        assert_eq!(
+            classify_hook_command("/usr/local/bin/sentinel session-check"),
+            HookCommandKind::DirectSessionCheck
+        );
+        assert_eq!(
+            classify_hook_command(
+                "'/Applications/Sentinel Tools/sentinel' session-check --agent claude-code"
+            ),
+            HookCommandKind::DirectSessionCheck
+        );
+        for other in [
+            "echo sentinel session-check",
+            "sentinel session-check --json",
+            "sentinel session-check ; true",
+            "/tmp/not-sentinel session-check",
+        ] {
+            assert_eq!(
+                classify_hook_command(other),
+                HookCommandKind::Other,
+                "{other}"
+            );
+        }
     }
 
     #[test]
