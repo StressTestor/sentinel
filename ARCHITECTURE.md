@@ -81,6 +81,8 @@ sentinel/
 │   │   └── mod.rs          sentinel verify: pinned attack regression set (CI gate)
 │   ├── doctor/
 │   │   └── mod.rs          sentinel doctor: install-chain validation + liveness probe
+│   ├── session_check/
+│   │   └── mod.rs          sentinel session-check: SessionStart integrity check against the install pins (context only, exit 0)
 │   ├── policy_diff/
 │   │   └── mod.rs          sentinel policy-diff: default rules missing from a policy (read-only)
 │   ├── lint/
@@ -92,7 +94,7 @@ sentinel/
 │   ├── install/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
 │   │   ├── activation.rs   Codex public hooks API activation/trust probe
-│   │   ├── state.rs        Claude/Codex installed and activated state; ~/.sentinel/install-state.json record of sentinel-written sandbox entries
+│   │   ├── state.rs        Claude/Codex installed and activated state; ~/.sentinel/install-state.json record of sentinel-written sandbox entries and the binary/policy digest pins
 │   │   ├── sandbox.rs      sandbox bridge: deny.paths -> sandbox.filesystem.denyRead/denyWrite projection, reconciliation, drift inspection
 │   │   ├── hooks.rs        direct/Ghost ownership reconciliation + atomic writes
 │   │   ├── defaults.rs     default policy.toml generator (header + family loader)
@@ -108,6 +110,7 @@ sentinel/
 │   ├── differential_shell.rs  bash word resolution vs sentinel resolution (ignored; nightly job)
 │   ├── hook_contract.rs    PreToolUse/PostToolUse wire contract + version-stamped Claude Code fixtures
 │   ├── home_config.rs      isolated HOME validation and relocated Claude lifecycle
+│   ├── session_check.rs    session-check through the real binary: pins, clean check, each mismatch, uninstall, doctor row
 │   ├── overlays.rs         project overlays end to end: accept, digest mismatch, agent-driven accept denied
 │   ├── sandbox_install.rs  sandbox bridge install/reinstall/uninstall, doctor drift, self-protect through the real binary
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
@@ -462,6 +465,25 @@ enforcement, and a hooked binary removed during an active agent session may
 still fail open. Codex trust is a host decision outside Sentinel; install tells
 the user to approve the hook in `/hooks` and rerun strict doctor.
 
+`session_check/mod.rs` moves one such check to a moment the host guarantees:
+`sentinel install` for Claude Code registers `sentinel session-check` under
+`hooks.SessionStart` (matcher `startup|resume`, reconciled and removed by the
+same ownership code as the PreToolUse entry) and pins the SHA-256 of the
+installed binary and of the policy in `~/.sentinel/install-state.json`
+(`binary_sha256`, `policy_sha256`; `policy-migrate --apply` re-pins the
+policy, uninstall clears both). at session start the check compares the live
+PreToolUse entry (`state::inspect_agent`), the digest of the file that entry
+executes, the policy digest, and the sandbox projection (`sandbox::bridge_status`,
+only when a bridge is recorded) with the pins. SessionStart cannot block, so
+the command always exits 0 and reports through stdout (which Claude Code adds
+to the model's context) and stderr, one `sentinel: ...` line per finding and
+nothing when clean; `--json` is the stable machine shape. the comparison
+(`compare`) is pure over an `Observed` struct so every finding is unit-tested
+without a host. absent pins are reported, never failed, so an older install
+keeps working. self-protect does not count the SessionStart entry as the hook:
+removing only that entry stays at the policy's warn tier, and keeping it does
+not stand in for a removed PreToolUse entry.
+
 ### sandbox bridge (opt-in, Claude Code only)
 
 `install/sandbox.rs` is a projection compiler from the policy's `deny.paths`
@@ -668,6 +690,7 @@ never silently flips them to enforce.
 | `sentinel why [<tool_use_id>] [--json]` | explain a decision already in the audit trail: rule id, rule text and policy line, bounded witness (read-only; never the payload) |
 | `sentinel verify [--policy <file>]` | replay the pinned 64/64 attack and benign cases; nonzero on a mismatch |
 | `sentinel doctor --agent <name> [--strict] [--json]` | inspect activation and policy, then probe the actual hook chain with a known-bad canary |
+| `sentinel session-check [--agent <name>] [--json]` | compare the live hook entry, the digest of the hooked binary, the policy digest, and the sandbox projection with the pins written at install; the SessionStart hook, context only, always exits 0 |
 | `sentinel audit-mcp [--strict]` | compare current MCP config with an explicitly accepted baseline |
 | `sentinel audit-mcp --update` | accept the complete current MCP set |
 | `sentinel policy-migrate --check` | report whether policy migration is needed without writing |

@@ -11,6 +11,13 @@ use std::path::{Path, PathBuf};
 /// only entries listed here, doctor diffs them, and self-protect reads it to
 /// know whether the sandbox bridge is installed at all.
 ///
+/// It also carries the pins `sentinel session-check` compares the live
+/// install against: the SHA-256 of the installed binary and of the policy as
+/// they were when `sentinel install` last ran (`policy-migrate --apply`
+/// re-pins the policy). A missing pin means "not pinned", which the check
+/// reports but never fails on, so an install that predates the pins keeps
+/// working.
+///
 /// Lives at `~/.sentinel/install-state.json`, 0600 on Unix, written atomically.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallState {
@@ -18,10 +25,85 @@ pub struct InstallState {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxRecord>,
+    /// SHA-256 (lowercase hex) of the sentinel binary `install` ran as
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_sha256: Option<String>,
+    /// SHA-256 (lowercase hex) of `~/.sentinel/policy.toml` after `install`
+    /// wrote or preserved it, or after `policy-migrate --apply` rewrote it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_sha256: Option<String>,
+}
+
+impl InstallState {
+    /// whether `install` has pinned both digests
+    pub fn pinned(&self) -> bool {
+        self.binary_sha256.is_some() && self.policy_sha256.is_some()
+    }
 }
 
 fn install_state_version() -> u32 {
     1
+}
+
+/// SHA-256 of a file's bytes, lowercase hex. The same digest `session-check`
+/// computes at session start, so a pin and a live value compare as strings.
+pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path)?;
+    Ok(crate::common::encode_hex(&Sha256::digest(bytes)))
+}
+
+/// `sentinel install`: pin the digests of the binary that is being installed
+/// and the policy that was just written or preserved. Keeps everything else
+/// in the state file (the sandbox record in particular).
+pub fn pin_digests(
+    state_path: &Path,
+    binary_path: &Path,
+    policy_path: &Path,
+) -> Result<InstallState, InstallError> {
+    let mut state = load_install_state(state_path)?;
+    state.binary_sha256 =
+        Some(sha256_file(binary_path).map_err(|error| {
+            InstallError::ReadError(format!("{}: {error}", binary_path.display()))
+        })?);
+    state.policy_sha256 =
+        Some(sha256_file(policy_path).map_err(|error| {
+            InstallError::ReadError(format!("{}: {error}", policy_path.display()))
+        })?);
+    save_install_state(state_path, &state)?;
+    Ok(state)
+}
+
+/// `policy-migrate --apply`: the policy was just rewritten by sentinel, so the
+/// pin follows it. Only an existing state file is touched: without one, no
+/// install ever pinned anything and there is nothing to refresh. Returns
+/// whether a pin was written.
+pub fn refresh_policy_pin(state_path: &Path, policy_path: &Path) -> Result<bool, InstallError> {
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    let mut state = load_install_state(state_path)?;
+    state.policy_sha256 =
+        Some(sha256_file(policy_path).map_err(|error| {
+            InstallError::ReadError(format!("{}: {error}", policy_path.display()))
+        })?);
+    save_install_state(state_path, &state)?;
+    Ok(true)
+}
+
+/// `sentinel uninstall`: the hook is gone, so the pins that described the
+/// install go with it. The sandbox record is handled by `sandbox::uninstall_bridge`.
+pub fn clear_pins(state_path: &Path) -> Result<(), InstallError> {
+    if !state_path.exists() {
+        return Ok(());
+    }
+    let mut state = load_install_state(state_path)?;
+    if state.binary_sha256.is_none() && state.policy_sha256.is_none() {
+        return Ok(());
+    }
+    state.binary_sha256 = None;
+    state.policy_sha256 = None;
+    save_install_state(state_path, &state)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +176,7 @@ pub fn load_install_state(path: &Path) -> Result<InstallState, InstallError> {
 pub fn save_install_state(path: &Path, state: &InstallState) -> Result<(), InstallError> {
     let content = serde_json::to_string_pretty(&InstallState {
         version: 1,
-        sandbox: state.sandbox.clone(),
+        ..state.clone()
     })
     .map_err(|error| InstallError::WriteError(error.to_string()))?;
     hooks::atomic_write(path, &content)
@@ -284,6 +366,73 @@ mod tests {
             direct_count,
             mediated_count,
         }
+    }
+
+    #[test]
+    fn pins_round_trip_and_an_older_state_file_reads_as_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("install-state.json");
+        let binary = dir.path().join("sentinel");
+        let policy = dir.path().join("policy.toml");
+        std::fs::write(&binary, b"binary bytes").unwrap();
+        std::fs::write(&policy, "[policy]\nmode = \"enforce\"\n").unwrap();
+
+        // a #92-era state file: sandbox record only, no pins
+        std::fs::write(
+            &state_path,
+            r#"{"version":1,"sandbox":{"settings_path":"/h/.claude/settings.json","deny_read":["~/.ssh"],"deny_write":[]}}"#,
+        )
+        .unwrap();
+        let old = load_install_state(&state_path).unwrap();
+        assert!(!old.pinned());
+        assert_eq!(old.binary_sha256, None);
+        assert!(old.sandbox.is_some());
+
+        let pinned = pin_digests(&state_path, &binary, &policy).unwrap();
+        assert!(pinned.pinned());
+        assert_eq!(
+            pinned.binary_sha256.as_deref(),
+            Some(sha256_file(&binary).unwrap().as_str())
+        );
+        assert_eq!(
+            pinned.policy_sha256.as_deref(),
+            Some(sha256_file(&policy).unwrap().as_str())
+        );
+        let reloaded = load_install_state(&state_path).unwrap();
+        assert_eq!(reloaded, pinned);
+        assert_eq!(
+            reloaded.sandbox.as_ref().unwrap().deny_read,
+            ["~/.ssh"],
+            "pinning keeps the sandbox record"
+        );
+        assert_eq!(reloaded.binary_sha256.as_ref().unwrap().len(), 64);
+
+        // the policy changes: refresh follows it and leaves the binary pin alone
+        std::fs::write(&policy, "[policy]\nmode = \"audit\"\n").unwrap();
+        assert!(refresh_policy_pin(&state_path, &policy).unwrap());
+        let refreshed = load_install_state(&state_path).unwrap();
+        assert_eq!(refreshed.binary_sha256, pinned.binary_sha256);
+        assert_ne!(refreshed.policy_sha256, pinned.policy_sha256);
+        assert_eq!(
+            refreshed.policy_sha256.as_deref(),
+            Some(sha256_file(&policy).unwrap().as_str())
+        );
+
+        clear_pins(&state_path).unwrap();
+        let cleared = load_install_state(&state_path).unwrap();
+        assert!(!cleared.pinned());
+        assert!(cleared.sandbox.is_some());
+        let raw = std::fs::read_to_string(&state_path).unwrap();
+        assert!(
+            !raw.contains("sha256"),
+            "absent pins are not serialized: {raw}"
+        );
+
+        // no state file: nothing to refresh, nothing created
+        let absent = dir.path().join("missing.json");
+        assert!(!refresh_policy_pin(&absent, &policy).unwrap());
+        clear_pins(&absent).unwrap();
+        assert!(!absent.exists());
     }
 
     #[test]

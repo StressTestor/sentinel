@@ -95,6 +95,10 @@ pub fn run_install(options: InstallOptions, agent: &str) -> Result<(), InstallEr
                 "configured PreToolUse protection in {}",
                 settings_path.display()
             );
+            hooks::install_session_check_hook(&settings_path, &sentinel_path)?;
+            println!(
+                "configured SessionStart integrity check (`sentinel session-check`; context only, never blocks)"
+            );
             if result_scan {
                 hooks::install_post_hook(&settings_path, &sentinel_path)?;
                 println!("configured PostToolUse result-scan hook (detection only)");
@@ -176,6 +180,18 @@ pub fn run_install(options: InstallOptions, agent: &str) -> Result<(), InstallEr
             );
         }
     }
+
+    // pin what was just installed: `sentinel session-check` compares the live
+    // binary and policy against these at every session start. Last, so the
+    // policy digest covers the file as it is on disk now (written or
+    // preserved) and the sandbox record written above is kept.
+    let state_path = state::install_state_path()?;
+    state::pin_digests(&state_path, &sentinel_path, &policy_path)?;
+    println!();
+    println!(
+        "pinned the binary and policy digests in {} for `sentinel session-check`",
+        state_path.display()
+    );
 
     println!();
     println!(
@@ -300,7 +316,7 @@ pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
             let settings_path = claude_settings_path()?;
             hooks::uninstall_hook(&settings_path)?;
             println!(
-                "removed direct Sentinel hooks from {}; mediated hooks owned by other tools were preserved",
+                "removed direct Sentinel hooks (PreToolUse, PostToolUse, SessionStart) from {}; mediated hooks owned by other tools were preserved",
                 settings_path.display()
             );
             let state_path = state::install_state_path()?;
@@ -324,6 +340,8 @@ pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
             );
         }
     }
+    // the pins described an install that no longer exists
+    state::clear_pins(&state::install_state_path()?)?;
     println!("policy file preserved at ~/.sentinel/policy.toml");
     Ok(())
 }

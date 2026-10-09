@@ -1291,6 +1291,56 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
         );
     }
 
+    /// the SessionStart integrity check (`sentinel session-check`) is context
+    /// only: dropping it is a warn like any other settings edit, and keeping
+    /// it does not stand in for the PreToolUse hook.
+    #[test]
+    fn session_check_entry_is_not_the_hook() {
+        let both = json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": ".*", "hooks": [
+                        {"type": "command", "command": "/usr/local/bin/sentinel evaluate"}
+                    ]}
+                ],
+                "SessionStart": [
+                    {"matcher": "startup|resume", "hooks": [
+                        {"type": "command", "command": "/usr/local/bin/sentinel session-check"}
+                    ]}
+                ]
+            }
+        });
+        assert!(settings_contains_sentinel_hook(&both));
+
+        // removing only the SessionStart entry keeps the guard: not escalated
+        let mut without_session_check = both.clone();
+        without_session_check["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("SessionStart");
+        let input = json!({"file_path": SETTINGS, "content": without_session_check.to_string()});
+        assert_eq!(
+            apply_normalized_with(warn_decision(), &normalized_input("Write", &input), |_| {
+                true
+            }),
+            warn_decision()
+        );
+
+        // removing the PreToolUse entry while keeping session-check is a removal
+        let mut only_session_check = both.clone();
+        only_session_check["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("PreToolUse");
+        assert!(!settings_contains_sentinel_hook(&only_session_check));
+        let input = json!({"file_path": SETTINGS, "content": only_session_check.to_string()});
+        let d = apply_normalized_with(warn_decision(), &normalized_input("Write", &input), |_| {
+            true
+        });
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.matched_rule.as_deref(), Some("selfprotect: hook-removal"));
+    }
+
     // (c) Write of malformed JSON → escalate (a broken settings.json drops all hooks)
     #[test]
     fn write_of_malformed_json_escalates() {

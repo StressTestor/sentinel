@@ -7,6 +7,25 @@ versioning.
 ## [Unreleased]
 
 ### Added
+- **SessionStart integrity check (E1).** `sentinel session-check` compares
+  the live install with the pins `sentinel install` now writes into
+  `~/.sentinel/install-state.json` (`binary_sha256`, `policy_sha256`): the
+  PreToolUse hook entry and its activation, the SHA-256 of the binary that
+  entry executes, the SHA-256 of `~/.sentinel/policy.toml`, and the sandbox
+  projection when a bridge is recorded (keys, `filesystem.disabled`, drift).
+  `sentinel install` for Claude Code registers it under `hooks.SessionStart`
+  (matcher `startup|resume`) through the same ownership reconciliation as the
+  PreToolUse entry; `uninstall` removes it and clears the pins;
+  `policy-migrate --apply` re-pins the policy it rewrote. A SessionStart hook
+  cannot block, so the command always exits 0: one `sentinel: ...` line per
+  finding on stdout (added to the model's context) and on stderr, nothing on
+  a clean check, and `--json` prints `{"ok", "findings", "pins"}` with
+  digests and never the payload. Absent pins are reported as unpinned, not
+  failed, so existing installs keep working. `doctor` gains a
+  `session-check:` row (warn, never a `--strict` failure) and a
+  `session_check` object in `--json`. Self-protect does not treat the
+  SessionStart entry as the hook: removing only that entry stays at the
+  policy's warn tier.
 - **Sandbox bridge (opt-in, Claude Code only).** `sentinel install --sandbox`
   compiles the policy's directory-shaped `deny.paths` rules into Claude Code's
   `sandbox.filesystem.denyRead` / `denyWrite` lists and pins

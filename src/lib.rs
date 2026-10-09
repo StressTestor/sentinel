@@ -23,5 +23,6 @@ pub mod policy_migrate;
 pub mod post_evaluate;
 pub mod preflight;
 pub mod selfprotect;
+pub mod session_check;
 pub mod verify;
 pub mod why;

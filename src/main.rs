@@ -2,7 +2,7 @@ use clap::Parser;
 use sentinel_guard::cli::{Cli, Command, PolicyAction};
 use sentinel_guard::{
     audit, audit_mcp, check, common, doctor, evaluate, install, lint, policy, policy_diff,
-    policy_migrate, post_evaluate, verify, why,
+    policy_migrate, post_evaluate, session_check, verify, why,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -38,6 +38,7 @@ async fn main() {
         Command::Why(args) => why::run(args),
         Command::Verify(args) => verify::run(args),
         Command::Doctor(args) => doctor::run(args),
+        Command::SessionCheck(args) => session_check::run(args),
         Command::PolicyDiff(args) => policy_diff::run(args),
         Command::PolicyLint(args) => lint::run(args),
         Command::PolicyMigrate(args) => policy_migrate::run(args),

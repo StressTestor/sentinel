@@ -42,6 +42,10 @@ pub enum Command {
     /// validate the full install chain (hook, binary, policy) and probe liveness
     Doctor(DoctorArgs),
 
+    /// compare the live install (hook entry, binary digest, policy digest, sandbox projection) with the pins written at install; SessionStart hook, context only, always exits 0
+    #[command(name = "session-check")]
+    SessionCheck(SessionCheckArgs),
+
     /// show which bundled-default rules are missing from your policy (read-only)
     #[command(name = "policy-diff")]
     PolicyDiff(PolicyDiffArgs),
@@ -170,6 +174,17 @@ pub struct DoctorArgs {
     pub strict: bool,
 
     /// emit a JSON report instead of human-readable output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SessionCheckArgs {
+    /// host agent whose install to compare with the pins
+    #[arg(long, default_value = "claude-code")]
+    pub agent: String,
+
+    /// print a stable JSON object ({"ok", "findings", "pins"}) instead of the one-line findings
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }
