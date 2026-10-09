@@ -1033,9 +1033,12 @@ reason = "ssh read"
             let d = closed.evaluate(&bash(command));
             assert_eq!(d.action, Action::Block, "{command}");
             assert_eq!(d.rule_id.as_deref(), Some("on_failure:closed"), "{command}");
+            // no custom message: a decision derived from an engine that holds
+            // deny.secrets trips CodeQL's cleartext-logging heuristic when it
+            // reaches a panic message
             let reason = d.reason.unwrap();
-            assert!(reason.contains("rule only"), "{reason}");
-            assert!(reason.contains("not modeled"), "{reason}");
+            assert!(reason.contains("rule only"));
+            assert!(reason.contains("not modeled"));
         }
         // open posture: an explicit allow that names the posture
         let open = match_engine(&MATCH_POLICY.replace("closed", "open"));
