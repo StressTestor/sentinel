@@ -17,10 +17,156 @@ use crate::cli::DoctorArgs;
 use crate::evaluate::resolve_policy_path;
 use crate::install::activation::Activation;
 use crate::install::hooks::{HookCommandKind, HookOwnership};
+use crate::install::sandbox::{self, SandboxInspection};
 use crate::install::{self, AgentTarget};
 use crate::policy::PolicyEngine;
 use serde_json::Value;
 use std::process::{Command, Stdio};
+
+/// the sandbox bridge as doctor sees it. Only Claude Code has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxDoctor {
+    /// the host has no sandbox bridge (Codex): no lines
+    NotApplicable,
+    /// nothing recorded in install-state.json: an informational line, never a failure
+    NotInstalled,
+    /// a record exists but the state file, policy, or settings could not be read
+    Unreadable(String),
+    /// the record, the live settings, and a fresh projection, compared
+    Installed(SandboxInspection),
+}
+
+impl SandboxDoctor {
+    fn to_json(&self) -> Value {
+        match self {
+            SandboxDoctor::NotApplicable => Value::Null,
+            SandboxDoctor::NotInstalled => serde_json::json!({"installed": false}),
+            SandboxDoctor::Unreadable(error) => {
+                serde_json::json!({"installed": true, "error": error})
+            }
+            SandboxDoctor::Installed(inspection) => inspection.to_json(),
+        }
+    }
+}
+
+/// Doctor lines for the sandbox bridge. Drift (a projected entry missing, or a
+/// sentinel-owned entry the current policy no longer projects) is an error, so
+/// `--strict` fails on it. User-added entries are reported, not failed: the
+/// bridge only ever owns what it wrote.
+fn sandbox_lines(sandbox: &SandboxDoctor, lines: &mut Vec<(Level, String)>) {
+    let inspection = match sandbox {
+        SandboxDoctor::NotApplicable => return,
+        SandboxDoctor::NotInstalled => {
+            lines.push((
+                Level::Ok,
+                "sandbox: bridge not installed (opt-in: `sentinel install --sandbox`)".into(),
+            ));
+            return;
+        }
+        SandboxDoctor::Unreadable(error) => {
+            lines.push((
+                Level::Err,
+                format!("sandbox: bridge is recorded as installed but cannot be checked - {error}"),
+            ));
+            return;
+        }
+        SandboxDoctor::Installed(inspection) => inspection,
+    };
+    let flag = |value: Option<bool>| match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unset",
+    };
+    let keys = format!(
+        "enabled={} failIfUnavailable={} allowUnsandboxedCommands={}",
+        flag(inspection.enabled),
+        flag(inspection.fail_if_unavailable),
+        flag(inspection.allow_unsandboxed_commands)
+    );
+    if inspection.keys_pinned() {
+        lines.push((Level::Ok, format!("sandbox: {keys}")));
+    } else {
+        lines.push((
+            Level::Err,
+            format!("sandbox: keys differ from what install pinned ({keys}); re-run `sentinel install --sandbox` or uninstall the bridge"),
+        ));
+    }
+    if inspection.filesystem_disabled {
+        lines.push((
+            Level::Err,
+            "sandbox: filesystem.disabled is true, so every denyRead/denyWrite entry is inert"
+                .into(),
+        ));
+    }
+    for (name, drift) in [
+        ("denyRead", &inspection.deny_read),
+        ("denyWrite", &inspection.deny_write),
+    ] {
+        let projected = drift.present + drift.missing.len();
+        if drift.missing.is_empty() {
+            lines.push((
+                Level::Ok,
+                format!("sandbox: {name} carries all {projected} projected entries"),
+            ));
+        } else {
+            lines.push((
+                Level::Err,
+                format!(
+                    "sandbox: drift in {name}, {} of {projected} projected entries missing: {} (re-run `sentinel install --sandbox`)",
+                    drift.missing.len(),
+                    drift.missing.join(", ")
+                ),
+            ));
+        }
+        if !drift.stale.is_empty() {
+            lines.push((
+                Level::Err,
+                format!(
+                    "sandbox: drift in {name}, {} sentinel-owned entries the current policy no longer projects: {} (re-run `sentinel install --sandbox`)",
+                    drift.stale.len(),
+                    drift.stale.join(", ")
+                ),
+            ));
+        }
+        if drift.user > 0 {
+            lines.push((
+                Level::Ok,
+                format!(
+                    "sandbox: {name} also carries {} user entries sentinel does not own",
+                    drift.user
+                ),
+            ));
+        }
+    }
+    if !inspection.excluded_commands.is_empty() {
+        lines.push((
+            Level::Warn,
+            format!(
+                "sandbox: excludedCommands lists {} entries that run with full access outside every deny entry: {}",
+                inspection.excluded_commands.len(),
+                inspection.excluded_commands.join(", ")
+            ),
+        ));
+    }
+}
+
+/// Gather the bridge state for the doctor. Any I/O problem with a recorded
+/// bridge is reported, never silently read as "not installed".
+fn gather_sandbox(
+    target: AgentTarget,
+    settings_path: &std::path::Path,
+    engine: &Result<PolicyEngine, crate::policy::PolicyError>,
+) -> SandboxDoctor {
+    if target != AgentTarget::ClaudeCode {
+        return SandboxDoctor::NotApplicable;
+    }
+    let policy = engine.as_ref().map_err(|error| error.to_string());
+    match sandbox::bridge_status(settings_path, policy) {
+        Ok(None) => SandboxDoctor::NotInstalled,
+        Ok(Some(bridge)) => SandboxDoctor::Installed(bridge.inspection),
+        Err(error) => SandboxDoctor::Unreadable(error),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -160,7 +306,13 @@ pub fn build_report(
             activation: Activation::Broken("settings absent".into()),
         },
     };
-    build_report_for_host(&hook, policy, canary, block_count_7d)
+    build_report_for_host(
+        &hook,
+        policy,
+        canary,
+        block_count_7d,
+        &SandboxDoctor::NotInstalled,
+    )
 }
 
 pub fn build_report_for_host(
@@ -168,6 +320,7 @@ pub fn build_report_for_host(
     policy: Result<PolicyInfo, String>,
     canary: CanaryRaw,
     block_count_7d: usize,
+    sandbox: &SandboxDoctor,
 ) -> DoctorReport {
     let mut lines: Vec<(Level, String)> = Vec::new();
 
@@ -265,6 +418,9 @@ pub fn build_report_for_host(
         };
     }
     lines.push(canary_line);
+
+    // sandbox bridge (Claude Code only, opt-in)
+    sandbox_lines(sandbox, &mut lines);
 
     // audit trail (count is already restricted to the current mode by the caller)
     let verb = if is_audit { "would-block" } else { "blocked" };
@@ -511,7 +667,8 @@ pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
         None => CanaryRaw::NoHook,
     };
 
-    let report = build_report_for_host(&hook, policy, canary, block_count_7d);
+    let sandbox = gather_sandbox(target, &state.config_path, &engine);
+    let report = build_report_for_host(&hook, policy, canary, block_count_7d, &sandbox);
 
     if args.json {
         let arr: Vec<Value> = report
@@ -528,6 +685,7 @@ pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
                 "activation": hook.activation.label(),
                 "checks": arr,
                 "trust_ramp": report.trust_ramp,
+                "sandbox": sandbox.to_json(),
             }))?
         );
     } else {
@@ -796,5 +954,116 @@ mod tests {
             1
         );
         assert_eq!(count_blocks_within_days(&events, now, 7, Some("audit")), 0);
+    }
+
+    fn sandbox_report(sandbox: SandboxDoctor) -> DoctorReport {
+        let hook = HostHook {
+            config_label: "~/.claude/settings.json".into(),
+            config_exists: true,
+            ownership: HookOwnership::Direct,
+            command: Some("/usr/local/bin/sentinel evaluate".into()),
+            activation: Activation::Active,
+        };
+        build_report_for_host(
+            &hook,
+            Ok(PolicyInfo {
+                mode: "enforce".into(),
+                self_protect: true,
+            }),
+            CanaryRaw::Denied,
+            0,
+            &sandbox,
+        )
+    }
+
+    fn pinned_inspection() -> SandboxInspection {
+        use crate::install::sandbox::ListDrift;
+        SandboxInspection {
+            enabled: Some(true),
+            fail_if_unavailable: Some(true),
+            allow_unsandboxed_commands: Some(false),
+            filesystem_disabled: false,
+            excluded_commands: Vec::new(),
+            deny_read: ListDrift {
+                present: 41,
+                ..Default::default()
+            },
+            deny_write: ListDrift {
+                present: 41,
+                user: 2,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn sandbox_drift_fails_strict_but_user_entries_do_not() {
+        let healthy = sandbox_report(SandboxDoctor::Installed(pinned_inspection()));
+        assert!(healthy.healthy, "{:?}", healthy.lines);
+        assert!(healthy
+            .lines
+            .iter()
+            .any(|(level, line)| *level == Level::Ok && line.contains("2 user entries")));
+
+        let mut missing = pinned_inspection();
+        missing.deny_read.missing = vec!["~/.aws".into()];
+        let report = sandbox_report(SandboxDoctor::Installed(missing));
+        assert!(!report.healthy);
+        assert!(report.lines.iter().any(|(level, line)| {
+            *level == Level::Err && line.contains("drift in denyRead") && line.contains("~/.aws")
+        }));
+
+        let mut stale = pinned_inspection();
+        stale.deny_write.stale = vec!["~/.old".into()];
+        let report = sandbox_report(SandboxDoctor::Installed(stale));
+        assert!(!report.healthy);
+        assert!(report
+            .lines
+            .iter()
+            .any(|(level, line)| *level == Level::Err && line.contains("no longer projects")));
+
+        let mut unpinned = pinned_inspection();
+        unpinned.allow_unsandboxed_commands = Some(true);
+        let report = sandbox_report(SandboxDoctor::Installed(unpinned));
+        assert!(!report.healthy);
+        assert!(report
+            .lines
+            .iter()
+            .any(|(level, line)| *level == Level::Err
+                && line.contains("allowUnsandboxedCommands=true")));
+
+        let mut excluded = pinned_inspection();
+        excluded.excluded_commands = vec!["gh *".into()];
+        let report = sandbox_report(SandboxDoctor::Installed(excluded));
+        assert!(
+            report.healthy,
+            "excludedCommands is a warning, not a failure"
+        );
+        assert!(report
+            .lines
+            .iter()
+            .any(|(level, line)| *level == Level::Warn && line.contains("gh *")));
+    }
+
+    #[test]
+    fn sandbox_not_installed_is_informational_and_unreadable_is_an_error() {
+        let report = sandbox_report(SandboxDoctor::NotInstalled);
+        assert!(report.healthy);
+        assert!(report
+            .lines
+            .iter()
+            .any(|(level, line)| *level == Level::Ok && line.contains("bridge not installed")));
+        assert_eq!(
+            SandboxDoctor::NotInstalled.to_json(),
+            serde_json::json!({"installed": false})
+        );
+        assert_eq!(SandboxDoctor::NotApplicable.to_json(), Value::Null);
+        let codex = sandbox_report(SandboxDoctor::NotApplicable);
+        assert!(!codex
+            .lines
+            .iter()
+            .any(|(_, line)| line.starts_with("sandbox:")));
+        let report = sandbox_report(SandboxDoctor::Unreadable("policy cannot load".into()));
+        assert!(!report.healthy);
     }
 }

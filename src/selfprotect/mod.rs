@@ -26,8 +26,11 @@
 //!   disarm that IS possible, `"disableAllHooks": true` in any settings file,
 //!   is blocked whenever a live Claude hook exists, whatever file it lands in.
 
+pub mod sandbox;
+
 use crate::evaluate::normalize::{MutationOperation, NormalizedToolCall};
 use crate::install::hooks::{classify_hook_command, HookCommandKind};
+use crate::install::state::{self as install_state, SandboxRecord};
 use crate::install::{claude_config_dir, codex_config_path, codex_home, codex_hooks_path};
 use crate::policy::{Action, PolicyDecision};
 use serde_json::Value;
@@ -44,13 +47,31 @@ pub const SENTINEL_HOOK_MARKER: &str = "sentinel evaluate";
 /// Any source OR destination touching policy.toml blocks; hook config changes
 /// are inspected as complete post-mutation documents.
 pub fn apply_normalized(decision: PolicyDecision, call: &NormalizedToolCall) -> PolicyDecision {
-    apply_normalized_with(decision, call, live_hook_installed_for_target)
+    apply_normalized_with_bridge(
+        decision,
+        call,
+        live_hook_installed_for_target,
+        live_sandbox_record,
+    )
 }
 
+/// The hook-only escalations, with the sandbox bridge read as "not installed".
+/// Kept as the unit-test entry point so the hook fixtures stay independent of
+/// the bridge; [`apply_normalized_with_bridge`] adds the sandbox check.
+#[cfg(test)]
 fn apply_normalized_with(
     decision: PolicyDecision,
     call: &NormalizedToolCall,
     hook_is_installed: impl Fn(&str) -> bool,
+) -> PolicyDecision {
+    apply_normalized_with_bridge(decision, call, hook_is_installed, || None)
+}
+
+fn apply_normalized_with_bridge(
+    decision: PolicyDecision,
+    call: &NormalizedToolCall,
+    hook_is_installed: impl Fn(&str) -> bool,
+    sandbox_bridge: impl Fn() -> Option<SandboxRecord>,
 ) -> PolicyDecision {
     if decision.action == Action::Block {
         return decision;
@@ -72,6 +93,9 @@ fn apply_normalized_with(
         Ok(identity) => identity,
         Err(error) => return path_identity_failure_block(error),
     };
+    // read install-state.json at most once per call, and only when a Claude
+    // settings file is the target
+    let mut bridge: Option<Option<SandboxRecord>> = None;
 
     for mutation in &call.mutations {
         let before = match mutation
@@ -165,9 +189,68 @@ fn apply_normalized_with(
                 }
             }
         }
+
+        // sandbox bridge: a Claude settings write that weakens the sandbox
+        // sentinel installed. Inert unless install-state.json records a bridge.
+        if let Some(target) = after
+            .as_ref()
+            .filter(|identity| identity.paths().any(is_claude_settings_path))
+        {
+            let record = bridge.get_or_insert_with(&sandbox_bridge);
+            if let Some(record) = record {
+                if let Ok(Some(content)) = mutation.after_image(call.cwd.as_deref()) {
+                    if let Some(weakening) = sandbox_weakening_for(target, record, &content) {
+                        return sandbox_weakening_block(target.logical.as_str(), weakening);
+                    }
+                }
+            }
+        }
     }
 
     decision
+}
+
+/// Compare the resulting settings document with the one on disk. The
+/// sentinel-owned entry check applies only to the file the bridge was
+/// installed into; the key checks apply to every Claude settings file, since
+/// a project-scope override can disable the sandbox as well.
+fn sandbox_weakening_for(
+    target: &PathIdentity,
+    record: &SandboxRecord,
+    content: &str,
+) -> Option<sandbox::Weakening> {
+    // an unparseable result is the hook-removal check's case when the hook
+    // lives in the file; for the sandbox there is no document to compare
+    let after_document = serde_json::from_str::<Value>(content).ok()?;
+    let before_document = std::fs::read_to_string(&target.logical)
+        .ok()
+        .and_then(|existing| serde_json::from_str::<Value>(&existing).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let owned =
+        same_config_path(&target.logical, Path::new(&record.settings_path)).then_some(record);
+    sandbox::weakening(&before_document, &after_document, owned)
+}
+
+fn sandbox_weakening_block(path: &str, weakening: sandbox::Weakening) -> PolicyDecision {
+    PolicyDecision {
+        action: Action::Block,
+        reason: Some(format!(
+            "write to {path} {} (self-protect: sentinel installed the sandbox bridge; change it outside the agent or run `sentinel uninstall`)",
+            weakening.0
+        )),
+        matched_rule: Some("selfprotect: sandbox-weakening".into()),
+        rule_id: Some("selfprotect:sandbox-weakening".into()),
+        witness: None,
+        downgraded_by: None,
+    }
+}
+
+/// The sandbox bridge record, if `sentinel install --sandbox` wrote one. An
+/// unreadable state file reads as "no bridge": the sandbox check is additive
+/// and must never block on its own bookkeeping.
+fn live_sandbox_record() -> Option<SandboxRecord> {
+    let path = install_state::install_state_path().ok()?;
+    install_state::load_install_state(&path).ok()?.sandbox
 }
 
 #[derive(Clone, Copy)]
@@ -2530,5 +2613,254 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
         let error = autorun_commands_normalized(&dangling_input.normalize().unwrap())
             .expect_err("an unresolved existing symlink must fail autorun identity inspection");
         assert!(error.contains("could not resolve existing mutation path"));
+    }
+
+    // ---- sandbox bridge self-protect -------------------------------------
+
+    /// a settings.json as `sentinel install --sandbox` leaves it: the hook plus
+    /// the pinned keys and the sentinel-owned entries
+    fn settings_with_sandbox() -> Value {
+        json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": ".*", "hooks": [
+                        {"type": "command", "command": "/usr/local/bin/sentinel evaluate"}
+                    ]}
+                ]
+            },
+            "sandbox": {
+                "enabled": true,
+                "failIfUnavailable": true,
+                "allowUnsandboxedCommands": false,
+                "filesystem": {
+                    "denyRead": ["~/.ssh", "~/.aws"],
+                    "denyWrite": ["~/.ssh", "~/.sentinel/policy.toml"]
+                }
+            }
+        })
+    }
+
+    fn bridge_record(settings_path: &str) -> SandboxRecord {
+        SandboxRecord {
+            settings_path: settings_path.to_string(),
+            deny_read: vec!["~/.ssh".into(), "~/.aws".into()],
+            deny_write: vec!["~/.ssh".into(), "~/.sentinel/policy.toml".into()],
+            prior: crate::install::state::SandboxPrior::default(),
+        }
+    }
+
+    /// the bridge file on disk, a record pointing at it, and the warn decision
+    /// the policy assigns a settings write
+    fn bridged_settings() -> (tempfile::TempDir, String, SandboxRecord) {
+        let (dir, path) = config_file(
+            ".claude/settings.json",
+            &settings_with_sandbox().to_string(),
+        );
+        let record = bridge_record(&path);
+        (dir, path, record)
+    }
+
+    #[test]
+    fn sandbox_weakening_writes_are_blocked_when_the_bridge_is_installed() {
+        let (_dir, path, record) = bridged_settings();
+        let mut weakened: Vec<(&str, Value)> = Vec::new();
+        for (label, edit) in [
+            ("enabled false", json!({"enabled": false})),
+            (
+                "allowUnsandboxedCommands true",
+                json!({"allowUnsandboxedCommands": true}),
+            ),
+            (
+                "failIfUnavailable false",
+                json!({"failIfUnavailable": false}),
+            ),
+            (
+                "excludedCommands added",
+                json!({"excludedCommands": ["gh *"]}),
+            ),
+            (
+                "filesystem disabled",
+                json!({"filesystem": {"disabled": true}}),
+            ),
+        ] {
+            let mut document = settings_with_sandbox();
+            for (key, value) in edit.as_object().unwrap() {
+                if key == "filesystem" {
+                    document["sandbox"]["filesystem"]["disabled"] = json!(true);
+                } else {
+                    document["sandbox"][key] = value.clone();
+                }
+            }
+            weakened.push((label, document));
+        }
+        let mut dropped_read = settings_with_sandbox();
+        dropped_read["sandbox"]["filesystem"]["denyRead"] = json!(["~/.aws"]);
+        weakened.push(("owned denyRead entry removed", dropped_read));
+        let mut dropped_write = settings_with_sandbox();
+        dropped_write["sandbox"]["filesystem"]["denyWrite"] = json!(["~/.ssh"]);
+        weakened.push(("owned denyWrite entry removed", dropped_write));
+        let mut no_sandbox = settings_with_sandbox();
+        no_sandbox.as_object_mut().unwrap().remove("sandbox");
+        weakened.push(("sandbox object removed", no_sandbox));
+
+        for (label, document) in &weakened {
+            let input = json!({"file_path": path, "content": document.to_string()});
+            let decision = apply_normalized_with_bridge(
+                warn_decision(),
+                &normalized_input("Write", &input),
+                |_| true,
+                || Some(record.clone()),
+            );
+            assert_eq!(decision.action, Action::Block, "{label}");
+            assert_eq!(
+                decision.matched_rule.as_deref(),
+                Some("selfprotect: sandbox-weakening"),
+                "{label}"
+            );
+            assert!(
+                decision
+                    .reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("self-protect"),
+                "{label}: {:?}",
+                decision.reason
+            );
+        }
+
+        // Edit and MultiEdit reach the same check through the after-image
+        let edit = json!({
+            "file_path": path,
+            "old_string": "\"allowUnsandboxedCommands\":false",
+            "new_string": "\"allowUnsandboxedCommands\":true"
+        });
+        let decision = apply_normalized_with_bridge(
+            warn_decision(),
+            &normalized_input("Edit", &edit),
+            |_| true,
+            || Some(record.clone()),
+        );
+        assert_eq!(
+            decision.matched_rule.as_deref(),
+            Some("selfprotect: sandbox-weakening")
+        );
+        let multi = json!({
+            "file_path": path,
+            "edits": [
+                {"old_string": "\"model\":\"opus\"", "new_string": "\"model\":\"sonnet\""},
+                {"old_string": "\"~/.aws\"", "new_string": "\"~/.other\""}
+            ]
+        });
+        let decision = apply_normalized_with_bridge(
+            warn_decision(),
+            &normalized_input("MultiEdit", &multi),
+            |_| true,
+            || Some(record.clone()),
+        );
+        assert_eq!(
+            decision.matched_rule.as_deref(),
+            Some("selfprotect: sandbox-weakening")
+        );
+    }
+
+    #[test]
+    fn settings_edits_that_keep_every_sentinel_key_stay_at_the_policy_action() {
+        let (_dir, path, record) = bridged_settings();
+        // a full rewrite that changes the model and adds the user's own entry
+        let mut kept = settings_with_sandbox();
+        kept["model"] = json!("sonnet");
+        kept["sandbox"]["filesystem"]["denyRead"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("~/mine"));
+        kept["sandbox"]["network"] = json!({"allowedDomains": ["crates.io"]});
+        let input = json!({"file_path": path, "content": kept.to_string()});
+        assert_eq!(
+            apply_normalized_with_bridge(
+                warn_decision(),
+                &normalized_input("Write", &input),
+                |_| true,
+                || Some(record.clone()),
+            ),
+            warn_decision()
+        );
+        let edit = json!({
+            "file_path": path,
+            "old_string": "\"model\":\"opus\"",
+            "new_string": "\"model\":\"sonnet\""
+        });
+        assert_eq!(
+            apply_normalized_with_bridge(
+                warn_decision(),
+                &normalized_input("Edit", &edit),
+                |_| true,
+                || Some(record.clone()),
+            ),
+            warn_decision()
+        );
+    }
+
+    #[test]
+    fn sandbox_check_is_inert_without_a_bridge_record() {
+        let (_dir, path, _record) = bridged_settings();
+        let mut weakened = settings_with_sandbox();
+        weakened["sandbox"]["enabled"] = json!(false);
+        let input = json!({"file_path": path, "content": weakened.to_string()});
+        // no record: the user runs the sandbox on their own terms
+        assert_eq!(
+            apply_normalized_with_bridge(
+                warn_decision(),
+                &normalized_input("Write", &input),
+                |_| true,
+                || None,
+            ),
+            warn_decision()
+        );
+        assert_eq!(
+            apply_normalized_with(warn_decision(), &normalized_input("Write", &input), |_| {
+                true
+            }),
+            warn_decision()
+        );
+    }
+
+    #[test]
+    fn sandbox_owned_entries_are_checked_only_in_the_bridge_file() {
+        // a project-scoped settings file that carries a copy of the entries is
+        // not the bridge file: removing one there is not a sentinel removal,
+        // but a project-scope key override still is a weakening
+        let (_dir, bridge_path, record) = bridged_settings();
+        let (project_dir, project_path) = config_file(
+            "proj/.claude/settings.json",
+            &settings_with_sandbox().to_string(),
+        );
+        assert_ne!(bridge_path, project_path);
+        let mut dropped = settings_with_sandbox();
+        dropped["sandbox"]["filesystem"]["denyRead"] = json!(["~/.aws"]);
+        let input = json!({"file_path": project_path, "content": dropped.to_string()});
+        assert_eq!(
+            apply_normalized_with_bridge(
+                warn_decision(),
+                &normalized_input("Write", &input),
+                |_| true,
+                || Some(record.clone()),
+            ),
+            warn_decision()
+        );
+        let override_input = json!({
+            "file_path": project_dir.path().join("proj/.claude/settings.local.json"),
+            "content": json!({"sandbox": {"enabled": false}}).to_string()
+        });
+        let decision = apply_normalized_with_bridge(
+            warn_decision(),
+            &normalized_input("Write", &override_input),
+            |_| false,
+            || Some(record.clone()),
+        );
+        assert_eq!(
+            decision.matched_rule.as_deref(),
+            Some("selfprotect: sandbox-weakening")
+        );
     }
 }

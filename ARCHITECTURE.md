@@ -71,7 +71,8 @@ sentinel/
 │   │   ├── normalize.rs    host payloads -> typed calls, paths, commands, patches
 │   │   └── pipeline.rs     shared policy, self-protect, autorun, preflight path
 │   ├── selfprotect/
-│   │   └── mod.rs          content-aware escalation: block a config write that removes sentinel's hook OR injects a malicious autorun command (hook / MCP server) across any agent + MCP config (JSON/TOML)
+│   │   ├── mod.rs          content-aware escalation: block a config write that removes sentinel's hook OR injects a malicious autorun command (hook / MCP server) across any agent + MCP config (JSON/TOML)
+│   │   └── sandbox.rs      before/after check for a Claude settings write that weakens the sandbox bridge (active only when install-state.json records one)
 │   ├── preflight/
 │   │   └── mod.rs          install-preflight: on an install-like command, resolve the effective install dir (follow literal cd / --prefix) and inspect that package.json's lifecycle scripts + dep sources for the worm TTP
 │   ├── check/
@@ -91,7 +92,8 @@ sentinel/
 │   ├── install/
 │   │   ├── mod.rs          sentinel install / uninstall orchestrator
 │   │   ├── activation.rs   Codex public hooks API activation/trust probe
-│   │   ├── state.rs        Claude/Codex installed and activated state
+│   │   ├── state.rs        Claude/Codex installed and activated state; ~/.sentinel/install-state.json record of sentinel-written sandbox entries
+│   │   ├── sandbox.rs      sandbox bridge: deny.paths -> sandbox.filesystem.denyRead/denyWrite projection, reconciliation, drift inspection
 │   │   ├── hooks.rs        direct/Ghost ownership reconciliation + atomic writes
 │   │   ├── defaults.rs     default policy.toml generator (header + family loader)
 │   │   └── defaults/       bundled deny rules, one TOML file per family, NN- prefix
@@ -107,6 +109,7 @@ sentinel/
 │   ├── hook_contract.rs    PreToolUse/PostToolUse wire contract + version-stamped Claude Code fixtures
 │   ├── home_config.rs      isolated HOME validation and relocated Claude lifecycle
 │   ├── overlays.rs         project overlays end to end: accept, digest mismatch, agent-driven accept denied
+│   ├── sandbox_install.rs  sandbox bridge install/reinstall/uninstall, doctor drift, self-protect through the real binary
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
 │       ├── corpus/         test attack sequences (3 TOML files)
@@ -459,6 +462,67 @@ enforcement, and a hooked binary removed during an active agent session may
 still fail open. Codex trust is a host decision outside Sentinel; install tells
 the user to approve the hook in `/hooks` and rerun strict doctor.
 
+### sandbox bridge (opt-in, Claude Code only)
+
+`install/sandbox.rs` is a projection compiler from the policy's `deny.paths`
+rules onto Claude Code's `sandbox.filesystem.denyRead` / `denyWrite` lists,
+driven by `sentinel install --sandbox`. It adds a kernel-level floor under
+Bash for the child-process reads the hook never sees; it replaces nothing.
+The rules it follows are the S1 spike's (`docs/hardening/`), and
+`project_with` is pure so the table test pins every bundled rule:
+
+- normalize: strip a trailing `/`, `/*`, or `/**`; the bare directory covers
+  its subtree. Only `~/` and absolute patterns are anchored; a relative entry
+  in user settings resolves under `~/.claude`, so unanchored `**/name` rules
+  are hook-only, as is a wildcard in a middle segment (`/proc/*/environ`).
+- per-list output: a `~/` block rule goes into both lists; an absolute block
+  rule into `denyRead` only; a surviving wildcard stays in `denyRead` on every
+  platform and is dropped from `denyWrite` on Linux (Claude Code skips
+  wildcard write entries there). Warn rules are hook-only: the sandbox has no
+  warn tier.
+- self-protect `denyWrite` only: `policy.toml`, `install-state.json`, the
+  Claude settings file, the running binary (`current_exe`), and
+  `mcp-baseline.json` / `settings.local.json` when they exist (a Linux
+  `denyWrite` on a missing file creates a placeholder per command).
+- withheld, reported rather than emitted: paths with whitespace (Seatbelt
+  quoting undocumented, no live test yet) and binary paths that are not the
+  running binary. At the current bundled policy: 75 rules, 56 expressible,
+  19 hook-only; on a Linux host with no baseline file, 43 compile and 13 are
+  withheld.
+
+Reconciliation mirrors the hook installer, with one difference: the sandbox
+lists are plain string arrays, so the ownership tag is a sidecar,
+`~/.sentinel/install-state.json`. It records the entries sentinel appended
+(an entry the user already had is neither recorded nor removed) and the three
+pinned keys' prior values. Reinstall removes the recorded entries, re-appends
+the projection, and yields an identical file; uninstall removes only recorded
+entries and restores a pinned key only if it still carries the value sentinel
+set. `status` and `doctor` recompute the projection from the live policy and
+diff it against the live lists: a missing projected entry or a stale
+sentinel-owned one is a `doctor --strict` failure, user entries are counted
+and kept, `excludedCommands` is a warning (an excluded command runs with full
+access). `policy-migrate --apply` does not regenerate the projection; a
+re-run of `install --sandbox` does.
+
+`selfprotect/sandbox.rs` is the hook-side mirror: once a record exists, a
+typed settings write whose before/after diff flips `enabled` off, turns
+`allowUnsandboxedCommands` on, turns `failIfUnavailable` off, sets
+`filesystem.disabled`, adds an `excludedCommands` entry, or drops a
+sentinel-owned entry from the bridge file is blocked as
+`selfprotect: sandbox-weakening`. The diff is per file against the document
+on disk, so an unrelated edit to a file that already carried a weak value, or
+an entry the operator removed by hand (doctor's drift report), is not a block.
+Without a record the module changes nothing. Shell-side rewrites of the
+settings file are already blocked by the existing command cluster.
+
+Honest limits: the sandbox covers shell commands only (file tools, MCP
+servers, and hooks run outside it), Windows is unsandboxed, the network
+allowlist is domain-level, and the credential `denyRead` entries break
+in-sandbox `gh`/`aws`/`kubectl`/`npm publish`/`docker login`/`ssh` use, which
+is why the bridge is opt-in. No live run on a real Claude Code session is
+recorded yet; `corpus/v2` (a child-process read the hook cannot see) is a
+follow-up that needs the real-agent harness.
+
 ### real-agent audit harness
 
 `audit/adapter.rs` implements stateful real-process sessions:
@@ -598,7 +662,8 @@ never silently flips them to enforce.
 | `sentinel install` | install the Claude Code hook (enforce mode, the default) |
 | `sentinel install --agent codex` | install the native Codex hook |
 | `sentinel install --audit` | install in audit mode (log only) |
-| `sentinel uninstall --agent <name>` | remove direct Claude Code or Codex hooks |
+| `sentinel install --sandbox` | also project the policy into Claude Code's sandbox deny lists (opt-in; re-run after a policy change) |
+| `sentinel uninstall --agent <name>` | remove direct Claude Code or Codex hooks and sentinel-owned sandbox entries |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
 | `sentinel why [<tool_use_id>] [--json]` | explain a decision already in the audit trail: rule id, rule text and policy line, bounded witness (read-only; never the payload) |
 | `sentinel verify [--policy <file>]` | replay the pinned 64/64 attack and benign cases; nonzero on a mismatch |

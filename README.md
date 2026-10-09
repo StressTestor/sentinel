@@ -90,6 +90,31 @@ audit evidence comes from the selected agent's structured output. these verdicts
 
 these are point-in-time checks. they prove that the current configuration and canary path work; they cannot prove continuous enforcement after the check. Codex trust remains a separate host decision, so approve the hook in `/hooks` and rerun strict doctor. deleting the hooked binary during an already-running agent session can still fail open.
 
+## sandbox bridge (opt-in)
+
+the hook sees the agent's tool calls. it does not see the `open()` a child process makes inside `npm install`, `python -c`, or a script the agent wrote a moment earlier. Claude Code's own sandbox (bubblewrap on Linux, Seatbelt on macOS) does see those, and it takes deny lists in the same `settings.json` the hook lives in. `sentinel install --sandbox` compiles the policy's directory-shaped `deny.paths` rules into those lists:
+
+```bash
+sentinel install --sandbox      # Claude Code only; errors for other agents
+sentinel status                 # sandbox row: keys, entries, drift, hook-only and withheld rules
+sentinel doctor --strict        # drift between the live lists and the current policy fails
+sentinel uninstall              # removes only the entries sentinel wrote
+```
+
+what it writes, and the rules it follows (from the S1 projection spike, `docs/hardening/2026-10-08-s1-sandbox-projection.md`):
+
+- `sandbox.enabled: true`, `sandbox.failIfUnavailable: true`, `sandbox.allowUnsandboxedCommands: false`. the second stops a host without bubblewrap or Seatbelt from silently running unsandboxed; the third closes the "run it outside the sandbox" escape.
+- block-tier rules under `~/` go into both `sandbox.filesystem.denyRead` and `denyWrite` as the bare directory (`~/.ssh/*` becomes `~/.ssh`); absolute system paths (`/etc/passwd`) go into `denyRead` only. a wildcard that survives normalization (`/etc/shadow*`) stays in `denyRead` on every platform and is dropped from `denyWrite` on Linux, where Claude Code skips wildcard write entries.
+- `denyWrite` entries for sentinel's own files: `~/.sentinel/policy.toml`, `~/.sentinel/install-state.json`, the Claude settings file the hook is in, the running binary (`std::env::current_exe()`), and `~/.sentinel/mcp-baseline.json` and `settings.local.json` only when they exist (a Linux `denyWrite` on a missing file creates a placeholder per command, and a stale one blocks later writes).
+- hook-only, reported by `status`: warn-tier rules (the sandbox has no warn, so compiling them would turn a review signal into a hard block) and rules with an unanchored or mid-path glob (`**/wallet.dat`, `/proc/*/environ`; a relative entry in user settings resolves under `~/.claude`, not anywhere). of the 75 bundled `deny.paths` rules, 56 have a sandbox expression and 19 stay hook-only.
+- withheld, also reported: the nine macOS paths with whitespace (`~/Library/Application Support/...`), because how the generated Seatbelt profile quotes them is not documented and has not been live-tested; the sentinel binary paths that are not the running binary.
+
+the sandbox lists are plain string arrays with no room for an ownership tag, so `~/.sentinel/install-state.json` records exactly which entries sentinel appended and what the three keys were before. reinstalling reconciles like the hook installer: user entries stay, sentinel-owned entries are replaced, nothing is duplicated, and a second run produces an identical file. `uninstall` removes only recorded entries and puts the three keys back to what they were, unless you changed them after install. `policy-migrate --apply` does not touch the projection: after a policy change, re-run `sentinel install --sandbox`; until then `doctor` reports the drift.
+
+self-protect learns the sandbox keys once the bridge is recorded: a Write/Edit/MultiEdit/apply_patch to a Claude settings file that flips `sandbox.enabled` to false, sets `allowUnsandboxedCommands` to true, sets `failIfUnavailable` to false, sets `filesystem.disabled`, adds an `excludedCommands` entry, or removes a sentinel-owned deny entry is blocked (`selfprotect: sandbox-weakening`), with the same before/after shape as hook removal, so an unrelated edit to a file that already carried a weak value is not escalated. without the record, the sandbox keys are yours and nothing changes. the shell-side forms (`sed -i`, `tee`, a redirect, `cp` onto the settings file) are already blocked by the existing settings-rewrite command rules whatever the content, so no sandbox-specific command rule was added.
+
+**what it cannot do.** the sandbox covers shell commands only: Claude's file tools, MCP servers, and hooks run outside it, which is why the hook stays and none of the projection replaces a rule. Windows runs unsandboxed. the network allowlist is domain-level, not content-level, so an exfil to an allowed domain is not a sandbox concern. and the credential `denyRead` entries deny every open, not just the ones the agent names: `gh`, `aws`, `kubectl`, `npm` with a tokened `~/.npmrc`, `cargo publish`, `docker login`, git credential helpers, and `ssh` key reads fail inside the sandbox once the bridge is on. Claude Code's escape routes are `sandbox.credentials.files` with `"mode": "mask"` (Linux and WSL2) or `excludedCommands`, which runs a command with full access and which `doctor` reports for that reason. that trade is the operator's call, which is why the bridge is opt-in. no live test of the bridge on a real Claude Code session has been recorded yet; the counts above come from the documented path syntax, and the open questions (unlink under a file `denyWrite`, missing paths, symlinks into a denied subtree) are listed in the S1 spike. the procedure for that live run, which needs bubblewrap or Seatbelt on the host, is in `docs/hardening/2026-10-08-s4-ordering-procedure.md`.
+
 ## MCP baseline
 
 `sentinel audit-mcp` discovers configured MCP servers without trusting or writing them. review the complete set, then run `sentinel audit-mcp --update` to accept it as the baseline. later runs report added, changed, missing, and removed entries; `--strict` exits nonzero on drift.
@@ -199,7 +224,8 @@ sentinel install          install hooks + default policy (enforce mode)
 sentinel install --audit  install in audit mode (log only, never blocks)
 sentinel install --agent codex  install the native Codex hook
 sentinel install --result-scan   also register the PostToolUse result-secret hook (opt-in)
-sentinel uninstall --agent <name>  remove direct Claude Code or Codex hooks
+sentinel install --sandbox  also bridge the policy into Claude Code's sandbox deny lists (opt-in)
+sentinel uninstall --agent <name>  remove direct Claude Code or Codex hooks and sentinel-owned sandbox entries
 sentinel evaluate [--agent <name>]  evaluate a tool call (called by the hook)
 sentinel post-evaluate    scan a tool RESULT for secret shapes (PostToolUse hook; detection only)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision

@@ -464,7 +464,7 @@ fn remove_direct_handlers(entries: &mut Vec<Value>, event: &str) {
     });
 }
 
-fn read_settings(path: &Path) -> Result<Value, InstallError> {
+pub(crate) fn read_settings(path: &Path) -> Result<Value, InstallError> {
     if !path.exists() {
         // create parent dirs if needed
         if let Some(parent) = path.parent() {
@@ -480,7 +480,7 @@ fn read_settings(path: &Path) -> Result<Value, InstallError> {
         .map_err(|e| InstallError::ReadError(format!("invalid JSON: {e}")))
 }
 
-fn write_settings(path: &Path, settings: &Value) -> Result<(), InstallError> {
+pub(crate) fn write_settings(path: &Path, settings: &Value) -> Result<(), InstallError> {
     // serialize FIRST so a bad value errors out before we touch disk, then write
     // atomically - a failed write never truncates the user's real settings.json.
     let content = serde_json::to_string_pretty(settings)

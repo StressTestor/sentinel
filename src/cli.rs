@@ -255,6 +255,14 @@ pub struct InstallArgs {
     #[arg(long = "result-scan", default_value_t = false)]
     pub result_scan: bool,
 
+    /// also bridge the policy into Claude Code's own sandbox (opt-in, Claude Code
+    /// only): sets sandbox.enabled, failIfUnavailable, and
+    /// allowUnsandboxedCommands=false, and writes the directory-shaped deny.paths
+    /// rules into sandbox.filesystem.denyRead/denyWrite. re-run to regenerate
+    /// after a policy change; `sentinel uninstall` removes only what it wrote.
+    #[arg(long, default_value_t = false)]
+    pub sandbox: bool,
+
     /// host agent to install for. `claude-code` (default) and `codex` are managed
     /// natively; any other name prints the generic integration contract and
     /// writes the default policy.

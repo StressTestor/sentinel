@@ -1,7 +1,104 @@
 use super::activation::{self, Activation};
 use super::hooks::{self, HookInspection, HookOwnership};
-use super::{claude_settings_path, codex_config_path, codex_hooks_path, AgentTarget};
-use std::path::PathBuf;
+use super::{claude_settings_path, codex_config_path, codex_hooks_path, AgentTarget, InstallError};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+
+/// Sidecar record of what `sentinel install` wrote into a host's settings
+/// beyond the hook entry itself. The sandbox lists are plain string arrays with
+/// no room for an ownership tag, so this file is the tag: uninstall removes
+/// only entries listed here, doctor diffs them, and self-protect reads it to
+/// know whether the sandbox bridge is installed at all.
+///
+/// Lives at `~/.sentinel/install-state.json`, 0600 on Unix, written atomically.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallState {
+    #[serde(default = "install_state_version")]
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxRecord>,
+}
+
+fn install_state_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxRecord {
+    /// the settings file the entries were written to
+    pub settings_path: String,
+    /// `sandbox.filesystem.denyRead` entries sentinel appended (entries the
+    /// user already had are not listed and are never removed)
+    pub deny_read: Vec<String>,
+    /// `sandbox.filesystem.denyWrite` entries sentinel appended
+    pub deny_write: Vec<String>,
+    /// the pinned keys as they were before sentinel first set them
+    #[serde(default)]
+    pub prior: SandboxPrior,
+}
+
+/// Values of the three pinned sandbox keys before the first `--sandbox`
+/// install. `None` means the key was absent, so uninstall removes it again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxPrior {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_if_unavailable: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_unsandboxed_commands: Option<Value>,
+}
+
+impl SandboxPrior {
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        match key {
+            "enabled" => self.enabled.as_ref(),
+            "failIfUnavailable" => self.fail_if_unavailable.as_ref(),
+            "allowUnsandboxedCommands" => self.allow_unsandboxed_commands.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn set(&mut self, key: &str, value: Option<Value>) {
+        match key {
+            "enabled" => self.enabled = value,
+            "failIfUnavailable" => self.fail_if_unavailable = value,
+            "allowUnsandboxedCommands" => self.allow_unsandboxed_commands = value,
+            _ => {}
+        }
+    }
+}
+
+pub fn install_state_path() -> std::io::Result<PathBuf> {
+    Ok(super::sentinel_dir()?.join("install-state.json"))
+}
+
+/// An absent file is an empty state. A present but unreadable or unparseable
+/// file is an error: guessing "nothing installed" would let uninstall leave
+/// entries behind and self-protect stand down.
+pub fn load_install_state(path: &Path) -> Result<InstallState, InstallError> {
+    if !path.exists() {
+        return Ok(InstallState::default());
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| InstallError::ReadError(format!("{}: {error}", path.display())))?;
+    serde_json::from_str(&content).map_err(|error| {
+        InstallError::ReadError(format!(
+            "{} is not valid install state: {error}",
+            path.display()
+        ))
+    })
+}
+
+pub fn save_install_state(path: &Path, state: &InstallState) -> Result<(), InstallError> {
+    let content = serde_json::to_string_pretty(&InstallState {
+        version: 1,
+        sandbox: state.sandbox.clone(),
+    })
+    .map_err(|error| InstallError::WriteError(error.to_string()))?;
+    hooks::atomic_write(path, &content)
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentState {

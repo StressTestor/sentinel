@@ -7,6 +7,26 @@ versioning.
 ## [Unreleased]
 
 ### Added
+- **Sandbox bridge (opt-in, Claude Code only).** `sentinel install --sandbox`
+  compiles the policy's directory-shaped `deny.paths` rules into Claude Code's
+  `sandbox.filesystem.denyRead` / `denyWrite` lists and pins
+  `sandbox.enabled`, `failIfUnavailable`, and `allowUnsandboxedCommands: false`
+  in the settings file the hook lives in, following the S1 projection rules:
+  bare directories, `~/` and absolute paths only, wildcards kept in `denyRead`
+  and dropped from `denyWrite` on Linux, warn-tier and unanchored or mid-path
+  glob rules hook-only, self-protect `denyWrite` entries for `policy.toml`,
+  `install-state.json`, the settings file, the running binary, and
+  `mcp-baseline.json` when it exists. Of the 75 bundled rules, 56 have a
+  sandbox expression and 19 stay hook-only (table-tested). Sentinel-written
+  entries are recorded in `~/.sentinel/install-state.json`, so reinstall is
+  idempotent, user entries are kept, and `uninstall` removes only what it
+  wrote. `status` and `doctor` gain a sandbox row with drift detection
+  (`--strict` fails on a missing or stale sentinel-owned entry; `--json`
+  includes it). Self-protect blocks a typed settings write that weakens the
+  bridge (`selfprotect: sandbox-weakening`) only when the record exists.
+  `policy-migrate --apply` does not regenerate the projection; re-run
+  `install --sandbox`. Paths with whitespace are withheld pending a live
+  test, and no live Claude Code run is recorded yet.
 - Library target (`src/lib.rs`). The crate now exposes its module tree as a
   library next to the `sentinel` binary so fuzz targets and integration tests
   can call the parsers and the policy pipeline directly. The binary is unchanged
