@@ -17,10 +17,14 @@
 //! - the check verifies that a supported PreToolUse entry with an effective
 //!   Sentinel command survives. a rewrite that narrows the matcher can still
 //!   reduce the hook's coverage without removing the entry.
-//! - suffix matching on the target path is deliberately conservative: a full
-//!   Write to a *project-level* `.claude/settings.json` that carries no
-//!   sentinel hook is also escalated even though the live hook lives in the
-//!   user-level file. over-blocking here beats under-blocking.
+//! - escalation is per file: a mutation is a hook removal only when the file it
+//!   rewrites currently carries the sentinel hook (or, for non-Claude agents,
+//!   is that agent's live hook config). a new project-scoped
+//!   `.claude/settings.local.json` that never had the hook stays at the
+//!   policy's warn tier, because Claude Code merges hooks across scopes and a
+//!   project file cannot drop a user-level entry. the one project-scope
+//!   disarm that IS possible, `"disableAllHooks": true` in any settings file,
+//!   is blocked whenever a live Claude hook exists, whatever file it lands in.
 
 use crate::evaluate::normalize::{MutationOperation, NormalizedToolCall};
 use crate::install::hooks::{classify_hook_command, HookCommandKind};
@@ -94,6 +98,25 @@ fn apply_normalized_with(
             Ok(identity) => identity.flatten(),
             Err(error) => return path_identity_failure_block(error),
         };
+        // `disableAllHooks` turns off every hook from any settings scope, so a
+        // project-scoped file that never carried the sentinel entry can still
+        // disarm it. Check the resulting document for that key whenever a
+        // live Claude hook exists anywhere, independent of the per-file rule
+        // below.
+        if let Some(target) = hook_after.filter(|identity| is_claude_settings_path(identity.path)) {
+            let any_live = || {
+                claude_live_settings_paths()
+                    .iter()
+                    .any(|p| hook_is_installed(p))
+            };
+            match mutation.after_image(call.cwd.as_deref()) {
+                Ok(Some(content)) if content_disables_all_hooks(&content) && any_live() => {
+                    return hook_disable_block(target.path);
+                }
+                _ => {}
+            }
+        }
+
         let protected_before = hook_before.filter(|identity| hook_is_installed(identity.path));
         let protected_after = hook_after.filter(|identity| hook_is_installed(identity.path));
 
@@ -312,6 +335,42 @@ fn policy_write_block() -> PolicyDecision {
         rule_id: Some("selfprotect:policy.toml-write".into()),
         witness: None,
     }
+}
+
+/// A settings document that sets `disableAllHooks: true` disarms every hook,
+/// sentinel's included, from whichever scope it is written to.
+fn hook_disable_block(path: &str) -> PolicyDecision {
+    PolicyDecision {
+        action: Action::Block,
+        reason: Some(format!(
+            "write to {path} sets disableAllHooks, which turns off the sentinel \
+             PreToolUse hook along with every other hook (self-protect)"
+        )),
+        matched_rule: Some("selfprotect: hook-disable".into()),
+        rule_id: Some("selfprotect:hook-disable".into()),
+        witness: None,
+    }
+}
+
+/// Does a Claude settings document switch every hook off? Only a top-level
+/// boolean `true` counts; an unparseable document is handled by the per-file
+/// removal check, not here.
+fn content_disables_all_hooks(content: &str) -> bool {
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .and_then(|settings| settings.get("disableAllHooks").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// The two user-level Claude settings files a sentinel install can live in,
+/// under the effective config directory. Used to ask the injected per-file
+/// check whether any live hook exists at all.
+fn claude_live_settings_paths() -> Vec<String> {
+    let dir = claude_config_dir().unwrap_or_else(|_| expand_home_path("~/.claude"));
+    ["settings.json", "settings.local.json"]
+        .iter()
+        .map(|name| dir.join(name).to_string_lossy().into_owned())
+        .collect()
 }
 
 fn hook_removal_block() -> PolicyDecision {
@@ -696,19 +755,18 @@ pub(crate) fn is_effective_pre_hook(command: &str) -> bool {
 }
 
 /// Is a sentinel hook installed in the effective user-level Claude directory?
-fn live_hook_installed() -> bool {
-    claude_config_dir()
-        .ok()
-        .is_some_and(|dir| hook_installed_in_dir(&dir))
-}
-
 /// Is sentinel installed in the live config file for the target agent config?
 /// Claude has two user-level settings files in its effective config directory.
 /// Other agents install into the target config itself
 /// (or the user-level path shown by `sentinel install`), so read that file.
 fn live_hook_installed_for_target(target: &str) -> bool {
     if is_claude_settings_path(target) {
-        return live_hook_installed();
+        // Per file, not per config directory: Claude Code merges hooks across
+        // scopes, so only the file that carries the entry can remove it. A
+        // user-level install stays protected because the user-level file is
+        // the one being rewritten in that case; a project-scoped file that
+        // never carried the hook is ordinary settings work.
+        return hook_installed_in_file(&expand_home_path(target));
     }
     let Some(kind) = hook_config_kind(target) else {
         return false;
@@ -727,15 +785,6 @@ fn expand_home_path(path: &str) -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from(path)
-}
-
-/// Is a sentinel hook installed in the supplied Claude config directory? Claude
-/// Code honors a hook installed in `settings.local.json` just as it does one
-/// in `settings.json` — the escalation guards both files, so the live-hook
-/// check must look at both or a local-only install silently never fires.
-fn hook_installed_in_dir(dir: &std::path::Path) -> bool {
-    hook_installed_in_file(&dir.join("settings.json"))
-        || hook_installed_in_file(&dir.join("settings.local.json"))
 }
 
 /// per-file check. unreadable/absent file → not installed (nothing to
@@ -1345,11 +1394,12 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
         );
     }
 
-    // marko fix #4: Claude Code honors a hook installed in settings.local.json
-    // too — the live-hook check must see it there, or a local-only install
-    // means hook_installed=false and the self-protect silently never fires.
+    // Claude Code honors a hook installed in settings.local.json too, and the
+    // live check is per file: the file that carries the entry is protected,
+    // its sibling is not, and a project-scoped file that never had the hook is
+    // ordinary settings work.
     #[test]
-    fn live_hook_detection_covers_settings_local_json() {
+    fn live_hook_detection_is_per_file_and_covers_settings_local_json() {
         let base = std::env::temp_dir().join(format!(
             "sentinel_selfprotect_{}_{}",
             std::process::id(),
@@ -1357,22 +1407,110 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
         ));
         let claude = base.join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
-        // no settings files at all → nothing installed
-        assert!(!hook_installed_in_dir(&base.join(".claude")));
-        // hook ONLY in settings.local.json → must count as installed
-        std::fs::write(claude.join("settings.local.json"), settings_with_hook()).unwrap();
-        assert!(
-            hook_installed_in_dir(&base.join(".claude")),
-            "a hook living only in settings.local.json is live — must be protected"
-        );
-        // hook in settings.json alone keeps working
-        std::fs::remove_file(claude.join("settings.local.json")).unwrap();
-        std::fs::write(claude.join("settings.json"), settings_with_hook()).unwrap();
-        assert!(hook_installed_in_dir(&base.join(".claude")));
+        let settings = claude.join("settings.json");
+        let local = claude.join("settings.local.json");
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        // nothing on disk → nothing live
+        assert!(!live_hook_installed_for_target(&s(&settings)));
+        assert!(!live_hook_installed_for_target(&s(&local)));
+        // hook ONLY in settings.local.json → that file is live, its sibling is not
+        std::fs::write(&local, settings_with_hook()).unwrap();
+        assert!(live_hook_installed_for_target(&s(&local)));
+        assert!(!live_hook_installed_for_target(&s(&settings)));
+        // hook in settings.json → same, mirrored
+        std::fs::remove_file(&local).unwrap();
+        std::fs::write(&settings, settings_with_hook()).unwrap();
+        assert!(live_hook_installed_for_target(&s(&settings)));
+        assert!(!live_hook_installed_for_target(&s(&local)));
         // a settings.json without the hook does not count
-        std::fs::write(claude.join("settings.json"), settings_without_hook()).unwrap();
-        assert!(!hook_installed_in_dir(&base.join(".claude")));
+        std::fs::write(&settings, settings_without_hook()).unwrap();
+        assert!(!live_hook_installed_for_target(&s(&settings)));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    // the false positive observed live on 2026-10-08: a new project-scoped
+    // settings.local.json that adds an unrelated hook was blocked as a hook
+    // removal even though the live hook sits in the user-level file. With the
+    // real per-file check it stays at the policy's warn tier; the same write
+    // to a file that DOES carry the hook is still a removal.
+    #[test]
+    fn new_project_scoped_settings_without_the_hook_is_not_a_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj/.claude");
+        std::fs::create_dir_all(&project).unwrap();
+        let local = project.join("settings.local.json");
+        let adds_other_hook =
+            json!({"file_path": local.to_string_lossy(), "content": settings_without_hook()});
+        assert_eq!(
+            apply_normalized_with(
+                warn_decision(),
+                &normalized_input("Write", &adds_other_hook),
+                live_hook_installed_for_target
+            ),
+            warn_decision(),
+            "a project file that never carried the hook is not a hook removal"
+        );
+        // now the same file carries the hook: rewriting it without one is a removal
+        std::fs::write(&local, settings_with_hook()).unwrap();
+        let d = apply_normalized_with(
+            warn_decision(),
+            &normalized_input("Write", &adds_other_hook),
+            live_hook_installed_for_target,
+        );
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.matched_rule.as_deref(), Some("selfprotect: hook-removal"));
+    }
+
+    // disableAllHooks turns off every hook from any scope, so it is blocked in
+    // any settings file whenever a live hook exists, and ignored when none does.
+    #[test]
+    fn disable_all_hooks_is_blocked_in_any_scope_when_a_hook_is_live() {
+        // the live hook sits in the user-level files; the project file does not
+        // carry it (the per-file check answers false there)
+        let user_level_only = |path: &str| !path.contains("/proj/");
+        let disabling = json!({
+            "file_path": "/Users/u/proj/.claude/settings.local.json",
+            "content": json!({"disableAllHooks": true, "model": "opus"}).to_string()
+        });
+        let d = apply_normalized_with(
+            warn_decision(),
+            &normalized_input("Write", &disabling),
+            user_level_only,
+        );
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.matched_rule.as_deref(), Some("selfprotect: hook-disable"));
+        // explicit false is not a disarm, and the project file is not a removal
+        let keeping = json!({
+            "file_path": "/Users/u/proj/.claude/settings.local.json",
+            "content": json!({"disableAllHooks": false}).to_string()
+        });
+        assert_eq!(
+            apply_normalized_with(
+                warn_decision(),
+                &normalized_input("Write", &keeping),
+                user_level_only
+            ),
+            warn_decision()
+        );
+        // no live hook anywhere → nothing to protect
+        assert_eq!(
+            apply_normalized_with(
+                warn_decision(),
+                &normalized_input("Write", &disabling),
+                |_| false
+            ),
+            warn_decision()
+        );
+        // an Edit that introduces the key into a file carrying the hook is caught too
+        let (_dir, path) = config_file(".claude/settings.json", &settings_with_hook());
+        let edit = json!({
+            "file_path": path,
+            "old_string": "\"model\":\"opus\"",
+            "new_string": "\"model\":\"opus\",\"disableAllHooks\":true"
+        });
+        let d = apply_normalized_with(warn_decision(), &normalized_input("Edit", &edit), |_| true);
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.matched_rule.as_deref(), Some("selfprotect: hook-disable"));
     }
 
     // the per-file check: absent → false; valid-with-hook → true; unparseable

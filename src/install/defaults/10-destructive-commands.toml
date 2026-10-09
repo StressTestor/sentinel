@@ -1,0 +1,62 @@
+# recursive-delete rules. these five replaced a single `rm\s+-rf\s+(?:[^\s]+\s+)*/`
+# catch-all that matched ANY token starting with '/', so every temp-dir, worktree
+# and scratchpad cleanup was a block. worse, its token run was unscoped and
+# wandered across `;`/`&&`/`|` onto an unrelated later absolute path. the fix is
+# not to relax the class, it is to name the targets that are actually dangerous.
+# token runs are scoped with [^\s;&|\n] per the guard-tamper rules further down.
+
+# root-equivalent target: /, //, /*, /?*, /[a-z]*, /{..}, /.*, /$VAR. the bare
+# `/` form is the least effective attack (rm and SIP refuse it) - the glob forms
+# are the live ones, so the terminator class accepts glob/brace/expansion
+# metacharacters, not just whitespace.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/+(?:\.{1,2})?(["\x27\s<>;|&]|$|[*?\[{$])'
+action = "block"
+reason = "recursive root deletion (covers /, //, /*, /?*, /[a-z]*, /{..}, /.*, /$VAR)"
+
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:bin|sbin|boot|lib|lib64|usr|etc|root|run|srv|proc|sys|System|Library|Applications|dev|cores)(["\x27\s<>;|&/]|$)'
+action = "block"
+reason = "recursive deletion of a system tree"
+
+# Linux /tmp is commonly a real root directory; macOS resolves it through
+# /private/tmp. Protect only the root itself so per-job cleanup remains allowed.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/tmp/?(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "recursive deletion of the machine-wide temporary root"
+
+# whole home / whole volume / mount root / top-level tree, at depth 1-2 ONLY.
+# depth >=3 stays allowed - that is what keeps /Volumes/<disk>/<project>,
+# /mnt/<volume>/<project>, /private/tmp/.../scratchpad and
+# /var/folders/.../T/tmp.* cleanup working. do NOT widen this to any depth, a
+# catch-all absolute-path match is the defect this replaces.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*/(?:Users|Volumes|home|mnt|media|var|private|opt|Network)(?:/[^/\s;&|"\x27]+)?/?(["\x27\s<>;|&]|$)'
+action = "block"
+reason = "recursive deletion of an entire home directory, volume, mount root, or top-level tree"
+
+# credential dirs in BOTH forms. the absolute /Users/<name>/.ssh form was only
+# ever covered as a side effect of the catch-all, so narrowing without this
+# would have dropped it.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.(ssh|aws|gnupg|config|netrc)'
+action = "block"
+reason = "recursive deletion of credential directory (tilde or absolute home path)"
+
+# wildcard over home dot-entries: `rm -rf ~/.c*` sweeps ~/.claude, ~/.sentinel,
+# ~/.ssh and ~/.aws in one call, and the guard-disarm rules below cannot see it -
+# they need the literal `.claude`/`.sentinel` token and PreToolUse sees the
+# pre-expansion string. scoped to a glob metachar in the dot-entry NAME, so
+# literal deletes (`rm -rf ~/.cargo`) and subpath deletes (`rm -rf ~/.cache/*`)
+# stay allowed.
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(?:[^\s;&|\n]+\s+)*(?:~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+)/\.[^\s;&|"\x27/]*[*?\[]'
+action = "block"
+reason = "wildcard recursive deletion across home dot-entries (sweeps .ssh/.aws/.claude/.sentinel - guard-disarm)"
+
+[[deny.commands]]
+pattern = 'rm\s+-rf\s+(~|\$HOME)/?(\s|$)'
+action = "block"
+reason = "recursive deletion of the entire home directory"
+

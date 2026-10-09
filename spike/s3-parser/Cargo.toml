@@ -1,0 +1,16 @@
+[package]
+name = "s3-parser-spike"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "throwaway harness for spike S3: brush-parser vs tree-sitter-bash coverage on the sentinel command corpus"
+
+# Standalone crate, not a workspace member of sentinel-guard. It keeps its
+# own Cargo.lock so the root lock never changes.
+[workspace]
+
+[dependencies]
+brush-parser = "0.4"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
