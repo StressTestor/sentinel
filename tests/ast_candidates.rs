@@ -110,47 +110,11 @@ fn candidates(command: &str, use_ast: bool) -> Candidates {
     }
 }
 
-/// The MUST_* string literals of `policy_fp_regression.rs`, read from its
-/// source so the corpus has one home. Only `\"` and `\\` escapes occur there.
 fn fp_corpus() -> Vec<String> {
-    let source = include_str!("policy_fp_regression.rs");
-    let mut out = Vec::new();
-    let mut in_list = false;
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("const MUST_") && trimmed.ends_with("&[") {
-            in_list = true;
-            continue;
-        }
-        if in_list && trimmed == "];" {
-            in_list = false;
-            continue;
-        }
-        if !in_list || !trimmed.starts_with('"') || !trimmed.ends_with("\",") {
-            continue;
-        }
-        let body = &trimmed[1..trimmed.len() - 2];
-        let mut unescaped = String::with_capacity(body.len());
-        let mut chars = body.chars();
-        while let Some(c) = chars.next() {
-            if c == '\\' {
-                match chars.next() {
-                    Some('n') => unescaped.push('\n'),
-                    Some(next) => unescaped.push(next),
-                    None => unescaped.push('\\'),
-                }
-            } else {
-                unescaped.push(c);
-            }
-        }
-        out.push(unescaped);
-    }
-    assert!(
-        out.len() >= 100,
-        "expected the whole FP corpus, read {} commands",
-        out.len()
-    );
-    out
+    common::fp_corpus()
+        .into_iter()
+        .map(|(_, command)| command)
+        .collect()
 }
 
 fn corpus() -> Vec<(&'static str, String)> {

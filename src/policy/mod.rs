@@ -726,6 +726,17 @@ impl PolicyEngine {
     }
 }
 
+/// Whether a match block fires on a command, exactly as `evaluate` decides it
+/// (both parsed views, a definite match only). For the agreement test in
+/// `tests/predicate_agreement.rs`.
+#[doc(hidden)]
+pub fn match_block_fires(spec: &schema::MatchSpec, command: &str) -> bool {
+    matches!(
+        ParsedViews::of(command).outcome(spec),
+        PredicateOutcome::Match(_)
+    )
+}
+
 /// What a rule's match block decided across the parsed views of a command.
 enum PredicateOutcome {
     Match(String),

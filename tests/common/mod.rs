@@ -150,3 +150,53 @@ pub fn assert_inert(fragment: &str) {
 pub fn printf_command(fragment: &str) -> String {
     format!("printf \"%s\\0\" {fragment}")
 }
+
+/// The MUST_* string literals of `policy_fp_regression.rs` (the 2026-08
+/// false-positive corpus), read from its source so the corpus has one home.
+/// Returns `(list name, command)`. Only `\"`, `\\` and `\n` escapes occur
+/// there.
+pub fn fp_corpus() -> Vec<(String, String)> {
+    let source = include_str!("../policy_fp_regression.rs");
+    let mut out = Vec::new();
+    let mut list: Option<String> = None;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("const MUST_") {
+            if trimmed.ends_with("&[") {
+                list = rest.split(':').next().map(|name| format!("MUST_{name}"));
+                continue;
+            }
+        }
+        if list.is_some() && trimmed == "];" {
+            list = None;
+            continue;
+        }
+        let Some(name) = &list else {
+            continue;
+        };
+        if !trimmed.starts_with('"') || !trimmed.ends_with("\",") {
+            continue;
+        }
+        let body = &trimmed[1..trimmed.len() - 2];
+        let mut unescaped = String::with_capacity(body.len());
+        let mut chars = body.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => unescaped.push('\n'),
+                    Some(next) => unescaped.push(next),
+                    None => unescaped.push('\\'),
+                }
+            } else {
+                unescaped.push(c);
+            }
+        }
+        out.push((name.clone(), unescaped));
+    }
+    assert!(
+        out.len() >= 100,
+        "expected the whole FP corpus, read {} commands",
+        out.len()
+    );
+    out
+}

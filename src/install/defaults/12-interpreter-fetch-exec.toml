@@ -9,8 +9,22 @@
 # (A) fetch side: raw network I/O from an inline script. `requests` must be
 # CALLED, `socket` must be socket.socket()/create_connection - not bare words.
 # Command normalization restores lexically correlated Python network aliases.
+# the match block searches the inline-code argument (after the same alias
+# normalization) for literal needles: the `requests.<method>(` family is
+# enumerated, and `require(` / `import(` / `fetch(` are listed in their
+# common quoted spellings, so the block is narrower than the regex and never
+# fires where the regex would not.
 [[deny.commands]]
 pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(urllib|httplib|http\.client|net/http|open-uri|requests\.[A-Za-z_]+\(|socket\.socket\(|socket\.create_connection|Net::HTTP|require\(\s*[\x27"](http|https|net|dgram|tls)[\x27"]\s*\)|import\(\s*[\x27"](http|https|net)[\x27"]|fetch\(\s*[\x27"`]https?://)'
+match.interpreter_eval.interpreters = ["python", "python3", "perl", "ruby", "node", "deno", "bun", "php", "osascript"]
+match.interpreter_eval.contains = [
+  "urllib", "httplib", "http.client", "net/http", "open-uri",
+  "requests.get(", "requests.post(", "requests.put(", "requests.patch(", "requests.delete(", "requests.head(", "requests.options(", "requests.request(", "requests.Session(", "requests.session(",
+  "socket.socket(", "socket.create_connection", "Net::HTTP",
+  "require('http')", "require(\"http\")", "require('https')", "require(\"https\")", "require('net')", "require(\"net\")", "require('dgram')", "require(\"dgram\")", "require('tls')", "require(\"tls\")",
+  "import('http')", "import(\"http\")", "import('https')", "import(\"https\")", "import('net')", "import(\"net\")",
+  "fetch('http://", "fetch(\"http://", "fetch(`http://", "fetch('https://", "fetch(\"https://", "fetch(`https://",
+]
 action = "block"
 reason = "inline interpreter script performing raw network I/O (fetch / exfil / reverse shell)"
 
@@ -19,8 +33,17 @@ reason = "inline interpreter script performing raw network I/O (fetch / exfil / 
 # absent, `.exec(` method calls are excluded via [^.\w] so sqlite db.exec() is
 # unaffected, and `exec(` rather than the bare word keeps `docker compose exec`
 # and `codex exec --help` out.
+# the match block carries the needles a substring can express; the bare
+# `exec(` / `eval(` / `system(` calls need the `[^.\w]` method-call exclusion
+# and stay regex-only.
 [[deny.commands]]
 pattern = '(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(os\.system\(|os\.popen\(|os\.dup2|pty\.spawn|shell\s*=\s*True|child_process|\bexecSync\(|\bexecFileSync\(|\bspawnSync\(|(^|[^.\w])exec\(|(^|[^.\w])eval\(|IO\.popen|(^|[^.\w])system\()'
+match.interpreter_eval.interpreters = ["python", "python3", "perl", "ruby", "node", "deno", "bun", "php", "osascript"]
+match.interpreter_eval.contains = [
+  "os.system(", "os.popen(", "os.dup2", "pty.spawn",
+  "shell=True", "shell = True", "shell =True", "shell= True",
+  "child_process", "execSync(", "execFileSync(", "spawnSync(", "IO.popen",
+]
 action = "block"
 reason = "inline interpreter script executing a shell string / hijacking fds / evaluating dynamic code (payload laundering)"
 

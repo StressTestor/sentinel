@@ -29,6 +29,7 @@ pub enum PublishedGeneration {
     V0_4_1,
     Draft2026_07_28,
     Rev2026_07_28_1,
+    Rev2026_08_07_1,
 }
 
 impl fmt::Display for PublishedGeneration {
@@ -38,12 +39,38 @@ impl fmt::Display for PublishedGeneration {
             Self::V0_4_1 => write!(f, "published 0.4.1"),
             Self::Draft2026_07_28 => write!(f, "draft revision 2026-07-28"),
             Self::Rev2026_07_28_1 => write!(f, "revision 2026-07-28.1"),
+            Self::Rev2026_08_07_1 => write!(f, "revision 2026-08-07.1"),
         }
     }
 }
 
 const DRAFT_POLICY_REVISION: &str = "2026-07-28";
-const PRIOR_POLICY_REVISION: &str = "2026-07-28.1";
+const REV_2026_07_28_1: &str = "2026-07-28.1";
+/// The generation right before the current one: identical rules, without the
+/// parse-backed `match` blocks of `MATCH_BLOCKS_ADDED_2026_10_09_1`.
+const REV_2026_08_07_1: &str = "2026-08-07.1";
+
+/// Rules that gained a `match` block in revision 2026-10-09.1 (the parse-backed
+/// predicates of workstream D), identified by their unchanged pattern. Every
+/// older baseline is the current default with these blocks removed.
+const MATCH_BLOCKS_ADDED_2026_10_09_1: &[(&str, RuleSection)] = &[
+    (
+        r#"\b(curl|wget|fetch)\b[^|]*\|(?:[^|]*\|)*\s*(?:(?:[\w./-]*/)?(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs)\b[^|]*\s)?[a-z/]*sh\b"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{1,2}&?[^\s;&|]*|[({!])\s*)*(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(urllib|httplib|http\.client|net/http|open-uri|requests\.[A-Za-z_]+\(|socket\.socket\(|socket\.create_connection|Net::HTTP|require\(\s*[\x27"](http|https|net|dgram|tls)[\x27"]\s*\)|import\(\s*[\x27"](http|https|net)[\x27"]|fetch\(\s*[\x27"`]https?://)"#,
+        RuleSection::DenyCommands,
+    ),
+    (
+        r#"(?s)\b(python3?|perl|ruby|node|deno|bun|php|osascript)\b\s+(-\w*[ce]\b|--eval\b).*(os\.system\(|os\.popen\(|os\.dup2|pty\.spawn|shell\s*=\s*True|child_process|\bexecSync\(|\bexecFileSync\(|\bspawnSync\(|(^|[^.\w])exec\(|(^|[^.\w])eval\(|IO\.popen|(^|[^.\w])system\()"#,
+        RuleSection::DenyCommands,
+    ),
+];
 
 #[derive(Debug)]
 pub enum MigrationInspection {
@@ -148,6 +175,7 @@ impl RuleSection {
     fn managed_fields(self) -> &'static [&'static str] {
         match self {
             Self::AllowPaths => &["pattern", "note"],
+            Self::DenyCommands => &["pattern", "action", "reason", "match"],
             _ => &["pattern", "action", "reason"],
         }
     }
@@ -422,9 +450,13 @@ pub fn inspect_content(content: &str) -> Result<MigrationInspection, MigrationEr
             PublishedGeneration::Draft2026_07_28,
             draft_default("enforce")?,
         ),
-        Some(revision) if revision == PRIOR_POLICY_REVISION => (
+        Some(revision) if revision == REV_2026_07_28_1 => (
             PublishedGeneration::Rev2026_07_28_1,
             prior_default("enforce")?,
+        ),
+        Some(revision) if revision == REV_2026_08_07_1 => (
+            PublishedGeneration::Rev2026_08_07_1,
+            rev_2026_08_07_1_default("enforce")?,
         ),
         Some(revision) => return Err(MigrationError::UnsupportedRevision(revision)),
         None => {
@@ -591,6 +623,7 @@ fn published_default(
         .and_then(Item::as_table_mut)
         .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
     policy.remove("revision");
+    strip_match_blocks(&mut doc)?;
 
     for (pattern, section) in MCP_TRUST_ADDITIONS
         .iter()
@@ -620,6 +653,7 @@ fn draft_default(mode: &str) -> Result<DocumentMut, MigrationError> {
         .and_then(Item::as_table_mut)
         .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
     policy.insert("revision", value(DRAFT_POLICY_REVISION));
+    strip_match_blocks(&mut doc)?;
     for (pattern, section) in MCP_TRUST_ADDITIONS
         .iter()
         .chain(ADDED_AFTER_2026_07_28_1.iter())
@@ -632,15 +666,14 @@ fn draft_default(mode: &str) -> Result<DocumentMut, MigrationError> {
     Ok(doc)
 }
 
-/// the 2026-07-28.1 revision: the current default minus only the FP-audit split.
-/// every other rule is identical, so this is the shallowest baseline in the ladder.
+/// the 2026-07-28.1 revision: the 2026-08-07.1 default minus the FP-audit split.
 fn prior_default(mode: &str) -> Result<DocumentMut, MigrationError> {
-    let mut doc = parse_document(&default_policy_content(mode))?;
+    let mut doc = rev_2026_08_07_1_default(mode)?;
     let policy = doc
         .get_mut("policy")
         .and_then(Item::as_table_mut)
         .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
-    policy.insert("revision", value(PRIOR_POLICY_REVISION));
+    policy.insert("revision", value(REV_2026_07_28_1));
     for (pattern, section) in ADDED_AFTER_2026_07_28_1 {
         remove_rule(&mut doc, *section, pattern)?;
     }
@@ -648,6 +681,48 @@ fn prior_default(mode: &str) -> Result<DocumentMut, MigrationError> {
         reverse_rule_change(&mut doc, *change)?;
     }
     Ok(doc)
+}
+
+/// the 2026-08-07.1 revision: the current default minus only the parse-backed
+/// `match` blocks. every rule's pattern, action and reason is identical, so this
+/// is the shallowest baseline in the ladder.
+fn rev_2026_08_07_1_default(mode: &str) -> Result<DocumentMut, MigrationError> {
+    let mut doc = parse_document(&default_policy_content(mode))?;
+    let policy = doc
+        .get_mut("policy")
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| MigrationError::Internal("current default lacks [policy]".into()))?;
+    policy.insert("revision", value(REV_2026_08_07_1));
+    strip_match_blocks(&mut doc)?;
+    Ok(doc)
+}
+
+/// Remove the `match` block from every rule that gained one in 2026-10-09.1.
+fn strip_match_blocks(doc: &mut DocumentMut) -> Result<(), MigrationError> {
+    for (pattern, section) in MATCH_BLOCKS_ADDED_2026_10_09_1 {
+        let tables = tables_mut(doc, *section)
+            .ok_or_else(|| MigrationError::Internal(format!("missing {}", section.label())))?;
+        let matches = matching_indices(tables, pattern);
+        if matches.len() != 1 {
+            return Err(MigrationError::Internal(format!(
+                "{} expected one {:?} rule with a match block, found {}",
+                section.label(),
+                pattern,
+                matches.len()
+            )));
+        }
+        let table = tables
+            .get_mut(matches[0])
+            .expect("matching index came from this array");
+        if table.remove("match").is_none() {
+            return Err(MigrationError::Internal(format!(
+                "{} rule {:?} carries no match block",
+                section.label(),
+                pattern
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn reverse_rule_change(doc: &mut DocumentMut, change: RuleChange) -> Result<(), MigrationError> {
@@ -717,7 +792,7 @@ fn semantic_distance(local: &DocumentMut, base: &DocumentMut) -> usize {
                 continue;
             }
             for field in section.managed_fields() {
-                if string_field(matches[0], field) != string_field(base_rule, field) {
+                if field_repr(matches[0], field) != field_repr(base_rule, field) {
                     score += 1;
                 }
             }
@@ -863,9 +938,9 @@ fn merge_rule_fields(
         .or_else(|| string_field(current, "pattern"))
         .unwrap_or("<missing pattern>");
     for field in section.managed_fields() {
-        let base_value = string_field(base, field);
-        let local_value = string_field(local, field);
-        let current_value = string_field(current, field);
+        let base_value = field_repr(base, field);
+        let local_value = field_repr(local, field);
+        let current_value = field_repr(current, field);
         if current_value == base_value || local_value == current_value {
             continue;
         }
@@ -912,7 +987,13 @@ fn pattern_for_generation(
     section: RuleSection,
     current_pattern: &str,
 ) -> Option<String> {
-    // newest layer first: the FP-audit split post-dates every generation here.
+    // newest layer first: 2026-10-09.1 added match blocks to existing rules
+    // and changed no pattern, so the 2026-08-07.1 baseline has every current
+    // pattern as is.
+    if generation == PublishedGeneration::Rev2026_08_07_1 {
+        return Some(current_pattern.to_string());
+    }
+    // the FP-audit split post-dates every generation below.
     if ADDED_AFTER_2026_07_28_1
         .iter()
         .any(|(pattern, candidate)| *candidate == section && *pattern == current_pattern)
@@ -967,7 +1048,24 @@ fn managed_equal(section: RuleSection, left: &Table, right: &Table) -> bool {
     section
         .managed_fields()
         .iter()
-        .all(|field| string_field(left, field) == string_field(right, field))
+        .all(|field| field_repr(left, field) == field_repr(right, field))
+}
+
+/// A comparable rendering of a managed field: the string itself for a string
+/// field, and the canonical JSON of the value for a structured one (the
+/// `match` block), so two spellings of the same block compare equal and
+/// decor never counts.
+fn field_repr(table: &Table, field: &str) -> Option<String> {
+    let item = table.get(field)?;
+    if let Some(text) = item.as_str() {
+        return Some(text.to_string());
+    }
+    let mut holder = DocumentMut::new();
+    holder.insert(field, item.clone());
+    let value: toml::Value = toml_edit::de::from_document(holder).ok()?;
+    value
+        .get(field)
+        .and_then(|value| serde_json::to_string(value).ok())
 }
 
 fn unique_rule<'a>(rules: &'a [Table], pattern: &str) -> Result<Option<&'a Table>, MigrationError> {
@@ -1230,7 +1328,7 @@ mod tests {
     fn default_has_explicit_revision_and_schema_accepts_it() {
         let content = default_policy_content("enforce");
         assert!(content.contains(&format!("revision = \"{CURRENT_POLICY_REVISION}\"")));
-        assert_eq!(CURRENT_POLICY_REVISION, "2026-08-07.1");
+        assert_eq!(CURRENT_POLICY_REVISION, "2026-10-09.1");
         let engine = PolicyEngine::from_toml_str(&content).unwrap();
         assert_eq!(engine.mode(), "enforce");
     }
@@ -1314,13 +1412,177 @@ mod tests {
         assert_eq!(applied.from, PublishedGeneration::Draft2026_07_28);
         assert_eq!(fs::read_to_string(&applied.backup_path).unwrap(), old);
         let migrated = fs::read_to_string(&path).unwrap();
-        assert!(migrated.contains("revision = \"2026-08-07.1\""));
+        assert!(migrated.contains("revision = \"2026-10-09.1\""));
         assert!(migrated.contains("mode = \"audit\""));
         assert!(matches!(
             inspect_content(&migrated).unwrap(),
             MigrationInspection::Current
         ));
         assert!(apply_path(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn revision_2026_08_07_1_gains_only_the_match_blocks() {
+        // the baseline is the current default with exactly the four match
+        // blocks removed: same rule count, same patterns, no `match` key
+        let base = rev_2026_08_07_1_default("enforce").unwrap();
+        let current = parse_document(&default_policy_content("enforce")).unwrap();
+        assert_eq!(
+            policy_revision(&base).unwrap().as_deref(),
+            Some(REV_2026_08_07_1)
+        );
+        let count = |doc: &DocumentMut| -> usize {
+            RuleSection::ALL
+                .iter()
+                .filter_map(|section| tables(doc, *section))
+                .map(ArrayOfTables::len)
+                .sum()
+        };
+        assert_eq!(count(&base), count(&current));
+        let with_match = |doc: &DocumentMut| -> usize {
+            tables(doc, RuleSection::DenyCommands)
+                .unwrap()
+                .iter()
+                .filter(|rule| rule.contains_key("match"))
+                .count()
+        };
+        assert_eq!(with_match(&current), MATCH_BLOCKS_ADDED_2026_10_09_1.len());
+        assert_eq!(with_match(&base), 0);
+        for (pattern, section) in MATCH_BLOCKS_ADDED_2026_10_09_1 {
+            assert_eq!(
+                matching_indices(tables(&base, *section).unwrap(), pattern).len(),
+                1
+            );
+        }
+        // every older baseline is free of match blocks too
+        assert_eq!(with_match(&prior_default("enforce").unwrap()), 0);
+        assert_eq!(with_match(&draft_default("enforce").unwrap()), 0);
+        assert_eq!(
+            with_match(&published_default(PublishedGeneration::V0_4_1, "enforce").unwrap()),
+            0
+        );
+    }
+
+    #[test]
+    fn revision_2026_08_07_1_check_apply_and_idempotence_are_exact() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let mut old = rev_2026_08_07_1_default("audit").unwrap().to_string();
+        old = old.replace(
+            "on_failure = \"closed\"",
+            "on_failure = \"open\" # joe keeps fail-open",
+        );
+        old = append_custom_rule(&old, r"\bjoe-only-command\b", "warn");
+        fs::write(&path, &old).unwrap();
+
+        let MigrationInspection::Needed(plan) = inspect_content(&old).unwrap() else {
+            panic!("revision 2026-08-07.1 unexpectedly read current");
+        };
+        assert_eq!(plan.from, PublishedGeneration::Rev2026_08_07_1);
+        // the only rule changes are the four match blocks
+        let rule_changes: Vec<&String> = plan
+            .changes
+            .iter()
+            .filter(|change| !change.starts_with("set [policy].revision"))
+            .collect();
+        assert_eq!(rule_changes.len(), MATCH_BLOCKS_ADDED_2026_10_09_1.len());
+        assert!(
+            rule_changes.iter().all(|c| c.ends_with("field match")),
+            "{rule_changes:?}"
+        );
+
+        let check_error = run(PolicyMigrateArgs {
+            check: true,
+            apply: false,
+            policy: Some(path.clone()),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(check_error.contains("revision 2026-08-07.1"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), old);
+
+        let applied = apply_path(&path).unwrap().expect("migration needed");
+        assert_eq!(applied.from, PublishedGeneration::Rev2026_08_07_1);
+        assert_eq!(fs::read_to_string(&applied.backup_path).unwrap(), old);
+        let migrated = fs::read_to_string(&path).unwrap();
+        assert!(migrated.contains(&format!("revision = \"{CURRENT_POLICY_REVISION}\"")));
+        assert!(migrated.contains("mode = \"audit\""));
+        assert!(migrated.contains("# joe keeps fail-open"));
+        assert!(migrated.contains("# joe custom rule stays here"));
+        // the blocks land as the dotted keys the bundled file uses, and the
+        // migrated policy evaluates them
+        assert!(migrated.contains("match.exec = [\"curl\", \"wget\", \"fetch\"]"));
+        assert!(migrated.contains("match.interpreter_eval.contains = ["));
+        let engine = PolicyEngine::load(&path).unwrap();
+        let with_match = engine
+            .rules()
+            .into_iter()
+            .filter(|r| r.matcher.is_some())
+            .count();
+        assert_eq!(with_match, MATCH_BLOCKS_ADDED_2026_10_09_1.len());
+        assert!(matches!(
+            inspect_content(&migrated).unwrap(),
+            MigrationInspection::Current
+        ));
+        assert!(apply_path(&path).unwrap().is_none());
+        // the migrated file parses back to the same match blocks as the default
+        let migrated_doc = parse_document(&migrated).unwrap();
+        let current = parse_document(&default_policy_content("audit")).unwrap();
+        for (pattern, section) in MATCH_BLOCKS_ADDED_2026_10_09_1 {
+            let local = tables(&migrated_doc, *section).unwrap();
+            let bundled = tables(&current, *section).unwrap();
+            let local_rule = local.get(matching_indices(local, pattern)[0]).unwrap();
+            let bundled_rule = bundled.get(matching_indices(bundled, pattern)[0]).unwrap();
+            assert_eq!(
+                field_repr(local_rule, "match"),
+                field_repr(bundled_rule, "match")
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_written_match_block_that_differs_is_a_conflict() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let (pattern, _) = MATCH_BLOCKS_ADDED_2026_10_09_1[0];
+        let old = rev_2026_08_07_1_default("enforce")
+            .unwrap()
+            .to_string()
+            .replace(
+                &format!("pattern = '{pattern}'\n"),
+                &format!("pattern = '{pattern}'\nmatch.exec = [\"curl\"]\n"),
+            );
+        assert!(
+            old.contains("match.exec = [\"curl\"]"),
+            "fixture edit missed"
+        );
+        fs::write(&path, &old).unwrap();
+        let error = apply_path(&path).unwrap_err();
+        let MigrationError::Conflicts(detail) = error else {
+            panic!("expected a conflict, got {error}");
+        };
+        assert!(detail.contains("field match"), "{detail}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), old);
+        // a user who wrote the identical block is not in conflict
+        let same = rev_2026_08_07_1_default("enforce")
+            .unwrap()
+            .to_string()
+            .replace(
+                &format!("pattern = '{pattern}'\n"),
+                &format!(
+                    "pattern = '{pattern}'\nmatch = {{ exec = [\"curl\", \"wget\", \"fetch\"], piped_to = [\"sh\", \"bash\", \"zsh\", \"dash\", \"ksh\", \"ash\", \"fish\", \"csh\", \"tcsh\", \"mksh\", \"yash\"] }}\n"
+                ),
+            );
+        let MigrationInspection::Needed(plan) = inspect_content(&same).unwrap() else {
+            panic!("unexpectedly current");
+        };
+        assert_eq!(
+            plan.changes
+                .iter()
+                .filter(|c| c.ends_with("field match"))
+                .count(),
+            MATCH_BLOCKS_ADDED_2026_10_09_1.len() - 1
+        );
     }
 
     #[test]
