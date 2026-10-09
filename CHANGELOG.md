@@ -7,6 +7,35 @@ versioning.
 ## [Unreleased]
 
 ### Added
+- Library target (`src/lib.rs`). The crate now exposes its module tree as a
+  library next to the `sentinel` binary so fuzz targets and integration tests
+  can call the parsers and the policy pipeline directly. The binary is unchanged
+  and no API stability is promised.
+- Fuzz crate (`fuzz/`, cargo-fuzz, own workspace, not packaged) with five
+  libFuzzer targets: `shell_tokens` (no panic, bounded token size),
+  `decode_obfuscation` (no panic, idempotent), `brace_expand_checked` (no
+  panic, never more than the 64-way cap), `parse_apply_patch` (no panic), and
+  `evaluate_raw` (the whole hook pipeline on the bundled enforce policy, no
+  panic). Seed corpus under `fuzz/corpus/` built from the verify cases and the
+  demo replay script.
+- Differential harness (`tests/differential_shell.rs`, `#[ignore]`): a seeded
+  generator produces argument fragments (quotes, backslash escapes, `$'..'`,
+  `${IFS}`/`$IFS`, brace lists and sequences, nested braces, `~/` paths), runs
+  each through `bash -c 'printf "%s\0" ...'` with an empty environment, and
+  compares the words Bash resolved with the candidates Sentinel resolves for
+  the same command. Divergences are classified as under-resolve, over-resolve,
+  or documented non-goal; the test fails on anything unexplained.
+- Nightly workflow (`.github/workflows/nightly.yml`): ten minutes of fuzzing
+  per target plus the differential harness, daily and on demand.
+- Version-stamped Claude Code hook fixtures
+  (`tests/fixtures/hooks/claude-code-2.1.295-*.json`, pinned in
+  `VERIFIED_CLAUDE_CODE_VERSION`) driven through the binary by
+  `tests/hook_contract.rs`, asserting the decision and the audit line's
+  `tool_use_id`. The PreToolUse payload shape was captured live from 2.1.295,
+  which adds `scratchpad_dir`, `prompt_id`, `permission_mode`, and `effort`.
+- Weekly workflow (`.github/workflows/claude-code-version-watch.yml`) that
+  compares the published `@anthropic-ai/claude-code` version with the verified
+  one and opens or refreshes a tracking issue when it has moved.
 - **Rule ids and decision witnesses.** Every policy rule accepts an optional
   `id`; a rule without one is addressed as `<section>:<8 hex of
   sha256(pattern)>`. `PolicyDecision`, `sentinel check --json`, and each
@@ -44,6 +73,19 @@ versioning.
   update those fixtures in the same commit.
 
 ### Security
+- **Keep ANSI-C decoded text one shell word (found by the bash differential
+  harness).** `decode_obfuscation` spliced a decoded `$'..'` body into the
+  command bare, so a decoded space or newline split the path at re-tokenization:
+  `cat ~/Library/$'Application\x20Support'/Google/Chrome/Default/Cookies` read
+  the file while the candidates `~/Library/Application` and
+  `Support/Google/...` matched nothing. A decoded `{` could also be mistaken
+  for a brace list. Decoded bodies that contain whitespace or a shell
+  metacharacter are now re-quoted (single quotes, or backslash-escaped inside
+  double quotes), a span inside single quotes or after an escaped `$` is left
+  literal, `$$` is read as the PID parameter, and the decoded view now carries
+  brace provenance for braces that were unquoted in the original word, so
+  `cat ~/.ss$'h'/{id_rsa,x}` reaches `~/.ssh/*`. Decoding is idempotent, which
+  the fuzz target checks.
 - **`disableAllHooks` is treated as a hook removal.** A Claude settings write
   from any scope whose resulting document sets `disableAllHooks: true` is
   blocked whenever a live sentinel hook exists, because that key turns off

@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-old
++new
+*** Update File: ~/.sentinel/policy.toml
+@@
+-mode = "enforce"
++mode = "audit"
+*** End Patch

@@ -16,8 +16,11 @@
 /// Returns `Some(decoded)` only when the result differs from the input (so the
 /// hot path can skip a redundant second match), `None` otherwise.
 pub fn decode_obfuscation(cmd: &str) -> Option<String> {
-    let step1 = desugar_ifs(cmd);
-    let step2 = decode_ansi_c(&step1);
+    // ANSI-C first: a decoded body may spell `$IFS` (`$'\x24IFS'`), and the
+    // IFS pass must see the same text on every run or decoding is not
+    // idempotent (fuzz finding).
+    let step1 = decode_ansi_c(cmd);
+    let step2 = desugar_ifs(&step1);
     if step2 != cmd {
         Some(step2)
     } else {
@@ -29,7 +32,7 @@ pub fn decode_obfuscation(cmd: &str) -> Option<String> {
 /// expanding it. Quotes and backslash escapes protect whitespace/separators and
 /// are removed from the resulting word, while real command separators remain
 /// tokens. Malformed quoting returns `None`: such a command is not executable.
-pub(crate) fn shell_tokens(command: &str) -> Option<Vec<String>> {
+pub fn shell_tokens(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut token_started = false;
@@ -128,11 +131,32 @@ fn desugar_ifs(cmd: &str) -> String {
     let mut i = 0;
     while i < cmd.len() {
         let rest = &cmd[i..];
+        if rest.starts_with('\\') {
+            // `\$IFS` is a literal dollar: copy the escape pair untouched
+            let mut pair = rest.chars();
+            out.push('\\');
+            i += 1;
+            if let Some(next) = pair.nth(1) {
+                out.push(next);
+                i += next.len_utf8();
+            }
+            continue;
+        }
         if rest.starts_with("${IFS") {
+            // the operator part of `${IFS...}` never contains quotes,
+            // backslashes, `$`, backticks or whitespace; refusing those keeps
+            // the scan from crossing a quote and swallowing a body the
+            // ANSI-C pass re-quoted (fuzz finding)
             if let Some(close) = rest.find('}') {
-                out.push(' ');
-                i += close + 1;
-                continue;
+                let operator = &rest["${IFS".len()..close];
+                if !operator
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | '\\' | '$' | '`'))
+                {
+                    out.push(' ');
+                    i += close + 1;
+                    continue;
+                }
             }
         }
         if let Some(after_ifs) = rest.strip_prefix("$IFS") {
@@ -151,6 +175,19 @@ fn desugar_ifs(cmd: &str) -> String {
 }
 
 /// Decode every `$'...'` ANSI-C-quoted span in the command to its literal text.
+///
+/// Three rules keep the decoded view faithful to what the shell runs and make
+/// decoding idempotent:
+///   - a span inside single quotes is literal text (bash never decodes it) and
+///     a backslash-escaped `$` is not a span start, so both are left alone;
+///   - a decoded body containing whitespace or a shell metacharacter is
+///     re-quoted (`'...'`, or backslash-escaped inside double quotes) so the
+///     tokenizers still see one word: `$'Application\x20Support'` must not
+///     split into two path candidates, and a decoded `{` or `$'` must not gain
+///     brace provenance or start a second decode;
+///   - a span inside double quotes is still decoded, on purpose: bash leaves
+///     `"$'..'"` literal, but a nested `bash -c "..."` decodes it, and the
+///     decoded view is additive evidence only.
 fn decode_ansi_c(cmd: &str) -> String {
     if !cmd.contains("$'") {
         return cmd.to_string();
@@ -158,8 +195,45 @@ fn decode_ansi_c(cmd: &str) -> String {
     let chars: Vec<char> = cmd.chars().collect();
     let mut out = String::with_capacity(cmd.len());
     let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    // `$$` is the PID parameter, so the second `$` never starts a span; this
+    // also keeps a re-quoted body from fusing with a preceding `$` into `$'`.
+    let mut after_bare_dollar = false;
     while i < chars.len() {
-        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '\'' {
+        let c = chars[i];
+        let bare_dollar = std::mem::replace(&mut after_bare_dollar, false);
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '\\' {
+            // outside single quotes a backslash protects the next character,
+            // so `\$'x'` is a literal dollar followed by an ordinary quote
+            out.push(c);
+            if let Some(next) = chars.get(i + 1) {
+                out.push(*next);
+            }
+            i += 2;
+            continue;
+        }
+        if c == '"' {
+            in_double = !in_double;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '$' && !bare_dollar && chars.get(i + 1) == Some(&'\'') {
             let mut j = i + 2;
             let mut body = String::new();
             let mut closed = false;
@@ -178,19 +252,56 @@ fn decode_ansi_c(cmd: &str) -> String {
                 }
             }
             if closed {
-                out.push_str(&body);
+                out.push_str(&requote_decoded(&body, in_double));
                 i = j + 1;
                 continue;
             }
-            // unterminated $'...': leave as written
-            out.push('$');
-            out.push('\'');
-            i += 2;
-            continue;
+            // unterminated $'...: not executable; leave the rest as written
+            out.extend(chars[i..].iter());
+            break;
         }
-        out.push(chars[i]);
+        after_bare_dollar = c == '$';
+        out.push(c);
         i += 1;
     }
+    out
+}
+
+/// Characters that would change how the tokenizers or a second decode read a
+/// decoded body if it were spliced in bare.
+fn needs_requote(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '\'' | '"' | '\\' | '$' | '`' | '|' | '&' | ';' | '<' | '>' | '(' | ')' | '{' | '}'
+        )
+}
+
+/// Splice a decoded ANSI-C body back into the command as one shell word.
+fn requote_decoded(body: &str, in_double: bool) -> String {
+    if in_double {
+        let mut out = String::with_capacity(body.len());
+        for c in body.chars() {
+            if matches!(c, '"' | '\\' | '$' | '`') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        return out;
+    }
+    if !body.chars().any(needs_requote) {
+        return body.to_string();
+    }
+    let mut out = String::with_capacity(body.len() + 2);
+    out.push('\'');
+    for c in body.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
     out
 }
 
@@ -571,6 +682,82 @@ mod tests {
             decode_obfuscation("cat $'\\u002fetc\\u002fpasswd'").as_deref(),
             Some("cat /etc/passwd")
         );
+    }
+
+    #[test]
+    fn ansi_c_body_with_space_stays_one_word() {
+        // bash reads one file whose name has a space; the decoded view must
+        // keep it one word or a `~/Library/Application Support/**` rule misses
+        let decoded =
+            decode_obfuscation("cat ~/Library/$'Application\\x20Support'/Google/x").unwrap();
+        assert_eq!(decoded, "cat ~/Library/'Application Support'/Google/x");
+        assert_eq!(
+            shell_tokens(&decoded).unwrap(),
+            vec!["cat", "~/Library/Application Support/Google/x"]
+        );
+        // a decoded newline or quote is protected the same way
+        assert_eq!(
+            decode_obfuscation("x $'a\\nb' $'c\\x27d'").as_deref(),
+            Some("x 'a\nb' 'c'\\''d'")
+        );
+    }
+
+    #[test]
+    fn decoded_metacharacters_do_not_gain_shell_meaning() {
+        // a decoded brace is quoted so it never earns brace provenance
+        assert_eq!(
+            decode_obfuscation("cat $'\\x7b'a,b}").as_deref(),
+            Some("cat '{'a,b}")
+        );
+        // a decoded body ending in `$` must not fuse with a following quote
+        // into a new `$'` span (fuzz finding: decode was not idempotent)
+        let once = decode_obfuscation("$'a$''b'").unwrap();
+        assert_eq!(once, "'a$''b'");
+        assert_eq!(decode_obfuscation(&once), None);
+    }
+
+    #[test]
+    fn ansi_c_decoding_respects_single_quotes_and_backslashes() {
+        // inside single quotes bash never decodes
+        assert_eq!(decode_obfuscation("echo 'lit $'\\''\\x2f'\\'''"), None);
+        // an escaped dollar is a literal dollar, not a span start
+        assert_eq!(decode_obfuscation("echo a\\$'b'"), None);
+        // inside double quotes decoding stays on (nested `bash -c "..."`),
+        // with the body escaped for the double-quoted context
+        assert_eq!(
+            decode_obfuscation("bash -c \"cat $'\\x2fetc\\x2fpasswd'\"").as_deref(),
+            Some("bash -c \"cat /etc/passwd\"")
+        );
+        assert_eq!(
+            decode_obfuscation("echo \"$'\\x22\\x24'\"").as_deref(),
+            Some("echo \"\\\"\\$\"")
+        );
+        // unterminated spans are left as written
+        assert_eq!(decode_obfuscation("cat $'\\x2fetc"), None);
+        // `$$` is the PID parameter, not a span start (fuzz finding: the
+        // re-quoted body `'$'` fused with the leading `$` into a new span)
+        assert_eq!(decode_obfuscation("echo $$'$'"), None);
+        let once = decode_obfuscation("echo \\$$'a b'").unwrap();
+        assert_eq!(once, "echo \\$'a b'");
+        assert_eq!(decode_obfuscation(&once), None);
+        // an escaped dollar is not an IFS split either (fuzz finding: a
+        // decoded `$` escaped inside double quotes joined the text after the
+        // span into `\$IFS`, which a second pass desugared)
+        assert_eq!(decode_obfuscation("echo a\\$IFS b"), None);
+        let once = decode_obfuscation("echo \"$'\\x24'IFS\"").unwrap();
+        assert_eq!(once, "echo \"\\$IFS\"");
+        assert_eq!(decode_obfuscation(&once), None);
+        // a decoded body that spells `$IFS` is desugared on the first pass,
+        // not the second (fuzz finding: IFS used to run before ANSI-C)
+        let once = decode_obfuscation("echo $'\\x24IFS'").unwrap();
+        assert_eq!(once, "echo ' '");
+        assert_eq!(decode_obfuscation(&once), None);
+        // `${IFS` never scans across a quote: the `}` inside the re-quoted
+        // body must not close it (fuzz finding)
+        let once = decode_obfuscation("x${IFS$'S}'y'").unwrap();
+        assert_eq!(once, "x${IFS'S}'y'");
+        assert_eq!(decode_obfuscation(&once), None);
+        assert_eq!(decode_obfuscation("x${IFS 'a}'"), None);
     }
 
     #[test]

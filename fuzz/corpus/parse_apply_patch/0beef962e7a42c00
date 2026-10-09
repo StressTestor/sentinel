@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: ~/.sentinel/policy.toml
+@@
+-mode = "enforce"
++mode = "audit"
+*** End Patch

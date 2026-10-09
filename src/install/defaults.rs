@@ -103,7 +103,7 @@ const POLICY_FOOTER: &str = r#"# allow rules - if present, paths not matching an
 # note = "test files"
 "#;
 
-pub(crate) fn default_policy_content(mode: &str) -> String {
+pub fn default_policy_content(mode: &str) -> String {
     let mut content = format!(
         r#"# sentinel policy configuration
 # docs: https://github.com/StressTestor/sentinel

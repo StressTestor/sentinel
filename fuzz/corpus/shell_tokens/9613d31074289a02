@@ -1,0 +1,1 @@
+echo cd ~ && cat .ssh/id_rsa

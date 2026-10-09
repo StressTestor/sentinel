@@ -1,0 +1,4 @@
+*** Begin Patch
+*** Delete File: a.txt
+*** Move File: b.txt
+*** End Patch

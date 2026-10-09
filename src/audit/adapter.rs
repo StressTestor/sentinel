@@ -53,6 +53,9 @@ pub trait AgentAdapter {
 }
 
 pub trait AgentSession {
+    // The library target exposes this trait; it is only implemented and awaited
+    // inside this crate, so the missing Send bound of a public async fn is moot.
+    #[allow(async_fn_in_trait)]
     async fn send(&mut self, prompt: &str) -> Result<TurnRecord, AdapterError>;
 }
 

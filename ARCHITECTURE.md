@@ -42,6 +42,7 @@ sentinel/
 ├── README.md
 ├── corpus/v1/              versioned, bundled audit cases + provenance/license
 ├── src/
+│   ├── lib.rs              library surface: the same module tree, used by fuzz/ and tests/
 │   ├── main.rs             CLI entry, subcommand dispatch
 │   ├── cli.rs              clap arg definitions
 │   ├── why/
@@ -99,11 +100,15 @@ sentinel/
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger (0600/0700, symlink-refusing,
 │                           locked appends; tamper-covered by selfprotect)
+├── fuzz/                   cargo-fuzz crate (own workspace, not packaged): five libFuzzer targets + seed corpus
 ├── tests/
+│   ├── differential_shell.rs  bash word resolution vs sentinel resolution (ignored; nightly job)
+│   ├── hook_contract.rs    PreToolUse/PostToolUse wire contract + version-stamped Claude Code fixtures
 │   ├── home_config.rs      isolated HOME validation and relocated Claude lifecycle
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
 │       ├── corpus/         test attack sequences (3 TOML files)
+│       ├── hooks/          Codex payloads + claude-code-<version>-*.json, VERIFIED_CLAUDE_CODE_VERSION
 │       └── policy/         pinned default-enforce/default-audit policy.toml (byte-identity regression anchor)
 ├── scripts/
 │   ├── ad5-network-lint.sh network-import boundary gate
@@ -122,6 +127,8 @@ sentinel/
     ├── dependabot.yml      weekly cargo + github-actions update PRs
     └── workflows/
         ├── ci.yml          quality, MSRV, package, Linux, and macOS gates
+        ├── nightly.yml     ten minutes of libFuzzer per target + the bash differential harness, daily
+        ├── claude-code-version-watch.yml  weekly: opens an issue when npm's claude-code moves past the verified version
         ├── release.yml     identity, verification, four targets, SBOM, attest/publish
         ├── codeql.yml      CodeQL static analysis (rust + actions), push/PR + weekly
         ├── scorecard.yml   OpenSSF Scorecard, results published + SARIF upload
@@ -216,6 +223,37 @@ Host hook payload arrives
 > not catch as not caught. There is no second layer to fall back on, and that is
 > deliberate - a deterministic block you can audit beats a probabilistic one you
 > can't.
+
+### fuzz and differential testing
+
+The parsers that stand between hook input and a verdict are tested two ways
+beyond unit tests. `fuzz/` is a cargo-fuzz crate (its own workspace, not
+packaged) with five libFuzzer targets over the library: `shell_tokens` (no
+panic, token bytes bounded by the input), `decode_obfuscation` (no panic, and
+idempotent: a second decode changes nothing), `brace_expand_checked` (no panic,
+never more than the 64-way cap or an explicit error), `parse_apply_patch` (no
+panic), and `evaluate_raw` (the whole pipeline on the bundled enforce policy, no
+panic). Seeds under `fuzz/corpus/` come from the verify cases and the demo
+replay. `tests/differential_shell.rs` generates argument fragments from a small
+grammar (quotes, backslash escapes, `$'..'`, `${IFS}`/`$IFS`, brace lists,
+sequences, nested groups, `~/` paths), runs each through
+`bash -c 'printf "%s\0" ...'` in an empty environment, and checks that every
+word Bash resolved is among the candidates `HookInput::normalize` plus
+`brace_expand_checked` produce for the same command. Only `printf` executes.
+The nightly workflow runs ten minutes per fuzz target and the harness on 20000
+fragments; the harness is `#[ignore]` in ordinary CI.
+
+What this covers: the tokenizers, the ANSI-C and IFS decoder, brace expansion,
+the apply_patch parser, and the composition of those in the pipeline, against
+arbitrary bytes and against Bash's own word resolution. What it does not cover,
+by design: command substitution, parameter expansion other than IFS, pathname
+expansion (globs), `$'..'` or IFS inside quotes (decoded on purpose because a
+nested `sh -c` would decode them), a quoted tilde (treated as home), trailing
+list punctuation (trimmed from candidates), and a literal `$` in a path. One
+known divergence stays open and is listed in the harness: quoted or escaped
+text inside an unquoted brace group loses its quoting before expansion, so
+`./p{a,'b,c'}` expands to three candidates where Bash produces two. That
+over-resolves; it cannot hide a protected path, since none contains a comma.
 
 ### default policy coverage
 
