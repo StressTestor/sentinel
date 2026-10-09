@@ -481,15 +481,19 @@ impl Walker {
             "declaration_command" | "unset_command" | "test_command" => {
                 let mark = self.segments.len();
                 let mut words = Vec::new();
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.is_named() {
-                        words.push(self.word(tree, child));
-                    } else if words.is_empty() {
-                        words.push(Word {
-                            text: child.kind().to_string(),
-                            kind: WordKind::Literal,
-                        });
+                if node.kind() == "test_command" {
+                    words = self.test_words(tree, node);
+                } else {
+                    let mut cursor = node.walk();
+                    for child in node.children(&mut cursor) {
+                        if child.is_named() {
+                            words.push(self.word(tree, child));
+                        } else if words.is_empty() {
+                            words.push(Word {
+                                text: child.kind().to_string(),
+                                kind: WordKind::Literal,
+                            });
+                        }
                     }
                 }
                 self.push_before_nested(
@@ -525,6 +529,42 @@ impl Walker {
         }
     }
 
+    /// The words of a `[ ... ]` / `[[ ... ]]` test: the bracket as the command
+    /// word, then one word per whitespace-separated span of the expression.
+    /// tree-sitter parses the expression as operators and operands; the
+    /// spans are what bash's `[` builtin receives as arguments. A span that
+    /// carries quoting or an expansion is left unmodeled (conservative: a
+    /// test operand is never a command).
+    fn test_words(&mut self, tree: &Tree<'_>, node: tree_sitter::Node<'_>) -> Vec<Word> {
+        self.visit_nested(tree, node);
+        let mut atoms = Vec::new();
+        let mut last_end = node.start_byte();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect_atoms(child, tree.src, &mut atoms, &mut last_end);
+        }
+        atoms
+            .into_iter()
+            .filter(|atom| !matches!(atom.as_str(), "\n" | "]" | "]]"))
+            .map(|atom| {
+                if atom
+                    .chars()
+                    .any(|c| matches!(c, '$' | '`' | '\'' | '"' | '('))
+                {
+                    Word {
+                        text: atom,
+                        kind: WordKind::Unmodeled(Unmodeled::Other("test expression")),
+                    }
+                } else {
+                    Word {
+                        text: unescape_word(&atom),
+                        kind: WordKind::Literal,
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// Push `segment`, keeping it ahead of the segments its words produced
     /// (substitutions walked while the words were converted).
     fn push_before_nested(&mut self, mark: usize, segment: Segment) {
@@ -541,35 +581,61 @@ impl Walker {
         op: Option<Op>,
     ) {
         let mark = self.segments.len();
-        let mut words = Vec::new();
+        let mut words: Vec<Word> = Vec::new();
         let mut assignments = Vec::new();
         let mut redirects = Vec::new();
+        // the end of the previous argument span: an argument that starts
+        // there is the same shell word (see `collect_atoms`)
+        let mut previous_end = None;
         let mut cursor = node.walk();
         for (index, child) in node.children(&mut cursor).enumerate() {
             let field = node.field_name_for_child(index as u32);
+            let mut push_word = |words: &mut Vec<Word>, word: Word| {
+                if previous_end == Some(child.start_byte()) {
+                    if let Some(last) = words.last_mut() {
+                        last.text.push_str(&word.text);
+                        if !word.is_literal() && last.is_literal() {
+                            last.kind = word.kind;
+                        }
+                        previous_end = Some(child.end_byte());
+                        return;
+                    }
+                }
+                words.push(word);
+                previous_end = Some(child.end_byte());
+            };
             match field {
                 Some("name") => {
                     let inner = child.child(0).unwrap_or(child);
-                    words.push(self.word(tree, inner));
+                    let word = self.word(tree, inner);
+                    push_word(&mut words, word);
                 }
-                Some("argument") => words.push(if child.is_named() {
-                    self.word(tree, child)
-                } else {
-                    Word {
-                        text: text(child, tree.src).to_string(),
-                        kind: WordKind::Literal,
-                    }
-                }),
+                Some("argument") => {
+                    let word = if child.is_named() {
+                        self.word(tree, child)
+                    } else {
+                        Word {
+                            text: text(child, tree.src).to_string(),
+                            kind: WordKind::Literal,
+                        }
+                    };
+                    push_word(&mut words, word);
+                }
                 Some("redirect") => {
                     let (found, extra) = self.redirect(tree, child);
                     redirects.extend(found);
                     words.extend(extra);
+                    previous_end = None;
                 }
                 _ if child.kind() == "variable_assignment" => {
-                    assignments.push(self.word(tree, child))
+                    assignments.push(self.word(tree, child));
+                    previous_end = None;
                 }
-                _ if child.is_named() => words.push(self.word(tree, child)),
-                _ => {}
+                _ if child.is_named() => {
+                    let word = self.word(tree, child);
+                    push_word(&mut words, word);
+                }
+                _ => previous_end = None,
             }
         }
         let raw = text(node, tree.src).to_string();
@@ -777,6 +843,10 @@ fn literal_text(node: tree_sitter::Node<'_>, src: &str, at_start: bool) -> Optio
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if !child.is_named() {
+                    // a lone `$` (tree-sitter's reading of `"x"$IFS`): bash
+                    // keeps a dollar that starts no expansion literal
+                    out.push_str(text(child, src));
+                    first = false;
                     continue;
                 }
                 out.push_str(&literal_text(child, src, at_start && first)?);
@@ -915,6 +985,11 @@ fn error_in_command_position(error: tree_sitter::Node<'_>) -> bool {
     true
 }
 
+/// Two spans with no whitespace between them are one shell word, whatever
+/// tree-sitter made of them (it splits a bare `$IFS` after a quoted string or
+/// a brace group into `$` and a new word, and reads `~` inside `[ ... ]` as a
+/// test operator). Merging contiguous spans keeps the word boundaries the
+/// lexers see identical to the whole-command lex.
 fn collect_atoms(
     node: tree_sitter::Node<'_>,
     src: &str,
@@ -926,6 +1001,14 @@ fn collect_atoms(
     }
     if !node.is_named() || ATOM_KINDS.contains(&node.kind()) {
         let start = node.start_byte();
+        let span = text(node, src);
+        if start == *last_end && *last_end > 0 {
+            if let Some(last) = out.last_mut() {
+                last.push_str(span);
+                *last_end = (*last_end).max(node.end_byte());
+                return;
+            }
+        }
         if start > *last_end
             && src
                 .get(*last_end..start)
@@ -933,7 +1016,7 @@ fn collect_atoms(
         {
             out.push("\n".into());
         }
-        out.push(text(node, src).to_string());
+        out.push(span.to_string());
         *last_end = (*last_end).max(node.end_byte());
         return;
     }
@@ -1258,12 +1341,39 @@ mod tests {
         assert_eq!(
             p.atoms(),
             &[
-                "cd", "/example", ";", "\n", "(", "cd", "/other", ")", "&&", "cat", "\"a b\"", ">",
-                "y", "$(x)", "2", ">&", "1",
+                "cd",
+                "/example;",
+                "\n",
+                "(cd",
+                "/other)",
+                "&&",
+                "cat",
+                "\"a b\"",
+                ">",
+                "y",
+                "$(x)",
+                "2>&1",
             ]
         );
-        // heredoc bodies and comments are spans too; a missing node is not
+        // heredoc bodies and comments are spans too
         let p = parse("cat <<EOF # c\nhi\nEOF").unwrap();
-        assert_eq!(p.atoms(), &["cat", "<<", "EOF", "# c", "\n", "hi\n", "EOF"]);
+        assert_eq!(p.atoms(), &["cat", "<<EOF", "# c", "\n", "hi\nEOF"]);
+        // tree-sitter splits `\$$IFS./x1` after the second `$` and reads `~`
+        // inside a test as an operator; contiguous spans stay one word, in
+        // the atoms and in the IR
+        let p = parse("printf ./{a,b}cfg\\$$IFS./x1; [ -f ~/.ssh/id_rsa ]").unwrap();
+        assert_eq!(
+            p.atoms(),
+            &[
+                "printf",
+                "./{a,b}cfg\\$$IFS./x1;",
+                "[",
+                "-f",
+                "~/.ssh/id_rsa",
+                "]"
+            ]
+        );
+        assert_eq!(words(&p.segments[0]), vec!["printf", "./{a,b}cfg$$IFS./x1"]);
+        assert_eq!(words(&p.segments[1]), vec!["[", "-f", "~/.ssh/id_rsa"]);
     }
 }

@@ -58,7 +58,16 @@ pub(crate) fn matches_recursive_traversal(pattern: &str, path: &str) -> bool {
 /// dynamic operands, and file-list/filter modes do not acquire ancestor matches;
 /// ordinary path and command policy checks still apply to the original input.
 pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
-    let Some(tokens) = shell_tokens(command) else {
+    recursive_traversal_sources_with(command, true)
+}
+
+/// `recursive_traversal_sources` with the word splitter chosen by the caller:
+/// the tree-sitter parse (falling back to the tokenizer when the grammar
+/// rejects the input) or the tokenizer alone. The differential test in
+/// `tests/ast_candidates.rs` runs both and asserts identical sources.
+#[doc(hidden)]
+pub fn recursive_traversal_sources_with(command: &str, use_ast: bool) -> Vec<String> {
+    let Some(tokens) = classifier_tokens(command, use_ast) else {
         return Vec::new();
     };
     let mut sources = Vec::new();
@@ -137,6 +146,22 @@ pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
         start = end + 1;
     }
     sources
+}
+
+/// The token stream the argv classifier walks: the parse's spans lexed one by
+/// one, or the whole command lexed at once. A span the lexer rejects
+/// (unbalanced quoting) rejects the command, as it did before.
+fn classifier_tokens(command: &str, use_ast: bool) -> Option<Vec<String>> {
+    if use_ast {
+        if let Ok(program) = crate::common::ast::parse(command) {
+            let mut tokens = Vec::new();
+            for atom in program.atoms() {
+                tokens.extend(shell_tokens(atom)?);
+            }
+            return Some(tokens);
+        }
+    }
+    shell_tokens(command)
 }
 
 fn traversal_source_path(path: &str, cwd: Option<&str>) -> Option<String> {
@@ -1910,6 +1935,15 @@ fn glob_body(pattern: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every traversal case below runs through both word splitters, which
+    /// must agree; the parse-backed result is returned.
+    fn recursive_traversal_sources(command: &str) -> Vec<String> {
+        let parsed = recursive_traversal_sources_with(command, true);
+        let tokenized = recursive_traversal_sources_with(command, false);
+        assert_eq!(parsed, tokenized, "splitters disagree on {command:?}");
+        parsed
+    }
 
     #[test]
     fn recursive_sources_exclude_destinations_patterns_and_option_values() {
