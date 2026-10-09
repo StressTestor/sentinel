@@ -36,6 +36,9 @@ pub struct Explanation {
     pub layer: Option<String>,
     /// why no rule could be shown, when neither of the above applies
     pub note: Option<String>,
+    /// the `[[downgrade]]` entry a project overlay would need to turn this
+    /// block into a warn, when the rule is one an overlay may downgrade
+    pub overlay_hint: Option<String>,
 }
 
 /// Explain one audit event against a loaded policy. Pure: no I/O beyond the
@@ -53,6 +56,7 @@ pub fn explain(engine: &PolicyEngine, policy_text: Option<&str>, event: AuditEve
             rule: None,
             layer: None,
             note: Some(note.into()),
+            overlay_hint: None,
         };
     };
 
@@ -62,6 +66,7 @@ pub fn explain(engine: &PolicyEngine, policy_text: Option<&str>, event: AuditEve
             rule: None,
             layer: Some(layer.into()),
             note: None,
+            overlay_hint: None,
         };
     }
 
@@ -85,12 +90,33 @@ pub fn explain(engine: &PolicyEngine, policy_text: Option<&str>, event: AuditEve
     } else {
         None
     };
+    let overlay_hint = rule.as_ref().and_then(|rule| overlay_hint(&event, rule));
     Explanation {
         event,
         rule,
         layer: None,
         note,
+        overlay_hint,
     }
+}
+
+/// The overlay entry that would downgrade this block, when an overlay may:
+/// not for a block already downgraded, a warn, a self-protect family rule, or
+/// a block-tier secret rule (lint rejects those, so no hint is offered).
+fn overlay_hint(event: &AuditEvent, rule: &RuleExplanation) -> Option<String> {
+    if event.action != "block" || event.downgraded_by.is_some() {
+        return None;
+    }
+    if !rule.action.eq_ignore_ascii_case("block") {
+        return None;
+    }
+    if crate::lint::is_self_protect_pattern(&rule.pattern) || rule.section == "deny.secrets" {
+        return None;
+    }
+    Some(format!(
+        "[[downgrade]]\nrule = {:?}\nto = \"warn\"\nreason = \"why this project needs it\"",
+        rule.id
+    ))
 }
 
 /// Fixed enforcement layers that produce decisions without a policy rule.
@@ -215,6 +241,9 @@ fn print_human(x: &Explanation, policy_path: &Path) {
     if let Some(reason) = &e.reason {
         println!("reason:    {reason}");
     }
+    if let Some(overlay) = &e.downgraded_by {
+        println!("downgraded: block -> warn by accepted overlay {overlay}");
+    }
     if let Some(rule) = &x.rule {
         println!();
         println!("rule:      [[{}]]", rule.section);
@@ -236,6 +265,16 @@ fn print_human(x: &Explanation, policy_path: &Path) {
     if let Some(note) = &x.note {
         println!();
         println!("note:      {note}");
+    }
+    if let Some(hint) = &x.overlay_hint {
+        println!();
+        println!(
+            "overlay:   to downgrade this rule in one project, add this to \
+             <project>/.sentinel.toml and run `sentinel policy accept` there:"
+        );
+        for line in hint.lines() {
+            println!("           {line}");
+        }
     }
 }
 
@@ -291,6 +330,7 @@ reason = "AWS access key"
             hook_phase: Some("pre".into()),
             rule_id: decision.rule_id,
             witness: decision.witness,
+            downgraded_by: decision.downgraded_by,
         }
     }
 
@@ -341,6 +381,47 @@ reason = "AWS access key"
             !json.contains("AKIAABCDEFGHIJKLMNOP"),
             "why must not leak the secret"
         );
+    }
+
+    #[test]
+    fn overlay_hint_is_offered_only_where_an_overlay_may_downgrade() {
+        // an ordinary block: the hint names the rule id
+        let x = explain(&engine(), Some(POLICY), event_for(SSH_READ));
+        let hint = x.overlay_hint.expect("hint for a downgradable block");
+        assert!(hint.contains("rule = \"cred-paths/ssh\""), "{hint}");
+        assert!(hint.contains("to = \"warn\""), "{hint}");
+        // a block-tier secret rule: never (key built at runtime, no literal here)
+        let key = format!("AKIA{}", "B".repeat(16));
+        let secret = event_for(&format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"export K={key}"}}}}"#
+        ));
+        assert_eq!(secret.action, "block");
+        assert!(explain(&engine(), Some(POLICY), secret)
+            .overlay_hint
+            .is_none());
+        // a decision already downgraded shows the overlay, no hint
+        let mut downgraded = event_for(SSH_READ);
+        downgraded.action = "warn".into();
+        downgraded.downgraded_by = Some("/proj/.sentinel.toml".into());
+        let x = explain(&engine(), Some(POLICY), downgraded);
+        assert!(x.overlay_hint.is_none());
+        assert_eq!(
+            x.event.downgraded_by.as_deref(),
+            Some("/proj/.sentinel.toml")
+        );
+        let json = serde_json::to_string(&x).unwrap();
+        assert!(
+            json.contains("\"downgraded_by\":\"/proj/.sentinel.toml\""),
+            "{json}"
+        );
+        // a self-protect family rule: never
+        let sp = PolicyEngine::from_toml_str(
+            "[policy]\nmode=\"enforce\"\n[[deny.commands]]\nid=\"disarm/x\"\npattern='\\brm\\b.*\\.sentinel/'\naction=\"block\"\nreason=\"r\"\n",
+        )
+        .unwrap();
+        let mut ev = event_for(SSH_READ);
+        ev.rule_id = Some("disarm/x".into());
+        assert!(explain(&sp, None, ev).overlay_hint.is_none());
     }
 
     #[test]

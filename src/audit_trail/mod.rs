@@ -44,6 +44,12 @@ pub struct AuditEvent {
     /// compat discipline as `call_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub witness: Option<String>,
+
+    /// The accepted project overlay (its path) whose `[[downgrade]]` turned a
+    /// block into this warn. `rule_id` still names the original rule. Same
+    /// compat discipline as `call_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downgraded_by: Option<String>,
 }
 
 // THE JOIN CONTRACT (when ghost + sentinel are both current):
@@ -301,7 +307,25 @@ mod tests {
             hook_phase: None,
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         }
+    }
+
+    #[test]
+    fn downgraded_by_roundtrips_and_stays_absent_when_none() {
+        let mut ev = event(None);
+        ev.action = "warn".into();
+        ev.rule_id = Some("fetch-exec/curl-pipe-sh".into());
+        ev.downgraded_by = Some("/srv/app/.sentinel.toml".into());
+        let line = serde_json::to_string(&ev).unwrap();
+        let back: AuditEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            back.downgraded_by.as_deref(),
+            Some("/srv/app/.sentinel.toml")
+        );
+        assert_eq!(back.rule_id.as_deref(), Some("fetch-exec/curl-pipe-sh"));
+        let bare = serde_json::to_string(&event(None)).unwrap();
+        assert!(!bare.contains("downgraded_by"));
     }
 
     #[test]

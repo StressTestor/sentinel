@@ -1,5 +1,5 @@
 use clap::Parser;
-use sentinel_guard::cli::{Cli, Command};
+use sentinel_guard::cli::{Cli, Command, PolicyAction};
 use sentinel_guard::{
     audit, audit_mcp, check, common, doctor, evaluate, install, lint, policy, policy_diff,
     policy_migrate, post_evaluate, verify, why,
@@ -35,6 +35,9 @@ async fn main() {
         Command::PolicyLint(args) => lint::run(args),
         Command::PolicyMigrate(args) => policy_migrate::run(args),
         Command::AuditMcp(args) => audit_mcp::run(args),
+        Command::Policy(args) => match args.action {
+            PolicyAction::Accept(args) => policy::overlay::run_accept(args),
+        },
     };
 
     if let Err(e) = result {
@@ -65,6 +68,9 @@ fn run_status(agent: &str) -> Result<(), Box<dyn std::error::Error>> {
     let engine = policy::PolicyEngine::load(&policy_path)
         .map_err(|error| format!("policy at {} cannot load: {error}", policy_path.display()))?;
     println!("policy:   {} ({})", policy_path.display(), engine.mode());
+    for line in policy::overlay::status_lines(&engine) {
+        println!("{line}");
+    }
 
     if std::path::Path::new(&audit_path).exists() {
         let line_count = std::fs::read_to_string(&audit_path)?.lines().count();

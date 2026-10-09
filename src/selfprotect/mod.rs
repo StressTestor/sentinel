@@ -55,6 +55,16 @@ fn apply_normalized_with(
     if decision.action == Action::Block {
         return decision;
     }
+    // accepting a project overlay (or editing the acceptance store) from a
+    // shell command is a human action, never the agent's; the typed-mutation
+    // form of the store write is handled with the other protected state files
+    // below. editing `.sentinel.toml` itself stays allowed: unaccepted, it is
+    // inert.
+    if let Some(command) = call.command.as_deref() {
+        if let Some(tamper) = overlay_accept_tamper(command) {
+            return overlay_accept_block(tamper);
+        }
+    }
     if call.mutations.is_empty() {
         return decision;
     }
@@ -150,6 +160,7 @@ fn apply_normalized_with(
                         matched_rule: Some("selfprotect: hook-config inspection failed".into()),
                         rule_id: Some("selfprotect:hook-config-inspection-failed".into()),
                         witness: None,
+                        downgraded_by: None,
                     };
                 }
             }
@@ -164,6 +175,90 @@ enum ProtectedStateFile {
     Policy,
     McpBaseline,
     AuditTrail,
+    OverlayStore,
+}
+
+/// Which overlay-trust tamper a shell command attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayTamper {
+    /// `sentinel policy accept ...` (also `--list` / `--revoke`: the whole
+    /// subcommand is the human's)
+    Accept,
+    /// a shell write to `~/.sentinel/overlays.json`
+    StoreWrite,
+}
+
+/// `sentinel policy accept` at a command boundary, through the usual wrapper
+/// verbs (`sudo`, `env`, `sh -c`, ...), with an optional directory prefix,
+/// quoting, and global flags before the subcommand. `echo sentinel policy
+/// accept` and `sentinel policy-lint --overlay` do not match.
+const OVERLAY_ACCEPT_COMMAND: &str = r#"(?:^|[;&|(`]\s*)(?:(?:sudo|doas|env|command|exec|nohup|time|xargs|sh|bash|zsh|dash)\s+(?:-\S+\s+)*)*["']?(?:\S*/)?sentinel(?:-guard)?["']?\s+(?:-\S+\s+)*policy\s+(?:-\S+\s+)*accept(?:["'\s;|&)]|$)"#;
+
+/// Shell mutations of the acceptance store, mirroring the policy.toml and
+/// mcp-baseline command clusters in the default policy: in-place editors, line
+/// editors, truncating/appending redirects, tee/sponge, and copy/link/install/
+/// dd/truncate/rm/mv with the store as the final operand. Reads (`cat`, `jq`,
+/// `cp <store> backup`) do not match.
+const OVERLAY_STORE_WRITES: [&str; 5] = [
+    r#"\b(sed|gsed|perl|awk)\b.*\s-i\b.*\.sentinel/overlays\.json(["'\s<>;|&]|$)"#,
+    r#"\b(ed|ex)\b\s+\S*\.sentinel/overlays\.json(["'\s<>;|&]|$)"#,
+    r#">>?\|?\s*"?\S*\.sentinel/overlays\.json(["'\s<>;|&]|$)"#,
+    r#"\b(tee|sponge)\b[^;&|\n]*\.sentinel/overlays\.json(["'\s<>;|&]|$)"#,
+    r#"\b(cp|install|ln|dd|truncate|rm|mv)\b[^;&|\n]*\.sentinel/overlays\.json(\s+-\S+)*\s*$"#,
+];
+
+fn overlay_tamper_patterns() -> &'static (regex::Regex, Vec<regex::Regex>) {
+    static PATTERNS: std::sync::OnceLock<(regex::Regex, Vec<regex::Regex>)> =
+        std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        (
+            regex::Regex::new(OVERLAY_ACCEPT_COMMAND).expect("overlay accept regex compiles"),
+            OVERLAY_STORE_WRITES
+                .iter()
+                .map(|pattern| regex::Regex::new(pattern).expect("overlay store regex compiles"))
+                .collect(),
+        )
+    })
+}
+
+/// Detect an overlay-trust tamper in a shell command, on the raw text and on
+/// its shell-de-obfuscated form (ANSI-C escapes, `${IFS}`), like the command
+/// rules do.
+fn overlay_accept_tamper(command: &str) -> Option<OverlayTamper> {
+    let (accept, writes) = overlay_tamper_patterns();
+    let decoded = crate::common::shell::decode_obfuscation(command);
+    let forms = std::iter::once(command).chain(decoded.as_deref());
+    for form in forms {
+        if accept.is_match(form) {
+            return Some(OverlayTamper::Accept);
+        }
+        if writes.iter().any(|pattern| pattern.is_match(form)) {
+            return Some(OverlayTamper::StoreWrite);
+        }
+    }
+    None
+}
+
+fn overlay_accept_block(tamper: OverlayTamper) -> PolicyDecision {
+    let reason = match tamper {
+        OverlayTamper::Accept => {
+            "agent invoked `sentinel policy accept`; accepting a project overlay is a human \
+             action taken outside the agent (self-protect: overlay-accept)"
+        }
+        OverlayTamper::StoreWrite => {
+            "write to sentinel's accepted-overlay store would let an injected agent accept its \
+             own project overlay (self-protect: overlay-accept; run sentinel policy accept \
+             outside the agent)"
+        }
+    };
+    PolicyDecision {
+        action: Action::Block,
+        reason: Some(reason.into()),
+        matched_rule: Some("selfprotect: overlay-accept".into()),
+        rule_id: Some("selfprotect:overlay-accept".into()),
+        witness: None,
+        downgraded_by: None,
+    }
 }
 
 #[derive(Debug)]
@@ -260,6 +355,7 @@ fn path_identity_failure_block(error: String) -> PolicyDecision {
         matched_rule: Some("selfprotect: path identity inspection failed".into()),
         rule_id: Some("selfprotect:path-identity-inspection-failed".into()),
         witness: None,
+        downgraded_by: None,
     }
 }
 
@@ -276,6 +372,7 @@ fn protected_state_write_block(protected: ProtectedStateFile) -> PolicyDecision 
             matched_rule: Some("selfprotect: mcp-baseline write".into()),
             rule_id: Some("selfprotect:mcp-baseline-write".into()),
             witness: None,
+            downgraded_by: None,
         },
         ProtectedStateFile::AuditTrail => PolicyDecision {
             action: Action::Block,
@@ -287,7 +384,9 @@ fn protected_state_write_block(protected: ProtectedStateFile) -> PolicyDecision 
             matched_rule: Some("selfprotect: audit-trail write".into()),
             rule_id: Some("selfprotect:audit-trail-write".into()),
             witness: None,
+            downgraded_by: None,
         },
+        ProtectedStateFile::OverlayStore => overlay_accept_block(OverlayTamper::StoreWrite),
     }
 }
 
@@ -304,6 +403,8 @@ fn protected_state_file(path: &str, audit_identity: &PathIdentity) -> Option<Pro
         Some(ProtectedStateFile::Policy)
     } else if has_path_suffix(path, ".sentinel/mcp-baseline.json") {
         Some(ProtectedStateFile::McpBaseline)
+    } else if has_path_suffix(path, ".sentinel/overlays.json") {
+        Some(ProtectedStateFile::OverlayStore)
     } else if audit_identity
         .paths()
         .any(|audit_path| path.trim().eq_ignore_ascii_case(audit_path.trim()))
@@ -334,6 +435,7 @@ fn policy_write_block() -> PolicyDecision {
         matched_rule: Some("selfprotect: policy.toml write".into()),
         rule_id: Some("selfprotect:policy.toml-write".into()),
         witness: None,
+        downgraded_by: None,
     }
 }
 
@@ -349,6 +451,7 @@ fn hook_disable_block(path: &str) -> PolicyDecision {
         matched_rule: Some("selfprotect: hook-disable".into()),
         rule_id: Some("selfprotect:hook-disable".into()),
         witness: None,
+        downgraded_by: None,
     }
 }
 
@@ -383,6 +486,7 @@ fn hook_removal_block() -> PolicyDecision {
         matched_rule: Some("selfprotect: hook-removal".into()),
         rule_id: Some("selfprotect:hook-removal".into()),
         witness: None,
+        downgraded_by: None,
     }
 }
 
@@ -890,6 +994,7 @@ mod tests {
             matched_rule: Some("deny.paths: **/.claude/settings.json".into()),
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         }
     }
 
@@ -900,7 +1005,111 @@ mod tests {
             matched_rule: None,
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         }
+    }
+
+    #[test]
+    fn agent_driven_policy_accept_is_blocked_as_overlay_accept() {
+        for command in [
+            "sentinel policy accept",
+            "sentinel policy accept .",
+            "sentinel policy accept --list",
+            "sentinel policy accept --revoke /srv/app",
+            "/usr/local/bin/sentinel policy accept ./.sentinel.toml",
+            "cd /srv/app && sentinel policy accept",
+            "sudo sentinel policy accept",
+            "sh -c 'sentinel policy accept'",
+            "'sentinel' policy accept",
+            "sentinel-guard policy accept",
+            "sentinel${IFS}policy${IFS}accept",
+        ] {
+            assert_eq!(
+                overlay_accept_tamper(command),
+                Some(OverlayTamper::Accept),
+                "{command}"
+            );
+            let call = normalized_input("Bash", &json!({"command": command}));
+            let decision = apply_normalized_with(allow_decision(), &call, |_| true);
+            assert_eq!(decision.action, Action::Block, "{command}");
+            assert_eq!(
+                decision.matched_rule.as_deref(),
+                Some("selfprotect: overlay-accept"),
+                "{command}"
+            );
+            assert_eq!(
+                decision.rule_id.as_deref(),
+                Some("selfprotect:overlay-accept")
+            );
+        }
+        for command in [
+            "echo sentinel policy accept",
+            "sentinel policy-lint --overlay .sentinel.toml",
+            "sentinel policy accepted",
+            "git commit -m 'sentinel policy accept'",
+            "cat .sentinel.toml",
+            "cat ~/.sentinel/overlays.json",
+            "jq . ~/.sentinel/overlays.json",
+            "cp ~/.sentinel/overlays.json /tmp/backup.json",
+            "sentinel status",
+        ] {
+            assert_eq!(overlay_accept_tamper(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn shell_and_typed_writes_to_the_overlay_store_are_blocked() {
+        for command in [
+            "sed -i 's/a/b/' ~/.sentinel/overlays.json",
+            "perl -i -pe 's/x/y/' $HOME/.sentinel/overlays.json",
+            "echo '{}' > ~/.sentinel/overlays.json",
+            "printf '{}' >> ~/.sentinel/overlays.json",
+            "cat evil.json | tee ~/.sentinel/overlays.json",
+            "cp /tmp/evil.json ~/.sentinel/overlays.json",
+            "install /tmp/evil.json /home/u/.sentinel/overlays.json",
+            "truncate -s0 ~/.sentinel/overlays.json",
+            "rm ~/.sentinel/overlays.json",
+            "ed ~/.sentinel/overlays.json",
+        ] {
+            assert_eq!(
+                overlay_accept_tamper(command),
+                Some(OverlayTamper::StoreWrite),
+                "{command}"
+            );
+        }
+        // the agent's own Write/Edit tools, at the literal and expanded paths
+        for path in [
+            "~/.sentinel/overlays.json",
+            "/home/u/.sentinel/overlays.json",
+        ] {
+            let call = normalized_input(
+                "Write",
+                &json!({"file_path": path, "content": "{\"version\":1}"}),
+            );
+            let decision = apply_normalized_with(allow_decision(), &call, |_| true);
+            assert_eq!(decision.action, Action::Block, "{path}");
+            assert_eq!(
+                decision.matched_rule.as_deref(),
+                Some("selfprotect: overlay-accept")
+            );
+        }
+        // the overlay file itself is the project's to edit: inert until accepted
+        let call = normalized_input(
+            "Write",
+            &json!({"file_path": "/srv/app/.sentinel.toml", "content": "[[downgrade]]\n"}),
+        );
+        assert_eq!(
+            apply_normalized_with(allow_decision(), &call, |_| true).action,
+            Action::Allow
+        );
+        let edit = normalized_input(
+            "Bash",
+            &json!({"command": "echo '# note' >> .sentinel.toml"}),
+        );
+        assert_eq!(
+            apply_normalized_with(allow_decision(), &edit, |_| true).action,
+            Action::Allow
+        );
     }
 
     /// a settings.json body that still carries the sentinel PreToolUse hook.
@@ -1376,6 +1585,7 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
             matched_rule: Some("deny.paths: something".into()),
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         };
         let input = json!({"file_path": SETTINGS, "content": settings_without_hook()});
         let d = apply_normalized_with(block.clone(), &normalized_input("Write", &input), |_| true);
@@ -1699,6 +1909,7 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
             matched_rule: Some("deny.paths: something".into()),
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         };
         assert_eq!(
             apply_normalized(block.clone(), &normalized_input("Write", &write)),

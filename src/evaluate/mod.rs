@@ -118,6 +118,14 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
     };
     let decision = result.decision().clone();
 
+    // exactly one stderr line for an overlay that was present but not applied;
+    // the doctor canary stays quiet
+    if !canary {
+        if let Some(warning) = result.overlay().warning() {
+            eprintln!("{warning}");
+        }
+    }
+
     if canary {
         // doctor's liveness probe: surface the would-be decision, skip the
         // audit trail. Block -> the nested deny JSON (even in audit mode);
@@ -162,6 +170,7 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         hook_phase: Some("pre".into()),
         rule_id: decision.rule_id.clone(),
         witness: decision.witness.clone(),
+        downgraded_by: decision.downgraded_by.clone(),
     }) {
         eprintln!("sentinel: could not append audit event: {error}");
     }

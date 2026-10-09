@@ -14,15 +14,238 @@
 
 use crate::cli::LintArgs;
 use crate::evaluate::resolve_policy_path;
+use crate::policy::overlay::{Overlay, OVERLAY_FILE_NAME};
 use crate::policy::schema::is_valid_rule_id;
 use crate::policy::PolicyEngine;
 use regex::Regex;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub error: bool,
     pub message: String,
+}
+
+/// Whether a rule belongs to the self-protect family: anything that names
+/// sentinel itself (`.sentinel/`, the binary paths, `sentinel-guard`,
+/// `sentinel uninstall`, `audit-mcp --update`), or the agent's hook config
+/// (`.claude/settings*`, the `~/.claude` directory). An overlay can never
+/// downgrade one of these, whatever its tier.
+pub fn is_self_protect_pattern(pattern: &str) -> bool {
+    let lower = pattern.to_ascii_lowercase();
+    lower.contains("sentinel")
+        || lower.contains(".claude/settings")
+        || lower.contains(r"\.claude(")
+        || lower.contains(r"\.claude/")
+        || lower.contains("/.claude/")
+}
+
+/// Whether a rule id names a fixed enforcement layer rather than a policy rule.
+fn is_fixed_layer_id(id: &str) -> bool {
+    id.starts_with("selfprotect:")
+        || id.starts_with("preflight:")
+        || id.starts_with("on_failure:")
+        || id == "allow.paths:miss"
+}
+
+/// Whether `pattern` (an allow glob) stays inside `root`. `~` is expanded, the
+/// path must be absolute, and the glob-free leading directory is canonicalized
+/// when it exists so an alias of the project directory still counts. Patterns
+/// with `..`, relative patterns, and anything outside the root are rejected.
+fn allow_pattern_under_root(pattern: &str, root: &Path) -> bool {
+    let expanded = match pattern.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) if !home.is_empty() => format!("{}/{rest}", home.trim_end_matches('/')),
+            _ => return false,
+        },
+        None if pattern == "~" => return false,
+        None => pattern.to_string(),
+    };
+    if !expanded.starts_with('/') {
+        return false;
+    }
+    if expanded.split('/').any(|segment| segment == "..") {
+        return false;
+    }
+    let root_text = root.to_string_lossy();
+    let root_text = root_text.trim_end_matches('/');
+    let under = |candidate: &str| {
+        let candidate = candidate.trim_end_matches('/');
+        candidate == root_text || candidate.starts_with(&format!("{root_text}/"))
+    };
+    if under(&expanded) {
+        return true;
+    }
+    // the directory before the first glob metacharacter, resolved on disk
+    let glob_at = expanded
+        .find(['*', '?', '[', '{'])
+        .unwrap_or(expanded.len());
+    let literal = &expanded[..glob_at];
+    let dir_end = literal.rfind('/').unwrap_or(0);
+    let dir = if dir_end == 0 {
+        "/"
+    } else {
+        &literal[..dir_end]
+    };
+    match std::fs::canonicalize(dir) {
+        Ok(canonical) => {
+            let rest = &expanded[dir_end..];
+            under(&format!("{}{rest}", canonical.to_string_lossy()))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Lint a project overlay against the policy it will be applied to. Pure.
+///
+/// Error-level findings (any one of them stops `policy accept`, and makes an
+/// already accepted overlay inert): a downgrade to anything but `warn`, of an
+/// invalid or unknown rule id, of a fixed enforcement layer, of a self-protect
+/// family rule, or of a block-tier `deny.secrets` rule; an allow pattern
+/// outside the project root; an overlay deny rule with an `allow` action;
+/// and anything `lint_engine` reports as an error on the merged policy
+/// (invalid regexes, duplicate explicit ids).
+pub fn lint_overlay(main: &PolicyEngine, overlay: &Overlay, project_root: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let rules = main.rules();
+    let mut seen_downgrades: HashSet<&str> = HashSet::new();
+
+    for d in &overlay.downgrades {
+        let id = d.rule.as_str();
+        if !is_valid_rule_id(id) {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "downgrade: rule id {id:?} is invalid (1-128 chars of [A-Za-z0-9._/:-])"
+                ),
+            });
+            continue;
+        }
+        if !d.to.eq_ignore_ascii_case("warn") {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "downgrade {id}: to = {:?} is not supported; an overlay can only downgrade to \"warn\"",
+                    d.to
+                ),
+            });
+        }
+        if !seen_downgrades.insert(id) {
+            findings.push(Finding {
+                error: false,
+                message: format!("downgrade {id}: listed more than once"),
+            });
+        }
+        if is_fixed_layer_id(id) {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "downgrade {id}: a fixed enforcement layer (self-protect, preflight, failure posture) cannot be downgraded"
+                ),
+            });
+            continue;
+        }
+        let Some(rule) = rules.iter().find(|r| r.id == id) else {
+            findings.push(Finding {
+                error: true,
+                message: format!("downgrade {id}: no rule with this id in the policy"),
+            });
+            continue;
+        };
+        if is_self_protect_pattern(rule.pattern) {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "downgrade {id}: self-protect rule {} {:?} cannot be downgraded",
+                    rule.section, rule.pattern
+                ),
+            });
+            continue;
+        }
+        if rule.section == "deny.secrets" && rule.action.eq_ignore_ascii_case("block") {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "downgrade {id}: block-tier deny.secrets rule {:?} cannot be downgraded",
+                    rule.pattern
+                ),
+            });
+            continue;
+        }
+        if !rule.action.eq_ignore_ascii_case("block") {
+            findings.push(Finding {
+                error: false,
+                message: format!(
+                    "downgrade {id}: rule is already {}; the downgrade has no effect",
+                    rule.action
+                ),
+            });
+        }
+    }
+
+    for r in &overlay.allow_paths {
+        if !allow_pattern_under_root(&r.pattern, project_root) {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "allow.paths: {:?} is outside the project root {} (overlay allow entries must be absolute paths under the project)",
+                    r.pattern,
+                    project_root.display()
+                ),
+            });
+        }
+    }
+    if !overlay.allow_paths.is_empty() && !main.has_allow_list() {
+        findings.push(Finding {
+            error: false,
+            message: "allow.paths: the policy has no allow list, so these entries have no effect"
+                .into(),
+        });
+    }
+
+    let overlay_actions = overlay
+        .deny_paths
+        .iter()
+        .map(|r| ("deny.paths", &r.pattern, &r.action))
+        .chain(
+            overlay
+                .deny_commands
+                .iter()
+                .map(|r| ("deny.commands", &r.pattern, &r.action)),
+        )
+        .chain(
+            overlay
+                .deny_secrets
+                .iter()
+                .map(|r| ("deny.secrets", &r.pattern, &r.action)),
+        )
+        .chain(
+            overlay
+                .deny_tools
+                .iter()
+                .map(|r| ("deny.tools", &r.pattern, &r.action)),
+        );
+    for (section, pattern, action) in overlay_actions {
+        if !(action.eq_ignore_ascii_case("block") || action.eq_ignore_ascii_case("warn")) {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "{section}: {pattern:?} has action {action:?}; an overlay deny rule must be block or warn (it runs before the policy's own rules)"
+                ),
+            });
+        }
+    }
+
+    // the merged policy's own checks, minus whatever the main policy already
+    // reports on its own
+    let base = lint_engine(main);
+    for finding in lint_engine(&main.with_overlay(overlay, "overlay")) {
+        if !base.contains(&finding) {
+            findings.push(finding);
+        }
+    }
+    findings
 }
 
 fn is_broad_allow(pattern: &str) -> bool {
@@ -128,7 +351,28 @@ pub fn run(args: LintArgs) -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    let findings = lint_engine(&engine);
+    let (findings, subject): (Vec<Finding>, PathBuf) = match &args.overlay {
+        Some(overlay_arg) => {
+            let overlay_path = if overlay_arg.is_dir() {
+                overlay_arg.join(OVERLAY_FILE_NAME)
+            } else {
+                overlay_arg.clone()
+            };
+            let text = std::fs::read_to_string(&overlay_path)
+                .map_err(|e| format!("could not read overlay {}: {e}", overlay_path.display()))?;
+            let overlay = Overlay::parse(&text)?;
+            let parent = overlay_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let root = std::fs::canonicalize(&parent)
+                .map_err(|e| format!("could not resolve project root {}: {e}", parent.display()))?;
+            (lint_overlay(&engine, &overlay, &root), overlay_path)
+        }
+        None => (lint_engine(&engine), path),
+    };
+    let path = subject;
     if findings.is_empty() {
         println!("{}: clean (no lint findings)", path.display());
         return Ok(());
@@ -284,5 +528,219 @@ reason = "r"
         assert!(findings
             .iter()
             .any(|f| !f.error && f.message.contains("widens a lockdown")));
+    }
+
+    const OVERLAY_POLICY: &str = r#"
+[policy]
+mode = "enforce"
+default = "block"
+
+[[deny.paths]]
+id = "cred-paths/ssh"
+pattern = "~/.ssh/*"
+action = "block"
+reason = "SSH key access"
+
+[[deny.paths]]
+id = "tripwire/settings"
+pattern = "**/.claude/settings.json"
+action = "warn"
+reason = "settings write"
+
+[[deny.commands]]
+id = "fetch-exec/curl-pipe-sh"
+pattern = 'curl\s+\S+\s*\|\s*sh'
+action = "block"
+reason = "pipe to shell"
+
+[[deny.commands]]
+id = "disarm/rm-sentinel"
+pattern = '\brm\b.*\.sentinel/'
+action = "block"
+reason = "deleting ~/.sentinel"
+
+[[deny.commands]]
+id = "warn-only/scp"
+pattern = '\bscp\b'
+action = "warn"
+reason = "scp"
+
+[[deny.secrets]]
+id = "secrets/aws"
+pattern = 'AKIA[0-9A-Z]{16}'
+action = "block"
+reason = "AWS access key"
+
+[[deny.secrets]]
+id = "secrets/maybe"
+pattern = 'gserviceaccount'
+action = "warn"
+reason = "service account"
+
+[[allow.paths]]
+pattern = "/other/**"
+"#;
+
+    fn overlay_errors(overlay: &str, root: &Path) -> Vec<String> {
+        let e = engine(OVERLAY_POLICY);
+        let o = Overlay::parse(overlay).unwrap();
+        lint_overlay(&e, &o, root)
+            .into_iter()
+            .filter(|f| f.error)
+            .map(|f| f.message)
+            .collect()
+    }
+
+    fn downgrade(id: &str, to: &str) -> String {
+        format!("[[downgrade]]\nrule = \"{id}\"\nto = \"{to}\"\nreason = \"r\"\n")
+    }
+
+    #[test]
+    fn overlay_downgrade_of_an_ordinary_block_is_clean() {
+        let root = tempfile::tempdir().unwrap();
+        let errors = overlay_errors(&downgrade("fetch-exec/curl-pipe-sh", "warn"), root.path());
+        assert!(errors.is_empty(), "{errors:?}");
+        // the derived-id form is addressable too
+        let derived = crate::policy::schema::rule_id(None, "deny.paths", "~/.ssh/*");
+        let e = engine("[policy]\nmode=\"enforce\"\n[[deny.paths]]\npattern=\"~/.ssh/*\"\naction=\"block\"\nreason=\"r\"\n");
+        let o = Overlay::parse(&downgrade(&derived, "warn")).unwrap();
+        assert!(lint_overlay(&e, &o, root.path()).iter().all(|f| !f.error));
+    }
+
+    #[test]
+    fn overlay_cannot_downgrade_self_protect_family_rules() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["disarm/rm-sentinel", "tripwire/settings"] {
+            let errors = overlay_errors(&downgrade(id, "warn"), root.path());
+            assert_eq!(errors.len(), 1, "{id}: {errors:?}");
+            assert!(errors[0].contains("self-protect rule"), "{errors:?}");
+        }
+        for id in [
+            "selfprotect:policy.toml-write",
+            "preflight:x",
+            "on_failure:closed",
+        ] {
+            let errors = overlay_errors(&downgrade(id, "warn"), root.path());
+            assert!(
+                errors.iter().any(|m| m.contains("fixed enforcement layer")),
+                "{id}: {errors:?}"
+            );
+        }
+        // every bundled rule that names sentinel or the hook config is covered
+        let bundled = PolicyEngine::from_toml_str(&default_policy_content("enforce")).unwrap();
+        let family: Vec<String> = bundled
+            .rules()
+            .iter()
+            .filter(|r| is_self_protect_pattern(r.pattern))
+            .map(|r| r.id.clone())
+            .collect();
+        assert!(
+            family.len() >= 30,
+            "expected the self-protect cluster, got {}",
+            family.len()
+        );
+        for id in family {
+            let o = Overlay::parse(&downgrade(&id, "warn")).unwrap();
+            assert!(
+                lint_overlay(&bundled, &o, root.path())
+                    .iter()
+                    .any(|f| f.error),
+                "{id} must not be downgradable"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_cannot_downgrade_a_block_tier_secret_rule() {
+        let root = tempfile::tempdir().unwrap();
+        let errors = overlay_errors(&downgrade("secrets/aws", "warn"), root.path());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("block-tier deny.secrets"), "{errors:?}");
+        // a warn-tier secret rule is not a block to begin with: no error
+        let errors = overlay_errors(&downgrade("secrets/maybe", "warn"), root.path());
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn overlay_rejects_unknown_invalid_and_non_warn_downgrades() {
+        let root = tempfile::tempdir().unwrap();
+        let errors = overlay_errors(&downgrade("nope/missing", "warn"), root.path());
+        assert!(errors[0].contains("no rule with this id"), "{errors:?}");
+        let errors = overlay_errors(&downgrade("has space", "warn"), root.path());
+        assert!(errors[0].contains("is invalid"), "{errors:?}");
+        let errors = overlay_errors(&downgrade("fetch-exec/curl-pipe-sh", "allow"), root.path());
+        assert!(
+            errors[0].contains("only downgrade to \"warn\""),
+            "{errors:?}"
+        );
+        // already-warn rule: a warning, not an error
+        let e = engine(OVERLAY_POLICY);
+        let o = Overlay::parse(&downgrade("warn-only/scp", "warn")).unwrap();
+        let findings = lint_overlay(&e, &o, root.path());
+        assert!(findings.iter().all(|f| !f.error), "{findings:?}");
+        assert!(findings.iter().any(|f| f.message.contains("no effect")));
+    }
+
+    #[test]
+    fn overlay_allow_patterns_must_stay_under_the_project_root() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        let inside = format!(
+            "[[allow.paths]]\npattern = \"{}/src/**\"\n",
+            canonical.display()
+        );
+        assert!(overlay_errors(&inside, &canonical).is_empty());
+        for outside in [
+            "/etc/**".to_string(),
+            "~/**".to_string(),
+            "./src/**".to_string(),
+            format!("{}/../**", canonical.display()),
+            format!("{}-other/**", canonical.display()),
+        ] {
+            let text = format!("[[allow.paths]]\npattern = \"{outside}\"\n");
+            let errors = overlay_errors(&text, &canonical);
+            assert_eq!(errors.len(), 1, "{outside}: {errors:?}");
+            assert!(errors[0].contains("outside the project root"), "{errors:?}");
+        }
+        // no allow list in the policy: a warning that the entries do nothing
+        let e = engine("[policy]\nmode=\"enforce\"\n");
+        let o = Overlay::parse(&inside).unwrap();
+        let findings = lint_overlay(&e, &o, &canonical);
+        assert!(findings.iter().all(|f| !f.error));
+        assert!(findings.iter().any(|f| f.message.contains("no allow list")));
+    }
+
+    #[test]
+    fn overlay_deny_additions_are_checked_and_cannot_be_allow_exceptions() {
+        let root = tempfile::tempdir().unwrap();
+        let errors = overlay_errors(
+            "[[deny.commands]]\npattern = 'a(b'\naction = \"block\"\nreason = \"r\"\n",
+            root.path(),
+        );
+        assert!(
+            errors.iter().any(|m| m.contains("invalid regex")),
+            "{errors:?}"
+        );
+        let errors = overlay_errors(
+            "[[deny.paths]]\npattern = \"~/.ssh/*\"\naction = \"allow\"\nreason = \"r\"\n",
+            root.path(),
+        );
+        assert!(
+            errors.iter().any(|m| m.contains("must be block or warn")),
+            "{errors:?}"
+        );
+        let errors = overlay_errors(
+            "[[deny.commands]]\nid = \"fetch-exec/curl-pipe-sh\"\npattern = 'x'\naction = \"block\"\nreason = \"r\"\n",
+            root.path(),
+        );
+        assert!(
+            errors.iter().any(|m| m.contains("duplicate rule id")),
+            "{errors:?}"
+        );
+        let errors = overlay_errors(
+            "[[deny.tools]]\nid = \"project/mcp\"\npattern = \"mcp__x__*\"\naction = \"warn\"\nreason = \"r\"\n",
+            root.path(),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
     }
 }
