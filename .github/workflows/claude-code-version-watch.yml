@@ -1,0 +1,66 @@
+name: claude-code version watch
+
+# The hook contract (PreToolUse stdin schema, nested deny JSON, exit code 2,
+# PostToolUse payload) is verified against one pinned Claude Code release,
+# recorded in tests/fixtures/hooks/VERIFIED_CLAUDE_CODE_VERSION. Once a week
+# this reads the published npm version and opens (or refreshes) a tracking
+# issue when it has moved, so re-verification is a visible task.
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: compare the published version with the verified one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          verified="$(tr -d '[:space:]' < tests/fixtures/hooks/VERIFIED_CLAUDE_CODE_VERSION)"
+          latest="$(npm view @anthropic-ai/claude-code version | tr -d '[:space:]')"
+          if ! printf '%s' "$latest" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "unexpected version string from npm: $latest" >&2
+            exit 1
+          fi
+          echo "verified: $verified"
+          echo "latest:   $latest"
+          if [ "$latest" = "$verified" ]; then
+            echo "hook contract is verified against the current release"
+            exit 0
+          fi
+          title="re-verify hook contract against Claude Code $latest"
+          today="$(date -u +%Y-%m-%d)"
+          body="$(printf '%s\n' \
+            "The published \`@anthropic-ai/claude-code\` version is now **$latest**; the hook" \
+            "contract fixtures under \`tests/fixtures/hooks/\` were last verified against" \
+            "**$verified**." \
+            "" \
+            "To close this issue:" \
+            "" \
+            "1. Capture a live PreToolUse and PostToolUse payload from $latest." \
+            "2. Confirm a deny still blocks (exit 2 plus the nested \`hookSpecificOutput\` JSON)." \
+            "3. Add version-stamped fixtures, update \`VERIFIED_CLAUDE_CODE_VERSION\`, and" \
+            "   extend \`tests/hook_contract.rs\`." \
+            "" \
+            "Opened by the \`claude-code version watch\` workflow (last run: $today).")"
+          existing="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          if [ -n "$existing" ]; then
+            echo "updating existing issue #$existing"
+            gh issue edit "$existing" --body "$body"
+          else
+            echo "opening a new issue"
+            gh issue create --title "$title" --body "$body"
+          fi

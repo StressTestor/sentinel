@@ -1,0 +1,1 @@
+tar czf /tmp/x.tgz -C ~ .ssh

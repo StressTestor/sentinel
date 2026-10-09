@@ -1,0 +1,58 @@
+[package]
+name = "sentinel-guard-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.sentinel-guard]
+path = ".."
+
+# Standalone workspace: the fuzz crate must not join the root crate's build
+# graph, so the root Cargo.lock stays untouched and `cargo package` never sees
+# it (the root `include` list does not cover fuzz/).
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "shell_tokens"
+path = "fuzz_targets/shell_tokens.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_obfuscation"
+path = "fuzz_targets/decode_obfuscation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "brace_expand_checked"
+path = "fuzz_targets/brace_expand_checked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_apply_patch"
+path = "fuzz_targets/parse_apply_patch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "evaluate_raw"
+path = "fuzz_targets/evaluate_raw.rs"
+test = false
+doc = false
+bench = false
