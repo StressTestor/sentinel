@@ -77,10 +77,17 @@ pub fn explain(engine: &PolicyEngine, policy_text: Option<&str>, event: AuditEve
         .map(|r| RuleExplanation {
             section: r.section.to_string(),
             id: r.id.clone(),
-            pattern: r.pattern.to_string(),
+            // a match-only command rule shows its match block as the rule text
+            pattern: r.display(),
             action: r.action.to_string(),
             reason: r.reason.to_string(),
-            policy_line: policy_text.and_then(|text| pattern_line(text, r.pattern)),
+            policy_line: policy_text.and_then(|text| {
+                if r.pattern.is_empty() {
+                    None
+                } else {
+                    pattern_line(text, r.pattern)
+                }
+            }),
         });
     let note = if rule.is_none() {
         Some(format!(

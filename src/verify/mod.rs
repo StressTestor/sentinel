@@ -446,6 +446,28 @@ fn cases() -> Vec<Case> {
     ]
 }
 
+/// The Bash `command` of every pinned case, for the parse differential test
+/// in `tests/ast_candidates.rs`.
+#[doc(hidden)]
+pub fn bash_commands() -> Vec<String> {
+    cases()
+        .iter()
+        .filter_map(|case| {
+            let input: serde_json::Value = serde_json::from_str(&case.input).ok()?;
+            if input.get("tool_name")?.as_str()? != "Bash" {
+                return None;
+            }
+            Some(
+                input
+                    .get("tool_input")?
+                    .get("command")?
+                    .as_str()?
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
 pub struct CaseResult {
     pub name: &'static str,
     pub expect: &'static str,

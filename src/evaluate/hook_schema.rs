@@ -125,31 +125,7 @@ impl HookInput {
         let command = extract_command_for_tool(&tool_name, &self.tool_input)
             .or_else(|| self.tool_input.as_str().map(str::to_string));
         if let Some(cmd) = &command {
-            for extracted in extract_paths_from_command(cmd) {
-                if extracted.shell_expand_braces && !shell_expansion_paths.contains(&extracted.path)
-                {
-                    shell_expansion_paths.push(extracted.path.clone());
-                }
-                paths.push(extracted.path);
-            }
-            // ALSO mine the shell-de-obfuscated form, so a path hidden behind an
-            // ANSI-C `$'\x2f...'` quote or `${IFS}` word-split is still seen.
-            // Additive: the original tokens are kept; this only adds candidates.
-            if let Some(decoded) = crate::common::shell::decode_obfuscation(cmd) {
-                // Brace expansion runs before ANSI-C/parameter expansion, so a
-                // brace that only appears after decoding must not expand; the
-                // decoder re-quotes such bodies, so the decoded view carries
-                // provenance exactly for braces that were unquoted in the
-                // original word (`~/.ss$'h'/{id_rsa,x}` reaches `~/.ssh/*`).
-                for extracted in extract_paths_from_command(&decoded) {
-                    if extracted.shell_expand_braces
-                        && !shell_expansion_paths.contains(&extracted.path)
-                    {
-                        shell_expansion_paths.push(extracted.path.clone());
-                    }
-                    paths.push(extracted.path);
-                }
-            }
+            mine_command_paths(cmd, true, &mut paths, &mut shell_expansion_paths);
         }
 
         // 2. Known path-bearing fields (Read/Write/Edit/Glob/Grep/Notebook + variants).
@@ -293,6 +269,44 @@ fn extract_command_from_fields(input: &serde_json::Value, fields: &[&str]) -> Op
     None
 }
 
+/// Mine the path candidates of a shell command into `paths` and, for the
+/// candidates mined from words with unquoted brace delimiters,
+/// `shell_expansion_paths`. The raw command is mined first, then its
+/// shell-de-obfuscated form, so a path hidden behind an ANSI-C `$'\x2f...'`
+/// quote or `${IFS}` word-split is still seen. Additive: the original tokens
+/// are kept; the decoded view only adds candidates.
+///
+/// `use_ast` selects the word splitter: the tree-sitter parse
+/// (`common::ast`, falling back to the tokenizer when it rejects the input)
+/// or the tokenizer alone. Production passes `true`; the differential test in
+/// `tests/ast_candidates.rs` runs both and asserts identical candidates.
+pub fn mine_command_paths(
+    cmd: &str,
+    use_ast: bool,
+    paths: &mut Vec<String>,
+    shell_expansion_paths: &mut Vec<String>,
+) {
+    for extracted in extract_paths_from_command(cmd, use_ast) {
+        if extracted.shell_expand_braces && !shell_expansion_paths.contains(&extracted.path) {
+            shell_expansion_paths.push(extracted.path.clone());
+        }
+        paths.push(extracted.path);
+    }
+    if let Some(decoded) = crate::common::shell::decode_obfuscation(cmd) {
+        // Brace expansion runs before ANSI-C/parameter expansion, so a
+        // brace that only appears after decoding must not expand; the
+        // decoder re-quotes such bodies, so the decoded view carries
+        // provenance exactly for braces that were unquoted in the
+        // original word (`~/.ss$'h'/{id_rsa,x}` reaches `~/.ssh/*`).
+        for extracted in extract_paths_from_command(&decoded, use_ast) {
+            if extracted.shell_expand_braces && !shell_expansion_paths.contains(&extracted.path) {
+                shell_expansion_paths.push(extracted.path.clone());
+            }
+            paths.push(extracted.path);
+        }
+    }
+}
+
 /// extract file paths from a shell command string (heuristic). Splits on
 /// unquoted whitespace AND shell metacharacters so redirection targets and
 /// chained commands separate into their own tokens, while preserving quoted
@@ -305,10 +319,27 @@ struct CommandPath {
     shell_expand_braces: bool,
 }
 
-fn extract_paths_from_command(cmd: &str) -> Vec<CommandPath> {
+fn extract_paths_from_command(cmd: &str, use_ast: bool) -> Vec<CommandPath> {
     let mut paths = Vec::new();
-    extract_paths_with_cwd(cmd, Some("."), &mut paths);
+    extract_paths_with_cwd(cmd, Some("."), &mut paths, use_ast);
     paths
+}
+
+/// The word stream the path miner walks. With `use_ast`, the tree-sitter
+/// parse decides where words, separators and redirects are and the lexer
+/// below spells each span; a parse the grammar rejects falls back to lexing
+/// the whole command, which is the only path there used to be.
+fn mining_tokens(cmd: &str, use_ast: bool) -> Vec<ShellToken> {
+    if use_ast {
+        if let Ok(program) = crate::common::ast::parse(cmd) {
+            return program
+                .atoms()
+                .iter()
+                .flat_map(|atom| shell_tokens(atom))
+                .collect();
+        }
+    }
+    shell_tokens(cmd)
 }
 
 /// Mine path candidates from a command, resolving relative operands against
@@ -324,8 +355,13 @@ fn extract_paths_from_command(cmd: &str) -> Vec<CommandPath> {
 /// so subsequent relative operands are left as mined rather than guessed.
 /// A conditional cd can establish a directory within an && chain, but not for
 /// the next unconditional command: that cd may have been skipped entirely.
-fn extract_paths_with_cwd(cmd: &str, initial_cwd: Option<&str>, paths: &mut Vec<CommandPath>) {
-    let tokens = shell_tokens(cmd);
+fn extract_paths_with_cwd(
+    cmd: &str,
+    initial_cwd: Option<&str>,
+    paths: &mut Vec<CommandPath>,
+    use_ast: bool,
+) {
+    let tokens = mining_tokens(cmd, use_ast);
     // The top-level caller starts at ".". None means an ambiguous inherited
     // directory and must not be revived by a relative cd or nested shell.
     let mut cwd = initial_cwd.map(str::to_string);
@@ -418,7 +454,7 @@ fn extract_paths_with_cwd(cmd: &str, initial_cwd: Option<&str>, paths: &mut Vec<
             } else if let Some(payload) = interpreter_c_payload(&tokens, i) {
                 // `sh -c '<command>'`: the payload is itself a command whose
                 // relative paths resolve against the same tracked directory.
-                extract_paths_with_cwd(payload, cwd.as_deref(), paths);
+                extract_paths_with_cwd(payload, cwd.as_deref(), paths, use_ast);
             }
         }
         for cand in path_candidates(&raw.value) {
@@ -687,6 +723,15 @@ fn extract_all_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every case below runs through both word splitters, which must agree;
+    /// the parse-backed result is returned.
+    fn extract_paths_from_command(cmd: &str) -> Vec<CommandPath> {
+        let parsed = super::extract_paths_from_command(cmd, true);
+        let tokenized = super::extract_paths_from_command(cmd, false);
+        assert_eq!(parsed, tokenized, "splitters disagree on {cmd:?}");
+        parsed
+    }
 
     #[test]
     fn chained_relative_cd_keeps_the_established_directory() {

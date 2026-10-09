@@ -60,7 +60,7 @@ sentinel install --audit  # audit mode (logs only, never blocks)
 sentinel install --agent codex
 ```
 
-(the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`.)
+(the crate name is `sentinel-guard` because `sentinel` was already taken on crates.io. the binary is still `sentinel`. building from source needs a C compiler for the bundled tree-sitter-bash grammar; the release binaries are prebuilt.)
 
 the default install writes a PreToolUse hook into `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when configured. installation, health checks, and self-protection use the same location. the Codex install uses `$CODEX_HOME` when set, otherwise `~/.codex`; it prefers `hooks.json` when that file already exists and otherwise writes the native hook table in `config.toml`. the installer also writes a default policy with deny rules for credential paths, recursive deletion, pipe-to-shell, data-exfil over curl/wget, secret patterns, and its own policy, binary, and hook entry. `HOME` must be a nonempty absolute path before installation changes files.
 
@@ -195,6 +195,12 @@ sentinel is a single deterministic policy engine. no heuristics, no ML, no behav
 every decision is a rule you can read, not a confidence score. if the engine doesn't catch something, it's not caught, and that's a property you can reason about instead of a number you have to trust.
 
 earlier prototypes explored heuristic and model-assisted analyzers. neither ships. the deterministic engine is the whole product.
+
+### parse-backed rules
+
+since policy revision `2026-10-09.1`, a shell command is also parsed with tree-sitter-bash into a small structure: one segment per command (the command word, its operands, its redirects, the operator that joins it to the previous one, and a scope for every subshell, substitution, group, function body, or nested `sh -c` payload). a `[[deny.commands]]` rule can carry a `match = { ... }` block over that structure next to its `pattern` regex, or instead of it: `exec` (the command basename after wrappers like `env`, `sudo`, `timeout`), `has_flag`, `operand_under` (a literal operand under a protected directory, canonicalized like every path rule), `piped_to` (a later element of the same pipeline), `then_exec` (a later segment of the same scope), and `interpreter_eval` (an interpreter's `-c`/`-e`/`--eval` argument containing a needle). a rule with both fires on either. the four longest bundled regexes (pipe to shell, staged fetch then run, interpreter network I/O, interpreter shell execution) carry a block; the regexes stay for one release, and a test pins that the block never fires where the regex would not on any pinned command.
+
+what is modeled: plain words, quotes, a leading `$HOME`, and the operators `|`, `&&`, `||`, `;`, `&`. what is not: command substitution, process substitution, any other parameter expansion, arithmetic, and heredoc bodies are **unmodeled** words. an unmodeled operand (`git commit -m "$(date)"`) leaves a rule unmatched. an unmodeled command position (`$(cat cmdfile) arg`, `"$CC" -o main`, `eval "$x"`) means the engine cannot say what runs there: a rule that also has a `pattern` is decided by that regex, and a `match`-only rule follows `on_failure` (closed blocks, open allows, both with an `on_failure:*` rule id). a command the grammar rejects falls back to the tokenizer that has always been there, so path candidates never shrink. ANSI-C `$'..'` and `${IFS}` are resolved by the de-obfuscation pass, and the parse sees that decoded view too. the parser is C behind tree-sitter's FFI, so the input is capped at 64 KiB and a `cargo build` from source needs a C compiler (one is present on macOS, Ubuntu, and the CI images).
 
 ## supply-chain hardening (and what it can't do)
 

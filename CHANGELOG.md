@@ -104,6 +104,37 @@ versioning.
   prints the `[[downgrade]]` entry that would soften a block.
   `sentinel policy-lint --overlay <file>` lints an overlay on its own.
 - `sentinel policy accept --list` and `--revoke <path>`.
+- **Parse-backed command rules (workstream D, milestone M6).** A Bash command
+  is parsed with tree-sitter-bash 0.25.1 (exact pins; `tree-sitter-language`
+  held at 0.1.7 for MSRV 1.85) into `common::ast`: segments with their
+  command word, operands, redirects, joining operator and scope, and words
+  that are Literal or Unmodeled with the reason (command and process
+  substitution, parameter expansion other than a leading `$HOME`,
+  arithmetic, heredoc bodies, ANSI-C strings, which the de-obfuscation pass
+  resolves instead). A rejected parse falls back to the tokenizer. The path
+  miners take their word and separator spans from the parse;
+  `tests/ast_candidates.rs` asserts identical candidates against the
+  tokenizer path over 623 pinned and generated commands with no divergence.
+- A `[[deny.commands]]` rule may carry `match = { ... }` next to its
+  `pattern` or instead of it, with the vocabulary `exec`, `has_flag`,
+  `operand_under`, `piped_to`, `then_exec` and `interpreter_eval`
+  (`policy::predicate`, each with a positive and a negative table). The rule
+  fires on either. A match-only rule that meets an unmodeled command
+  position follows `on_failure` with an `on_failure:*` rule id; an unmodeled
+  operand leaves it unmatched. `policy-lint` rejects unknown keys, empty
+  lists, a block with no predicate, and a rule with neither pattern nor
+  match. Match-only rules derive their id from the block and show it as
+  their rule text in `check`, the audit line and `sentinel why`.
+- Four bundled rules carry a match block next to their regex (pipe to
+  shell, staged fetch then run, interpreter network I/O, interpreter shell
+  execution). `tests/predicate_agreement.rs` pins that no block fires where
+  its regex does not on any verify or FP-corpus command (42 pairs touched,
+  32 agree, 10 regex-only, each explained by a construct the vocabulary does
+  not express). The subprocess argv, fetch-and-exec co-occurrence and
+  credential-read interpreter rules stay regex-only: they need a conjunction
+  or an argv-shape needle.
+- Fuzz target `parse_ast` (no panic, bounded time, size cap honored, words
+  and spans bounded by the input), in the nightly matrix.
 
 ### Fixed
 - **Self-protect no longer blocks a project-scoped settings file that never
@@ -134,7 +165,18 @@ versioning.
   remain and delegate to them. No decision changes: the verify set, the
   false-positive regression corpus, and the differential harness are
   unchanged. An ignored `timing_over_verify_cases` test records the
-  before/after figures, which are in the pull request.
+  before/after figures, which are in the pull request. A `match`-only rule
+  (empty `pattern`) has no regex entry and is decided by its `match` block
+  as before.
+- The bundled policy revision is `2026-10-09.1`. `policy-migrate` recognizes
+  `2026-08-07.1` as a published generation and migrates it forward by adding
+  the four `match` blocks; every older baseline is reconstructed without
+  them, so the published 0.4.x digests are unchanged. `match` is a managed
+  field of `deny.commands`, compared by value: an identical user-written
+  block is kept, a differing one is a conflict.
+- Building from source needs a C compiler (the tree-sitter runtime and the
+  bash grammar are C); macOS, Ubuntu and the CI images have one, and the musl
+  release builds keep using the `musl-tools` step.
 - The bundled policy rules moved out of one `format!` string in
   `src/install/defaults.rs` into per-family TOML files under
   `src/install/defaults/` (`01-credential-paths.toml` through
