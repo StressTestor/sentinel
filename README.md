@@ -128,6 +128,8 @@ reason = "AWS access key in command args"
 
 deny rules evaluate first. glob patterns for paths, regex for commands and secrets.
 
+every rule can carry an optional `id` (`id = "cred-paths/ssh"`). a rule without one is addressed as `<section>:<8 hex of sha256(pattern)>`, so an audit line names the same rule after a reorder. every block or warn in `~/.sentinel/audit.jsonl` records that id plus a bounded witness: the canonicalized path, the matched command fragment, or the tool name. secret rules record the id only, never the match. `sentinel why` joins the most recent block or warn (or every line for a `tool_use_id`) back to the rule text and its line in `policy.toml`. nothing in the trail is a payload.
+
 ## one deterministic tier, on purpose
 
 sentinel is a single deterministic policy engine. no heuristics, no ML, no behavioral scoring in the decision path.
@@ -174,6 +176,7 @@ sentinel uninstall --agent <name>  remove direct Claude Code or Codex hooks
 sentinel evaluate [--agent <name>]  evaluate a tool call (called by the hook)
 sentinel post-evaluate    scan a tool RESULT for secret shapes (PostToolUse hook; detection only)
 sentinel check '<json>'   dry-run a tool call against the policy and explain the decision
+sentinel why [<tool_use_id>]  explain a block or warn already in the audit trail: rule id, rule text, what matched
 sentinel verify           replay pinned attacks through the policy, assert each is caught
 sentinel doctor --agent <name> --strict  validate activation + probe hook liveness
 sentinel audit-mcp [--strict]  compare configured MCP servers with the accepted baseline

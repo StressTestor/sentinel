@@ -148,6 +148,8 @@ fn apply_normalized_with(
                              rather than risk disarming sentinel (self-protect): {error}"
                         )),
                         matched_rule: Some("selfprotect: hook-config inspection failed".into()),
+                        rule_id: Some("selfprotect:hook-config-inspection-failed".into()),
+                        witness: None,
                     };
                 }
             }
@@ -256,6 +258,8 @@ fn path_identity_failure_block(error: String) -> PolicyDecision {
              bypassing sentinel self-protection: {error}"
         )),
         matched_rule: Some("selfprotect: path identity inspection failed".into()),
+        rule_id: Some("selfprotect:path-identity-inspection-failed".into()),
+        witness: None,
     }
 }
 
@@ -270,6 +274,8 @@ fn protected_state_write_block(protected: ProtectedStateFile) -> PolicyDecision 
                     .into(),
             ),
             matched_rule: Some("selfprotect: mcp-baseline write".into()),
+            rule_id: Some("selfprotect:mcp-baseline-write".into()),
+            witness: None,
         },
         ProtectedStateFile::AuditTrail => PolicyDecision {
             action: Action::Block,
@@ -279,6 +285,8 @@ fn protected_state_write_block(protected: ProtectedStateFile) -> PolicyDecision 
                     .into(),
             ),
             matched_rule: Some("selfprotect: audit-trail write".into()),
+            rule_id: Some("selfprotect:audit-trail-write".into()),
+            witness: None,
         },
     }
 }
@@ -324,6 +332,8 @@ fn policy_write_block() -> PolicyDecision {
                 .into(),
         ),
         matched_rule: Some("selfprotect: policy.toml write".into()),
+        rule_id: Some("selfprotect:policy.toml-write".into()),
+        witness: None,
     }
 }
 
@@ -337,6 +347,8 @@ fn hook_disable_block(path: &str) -> PolicyDecision {
              PreToolUse hook along with every other hook (self-protect)"
         )),
         matched_rule: Some("selfprotect: hook-disable".into()),
+        rule_id: Some("selfprotect:hook-disable".into()),
+        witness: None,
     }
 }
 
@@ -369,6 +381,8 @@ fn hook_removal_block() -> PolicyDecision {
                 .into(),
         ),
         matched_rule: Some("selfprotect: hook-removal".into()),
+        rule_id: Some("selfprotect:hook-removal".into()),
+        witness: None,
     }
 }
 
@@ -874,6 +888,8 @@ mod tests {
             action: Action::Warn,
             reason: Some("agent config write".into()),
             matched_rule: Some("deny.paths: **/.claude/settings.json".into()),
+            rule_id: None,
+            witness: None,
         }
     }
 
@@ -882,6 +898,8 @@ mod tests {
             action: Action::Allow,
             reason: None,
             matched_rule: None,
+            rule_id: None,
+            witness: None,
         }
     }
 
@@ -1356,6 +1374,8 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
             action: Action::Block,
             reason: Some("real policy block".into()),
             matched_rule: Some("deny.paths: something".into()),
+            rule_id: None,
+            witness: None,
         };
         let input = json!({"file_path": SETTINGS, "content": settings_without_hook()});
         let d = apply_normalized_with(block.clone(), &normalized_input("Write", &input), |_| true);
@@ -1677,6 +1697,8 @@ command = "/usr/local/bin/sentinel evaluate --agent codex"
             action: Action::Block,
             reason: Some("real policy block".into()),
             matched_rule: Some("deny.paths: something".into()),
+            rule_id: None,
+            witness: None,
         };
         assert_eq!(
             apply_normalized(block.clone(), &normalized_input("Write", &write)),

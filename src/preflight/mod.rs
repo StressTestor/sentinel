@@ -142,6 +142,8 @@ pub fn inspect(manifest: &Value) -> Option<PolicyDecision> {
                              (worm TTP): {script}"
                         )),
                         matched_rule: Some(format!("preflight: {key} remote-exec")),
+                        rule_id: Some(format!("preflight:{key}-remote-exec")),
+                        witness: None,
                     });
                 }
             }
@@ -166,6 +168,8 @@ pub fn inspect(manifest: &Value) -> Option<PolicyDecision> {
                                      source (`{spec}`) and the manifest has a lifecycle script"
                                 )),
                                 matched_rule: Some("preflight: non-registry dep source".into()),
+                                rule_id: Some("preflight:non-registry-dep-source".into()),
+                                witness: None,
                             });
                         }
                     }
@@ -884,6 +888,8 @@ mod tests {
             action: Action::Allow,
             reason: None,
             matched_rule: None,
+            rule_id: None,
+            witness: None,
         }
     }
 
@@ -1126,6 +1132,8 @@ mod tests {
             action: Action::Block,
             reason: Some("real policy block".into()),
             matched_rule: Some("deny.commands: x".into()),
+            rule_id: None,
+            witness: None,
         };
         // even with a clean manifest and an install command, a Block stays Block
         let dir = tempfile::tempdir().unwrap();

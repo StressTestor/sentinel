@@ -14,6 +14,7 @@
 
 use crate::cli::LintArgs;
 use crate::evaluate::resolve_policy_path;
+use crate::policy::schema::is_valid_rule_id;
 use crate::policy::PolicyEngine;
 use regex::Regex;
 use std::collections::HashSet;
@@ -68,7 +69,37 @@ pub fn lint_engine(engine: &PolicyEngine) -> Vec<Finding> {
         }
     }
 
-    // 3. over-broad allow entries - an allow-list with a catch-all defeats the
+    // 3. rule ids: an explicit id must use the bounded alphabet (it travels
+    //    through audit lines and shell arguments), and two rules must not share
+    //    one (`sentinel why` and future per-id overrides would be ambiguous).
+    //    Derived ids are not checked here: they collide exactly when the
+    //    (section, pattern) pair does, which check 2 already reports.
+    let mut explicit_ids: HashSet<&str> = HashSet::new();
+    for r in &rules {
+        if !r.explicit_id {
+            continue;
+        }
+        if !is_valid_rule_id(&r.id) {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "{}: rule id {:?} is invalid (1-128 chars of [A-Za-z0-9._/:-])",
+                    r.section, r.id
+                ),
+            });
+        }
+        if !explicit_ids.insert(r.id.as_str()) {
+            findings.push(Finding {
+                error: true,
+                message: format!(
+                    "{}: duplicate rule id {:?}; ids must be unique across the policy",
+                    r.section, r.id
+                ),
+            });
+        }
+    }
+
+    // 4. over-broad allow entries - an allow-list with a catch-all defeats the
     //    point of a narrow allow + default=block lockdown.
     for r in &rules {
         if r.section == "allow.paths" && is_broad_allow(r.pattern) {
@@ -183,6 +214,65 @@ mod tests {
              [[deny.secrets]]\npattern='gserviceaccount'\naction=\"warn\"\nreason=\"b\"\n",
         );
         assert!(lint_engine(&e).is_empty());
+    }
+
+    #[test]
+    fn invalid_and_duplicate_explicit_ids_are_errors() {
+        let findings = lint_engine(&engine(
+            r#"
+[policy]
+mode = "enforce"
+
+[[deny.paths]]
+id = "has space"
+pattern = "~/.ssh/*"
+action = "block"
+reason = "r"
+
+[[deny.paths]]
+id = "dup"
+pattern = "~/.aws/*"
+action = "block"
+reason = "r"
+
+[[deny.commands]]
+id = "dup"
+pattern = 'rm -rf /'
+action = "block"
+reason = "r"
+"#,
+        ));
+        let errors: Vec<&str> = findings
+            .iter()
+            .filter(|f| f.error)
+            .map(|f| f.message.as_str())
+            .collect();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("rule id \"has space\" is invalid"));
+        assert!(errors[1].contains("duplicate rule id \"dup\""));
+    }
+
+    #[test]
+    fn derived_ids_are_not_reported_as_duplicates() {
+        // two rules with the same (section, pattern) already get the duplicate
+        // pattern warning; the id check must not double-report them as errors.
+        let findings = lint_engine(&engine(
+            r#"
+[policy]
+mode = "enforce"
+
+[[deny.paths]]
+pattern = "~/.ssh/*"
+action = "warn"
+reason = "r"
+
+[[deny.paths]]
+pattern = "~/.ssh/*"
+action = "block"
+reason = "r"
+"#,
+        ));
+        assert!(findings.iter().all(|f| !f.error), "{findings:?}");
     }
 
     #[test]

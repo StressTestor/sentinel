@@ -44,6 +44,8 @@ sentinel/
 ├── src/
 │   ├── main.rs             CLI entry, subcommand dispatch
 │   ├── cli.rs              clap arg definitions
+│   ├── why/
+│   │   └── mod.rs          `sentinel why`: join an audit line's rule id to the installed policy
 │   ├── common/
 │   │   ├── mod.rs
 │   │   ├── normalize.rs    encoded-text normalization (HTML-entity decode, Unicode format-char strip, NFKC) — secret path only
@@ -517,6 +519,7 @@ never silently flips them to enforce.
 | `sentinel install --audit` | install in audit mode (log only) |
 | `sentinel uninstall --agent <name>` | remove direct Claude Code or Codex hooks |
 | `sentinel check '<hook-json>'` | dry-run a tool call against the policy and explain the decision (read-only) |
+| `sentinel why [<tool_use_id>] [--json]` | explain a decision already in the audit trail: rule id, rule text and policy line, bounded witness (read-only; never the payload) |
 | `sentinel verify [--policy <file>]` | replay the pinned 64/64 attack and benign cases; nonzero on a mismatch |
 | `sentinel doctor --agent <name> [--strict] [--json]` | inspect activation and policy, then probe the actual hook chain with a known-bad canary |
 | `sentinel audit-mcp [--strict]` | compare current MCP config with an explicitly accepted baseline |

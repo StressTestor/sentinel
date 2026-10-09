@@ -6,6 +6,23 @@ versioning.
 
 ## [Unreleased]
 
+### Added
+- **Rule ids and decision witnesses.** Every policy rule accepts an optional
+  `id`; a rule without one is addressed as `<section>:<8 hex of
+  sha256(pattern)>`. `PolicyDecision`, `sentinel check --json`, and each
+  `audit.jsonl` line now carry `rule_id` and a bounded `witness` (the
+  canonicalized path, the matched command fragment from whichever form
+  matched, or the tool name). Secret rules record the id only. Self-protect,
+  preflight, and failure-posture decisions use fixed `selfprotect:*`,
+  `preflight:*`, and `on_failure:*` ids. Old audit lines still parse; lines
+  with neither field are byte-identical to the previous format.
+- **`sentinel why [<tool_use_id>] [--json]`.** Explains the most recent block
+  or warn (or every line for one tool call) from the audit trail: rule id,
+  rule text and `policy.toml` line, witness, or the fixed layer that decided.
+  Read-only; it never replays or logs anything.
+- `sentinel policy-lint` rejects an explicit rule id outside
+  `[A-Za-z0-9._/:-]{1,128}` and any id used by two rules.
+
 ### Fixed
 - **Self-protect no longer blocks a project-scoped settings file that never
   carried the sentinel hook.** The hook-removal check is now per file: a
