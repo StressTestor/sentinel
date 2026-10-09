@@ -160,6 +160,8 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
         // line(s) — same value in both phases' payloads. telemetry only.
         tool_use_id: call.tool_use_id.clone(),
         hook_phase: Some("pre".into()),
+        rule_id: decision.rule_id.clone(),
+        witness: decision.witness.clone(),
     }) {
         eprintln!("sentinel: could not append audit event: {error}");
     }

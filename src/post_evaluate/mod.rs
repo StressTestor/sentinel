@@ -101,6 +101,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         call_id: None,
         tool_use_id: hook.tool_use_id.clone(),
         hook_phase: Some("post".into()),
+        rule_id: None,
+        witness: None,
     }) {
         eprintln!("sentinel: could not append result-scan audit event: {error}");
     }

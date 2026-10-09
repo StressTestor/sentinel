@@ -937,6 +937,8 @@ mod tests {
             call_id: None,
             tool_use_id: None,
             hook_phase: None,
+            rule_id: None,
+            witness: None,
         };
         let events = vec![
             ev("block", &recent),

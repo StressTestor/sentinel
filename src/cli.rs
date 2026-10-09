@@ -33,6 +33,9 @@ pub enum Command {
     /// dry-run a tool call against the policy and explain the decision (no execution, no logging)
     Check(CheckArgs),
 
+    /// explain a decision already recorded in the audit trail: the rule, its id, and what matched (read-only)
+    Why(WhyArgs),
+
     /// replay a pinned set of attacks through the policy and assert each is caught (CI gate)
     Verify(VerifyArgs),
 
@@ -157,6 +160,21 @@ pub struct CheckArgs {
     /// emit a stable JSON result instead of human-readable output
     #[arg(long, default_value_t = false)]
     pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct WhyArgs {
+    /// explain every audit line for this Claude Code tool_use_id
+    /// (if omitted, explains the most recent block or warn)
+    pub tool_use_id: Option<String>,
+
+    /// emit the explanation(s) as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    /// resolve rule ids against a specific policy file instead of the installed one
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

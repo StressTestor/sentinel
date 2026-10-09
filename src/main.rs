@@ -16,6 +16,7 @@ mod post_evaluate;
 mod preflight;
 mod selfprotect;
 mod verify;
+mod why;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -50,6 +51,7 @@ async fn main() {
         Command::PostEvaluate => post_evaluate::run(),
         Command::Status(args) => run_status(&args.agent),
         Command::Check(args) => check::run(args),
+        Command::Why(args) => why::run(args),
         Command::Verify(args) => verify::run(args),
         Command::Doctor(args) => doctor::run(args),
         Command::PolicyDiff(args) => policy_diff::run(args),

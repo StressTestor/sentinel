@@ -868,35 +868,47 @@ fn lexical_normalize(p: &str) -> String {
 /// rm-flag-canonicalized form, AND the shell-de-obfuscated form (ANSI-C `$'...'`
 /// escapes + `${IFS}` desugaring), so `$'\x72\x6d' -rf /` and `cat${IFS}/etc/...`
 /// can't dodge a rule. Additive: the raw check runs first and is never replaced.
+#[cfg(test)]
 pub fn matches_command(pattern: &str, command: &str) -> bool {
-    match Regex::new(pattern) {
-        Ok(re) => {
-            if re.is_match(command) {
-                return true;
-            }
-            let normalized = normalize_command(command);
-            if normalized != command && re.is_match(&normalized) {
-                return true;
-            }
-            // Filesystem and lexical resolution can intentionally diverge only
-            // for rm operands with dot components. Keep the lexical candidate
-            // additive without doubling normalization work for every ordinary
-            // command/rule pair.
-            if command.contains("rm") && command.contains("/.") {
-                let lexical = normalize_command_inner(command, false);
-                if lexical != command && lexical != normalized && re.is_match(&lexical) {
-                    return true;
-                }
-            }
-            crate::common::shell::decode_obfuscation(command)
-                .as_deref()
-                .is_some_and(|decoded| re.is_match(decoded))
-        }
+    command_match_witness(pattern, command).is_some()
+}
+
+/// `matches_command`, but returning the text the rule matched (from whichever
+/// form matched first: raw, canonicalized, lexical, or de-obfuscated). This is
+/// the witness an audit line records, so the operator can see which fragment
+/// of a long command tripped a rule without the payload being logged.
+pub fn command_match_witness(pattern: &str, command: &str) -> Option<String> {
+    let re = match Regex::new(pattern) {
+        Ok(re) => re,
         Err(_) => {
             tracing::warn!("invalid command pattern: {pattern}");
-            false
+            return None;
+        }
+    };
+    if let Some(found) = re.find(command) {
+        return Some(found.as_str().to_string());
+    }
+    let normalized = normalize_command(command);
+    if normalized != command {
+        if let Some(found) = re.find(&normalized) {
+            return Some(found.as_str().to_string());
         }
     }
+    // Filesystem and lexical resolution can intentionally diverge only
+    // for rm operands with dot components. Keep the lexical candidate
+    // additive without doubling normalization work for every ordinary
+    // command/rule pair.
+    if command.contains("rm") && command.contains("/.") {
+        let lexical = normalize_command_inner(command, false);
+        if lexical != command && lexical != normalized {
+            if let Some(found) = re.find(&lexical) {
+                return Some(found.as_str().to_string());
+            }
+        }
+    }
+    crate::common::shell::decode_obfuscation(command)
+        .as_deref()
+        .and_then(|decoded| re.find(decoded).map(|found| found.as_str().to_string()))
 }
 
 /// Canonicalize runtime-equivalent command spellings for additive matching:
