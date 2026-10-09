@@ -241,6 +241,7 @@ fn sandbox_weakening_block(path: &str, weakening: sandbox::Weakening) -> PolicyD
         matched_rule: Some("selfprotect: sandbox-weakening".into()),
         rule_id: Some("selfprotect:sandbox-weakening".into()),
         witness: None,
+        downgraded_by: None,
     }
 }
 
