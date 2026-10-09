@@ -1,6 +1,7 @@
 pub mod activation;
 pub mod defaults;
 pub mod hooks;
+pub mod sandbox;
 pub mod state;
 
 use std::path::{Path, PathBuf};
@@ -16,8 +17,23 @@ pub enum InstallError {
     BinaryNotFound,
     #[error("unsupported agent: {0}")]
     UnsupportedAgent(String),
+    #[error(
+        "the sandbox bridge is Claude Code only; `--sandbox` is not supported for agent `{0}`"
+    )]
+    SandboxUnsupported(String),
+    #[error("sandbox bridge: the policy at {0} cannot load: {1}")]
+    SandboxPolicy(String, String),
     #[error("invalid configuration directory: {0}")]
     ConfigDirectory(#[from] std::io::Error),
+}
+
+/// What `run_install` was asked to do beyond the hook and the policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InstallOptions {
+    pub audit: bool,
+    pub result_scan: bool,
+    /// project the policy into Claude Code's sandbox lists (opt-in)
+    pub sandbox: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,13 +66,24 @@ impl AgentTarget {
     }
 }
 
-pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), InstallError> {
+pub fn run_install(options: InstallOptions, agent: &str) -> Result<(), InstallError> {
+    let InstallOptions {
+        audit,
+        result_scan,
+        sandbox,
+    } = options;
     let policy_path = sentinel_dir()?.join("policy.toml");
     // verify sentinel binary is in PATH
     let sentinel_path = which_sentinel()?;
     println!("sentinel binary: {}", sentinel_path.display());
 
-    let Some(target) = AgentTarget::parse(agent) else {
+    let target = AgentTarget::parse(agent);
+    // refuse before touching any file: a `--sandbox` install for an agent
+    // without a sandbox must not half-install the hook and then fail.
+    if sandbox && target != Some(AgentTarget::ClaudeCode) {
+        return Err(InstallError::SandboxUnsupported(agent.to_string()));
+    }
+    let Some(target) = target else {
         return install_generic(&sentinel_path, audit, agent);
     };
 
@@ -137,6 +164,19 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
         println!("run `sentinel status` to see the active mode; edit the policy to change it.");
     }
 
+    if target == AgentTarget::ClaudeCode {
+        let settings_path = claude_settings_path()?;
+        let state_path = state::install_state_path()?;
+        if sandbox {
+            install_sandbox_bridge(&policy_path, &settings_path, &state_path)?;
+        } else if state::load_install_state(&state_path)?.sandbox.is_some() {
+            println!();
+            println!(
+                "sandbox bridge is installed and was left as is; re-run with `--sandbox` to regenerate the projection from the current policy."
+            );
+        }
+    }
+
     println!();
     println!(
         "done. Sentinel is configured for {}; activation is verified by `sentinel doctor --agent {} --strict`.",
@@ -144,6 +184,49 @@ pub fn run_install(audit: bool, result_scan: bool, agent: &str) -> Result<(), In
         target.evaluate_agent_arg()
     );
 
+    Ok(())
+}
+
+/// `--sandbox`: compile the live policy and reconcile it into the same
+/// settings file the hook lives in. Runs after the policy write so a fresh
+/// host has a policy to project.
+fn install_sandbox_bridge(
+    policy_path: &Path,
+    settings_path: &Path,
+    state_path: &Path,
+) -> Result<(), InstallError> {
+    let engine = crate::policy::PolicyEngine::load(policy_path).map_err(|error| {
+        InstallError::SandboxPolicy(policy_path.display().to_string(), error.to_string())
+    })?;
+    let projection = sandbox::project(&engine)?;
+    let record = sandbox::install_bridge(settings_path, state_path, &projection)?;
+    println!();
+    println!(
+        "sandbox bridge: wrote {} denyRead and {} denyWrite entries to {} (sentinel-owned entries recorded in {})",
+        projection.deny_read.len(),
+        projection.deny_write.len(),
+        settings_path.display(),
+        state_path.display()
+    );
+    println!(
+        "sandbox bridge: pinned sandbox.enabled=true, failIfUnavailable=true, allowUnsandboxedCommands=false"
+    );
+    let reused = projection.deny_read.len() + projection.deny_write.len()
+        - record.deny_read.len()
+        - record.deny_write.len();
+    if reused > 0 {
+        println!(
+            "sandbox bridge: {reused} projected entries were already present and stay user-owned"
+        );
+    }
+    println!(
+        "sandbox bridge: {} rules stay hook-only, {} entries withheld on this host; `sentinel status` lists them",
+        projection.hook_only.len(),
+        projection.withheld.len()
+    );
+    println!(
+        "sandbox bridge: inside the sandbox, tools that read their own credential files (gh, aws, kubectl, npm with a tokened ~/.npmrc, cargo publish, docker login, git credential helpers, ssh) now fail. See the README section \"sandbox bridge (opt-in)\" before relying on them."
+    );
     Ok(())
 }
 
@@ -220,6 +303,14 @@ pub fn run_uninstall(agent: &str) -> Result<(), InstallError> {
                 "removed direct Sentinel hooks from {}; mediated hooks owned by other tools were preserved",
                 settings_path.display()
             );
+            let state_path = state::install_state_path()?;
+            if let Some(record) = sandbox::uninstall_bridge(&settings_path, &state_path)? {
+                println!(
+                    "removed {} sentinel-owned sandbox entries from {}; user entries and user-set sandbox keys were preserved",
+                    record.deny_read.len() + record.deny_write.len(),
+                    record.settings_path
+                );
+            }
         }
         AgentTarget::Codex => {
             let config_path = codex_config_path()?;

@@ -35,8 +35,15 @@ async fn main() {
 
     let result = match cli.command {
         Command::Audit(args) => audit::run(args).await,
-        Command::Install(args) => install::run_install(args.audit, args.result_scan, &args.agent)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>),
+        Command::Install(args) => install::run_install(
+            install::InstallOptions {
+                audit: args.audit,
+                result_scan: args.result_scan,
+                sandbox: args.sandbox,
+            },
+            &args.agent,
+        )
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>),
         Command::Uninstall(args) => install::run_uninstall(&args.agent)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>),
         Command::Evaluate(args) => evaluate::run(args.canary, &args.agent),
@@ -79,6 +86,23 @@ fn run_status(agent: &str) -> Result<(), Box<dyn std::error::Error>> {
     let engine = policy::PolicyEngine::load(&policy_path)
         .map_err(|error| format!("policy at {} cannot load: {error}", policy_path.display()))?;
     println!("policy:   {} ({})", policy_path.display(), engine.mode());
+
+    if target == install::AgentTarget::ClaudeCode {
+        match install::sandbox::bridge_status(&state.config_path, Ok(&engine))? {
+            Some(bridge) => {
+                println!("sandbox:  {}", install::sandbox::summary_line(&bridge));
+                for (pattern, reason) in &bridge.projection.hook_only {
+                    println!("          hook-only: {pattern} ({reason})");
+                }
+                for (pattern, reason) in &bridge.projection.withheld {
+                    println!("          withheld: {pattern} ({reason})");
+                }
+            }
+            None => {
+                println!("sandbox:  bridge not installed (opt-in: `sentinel install --sandbox`)")
+            }
+        }
+    }
 
     if std::path::Path::new(&audit_path).exists() {
         let line_count = std::fs::read_to_string(&audit_path)?.lines().count();
