@@ -4,8 +4,14 @@
 # `| nice sh`, `| tee f | sh` all block, while a fetched payload piped into a
 # filter whose ARGUMENT merely names a shell (`curl x | grep ssh`, `| grep bash`)
 # does NOT. `[a-z/]*sh` keeps coverage of every `*sh` (sh/bash/zsh/dash/fish/...).
+# the match block is the same rule over the parsed command: a fetcher in
+# command position piped, through any number of stages and the modeled
+# wrappers, into a shell. the rule fires on either form (parse-backed rules
+# were added in revision 2026-10-09.1; the regex stays for one release).
 [[deny.commands]]
 pattern = '\b(curl|wget|fetch)\b[^|]*\|(?:[^|]*\|)*\s*(?:(?:[\w./-]*/)?(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs)\b[^|]*\s)?[a-z/]*sh\b'
+match.exec = ["curl", "wget", "fetch"]
+match.piped_to = ["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh", "mksh", "yash"]
 action = "block"
 reason = "pipe to shell execution"
 
@@ -27,8 +33,16 @@ reason = "command substitution of a remote fetch"
 # rule uses), so a bare word like wc/grep/head can never be crossed and a `.sh`
 # extension is unreachable. command normalization consumes modeled wrapper
 # options and their operands before this rule is evaluated.
+# the match block reads the same shape off the parse: a fetcher with an output
+# flag, then a shell (or `source`/`.` with an operand) in command position in a
+# later segment. the regex also covers direct execution of the fetched file
+# (`curl -o x.sh URL && ./x.sh`) through the normalizer's output-path
+# correlation, which the vocabulary does not express; the regex stays.
 [[deny.commands]]
 pattern = '\b(curl|wget|fetch)\b.*\s-[oO]\b.*[;&|]\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|[0-9]?[<>]{1,2}&?[^\s;&|]*|[({!])\s*)*(?:(?:[\w.-]*/)*(?:env|nice|nohup|setsid|stdbuf|sudo|doas|time|timeout|ionice|command|exec|xargs|eval)\s+(?:-[^\s]*\s+)*)*(?:(?:[\w.~$-]*/)*(?:ba|z|da|k|c|tc|fi|a)?sh\b|(?:source|\.)[ \t]+\S)'
+match.exec = ["curl", "wget", "fetch"]
+match.has_flag = ["-o", "-O", "--output", "--output-document"]
+match.then_exec = ["sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash", "source", "."]
 action = "block"
 reason = "staged fetch-then-run (download then execute) - shell interpreter at the next command position"
 

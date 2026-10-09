@@ -283,6 +283,33 @@ M6  D parser + predicate rules                 (depends on S3, C2 harness, B FP 
 M7  A2 Landlock launch                         (only on demand)
 ```
 
+M6 status (first PR, `feat/m6-parser`, 2026-10-09): tree-sitter-bash 0.25.1
+with `tree-sitter-language` pinned to 0.1.7 (MSRV 1.85 checks). Parse
+coverage, measured by `tests/ast_candidates.rs`: 49/49 Bash commands of the
+verify set, 119/119 commands of the 2026-08 FP corpus
+(`tests/policy_fp_regression.rs`), 391/400 seeded fragments from the C2
+grammar (the 9 rejected all contain an ANSI-C body ending in an escaped
+backslash before a later quote, a scanner limit of the grammar; they use the
+tokenizer path), 52/55 hand-written shell shapes (the 3 rejected are the
+deliberate syntax-error cases). Candidate sets from the parse-backed and
+tokenizer path miners are identical on all 623 commands; the known-divergence
+table is empty. Vocabulary landed: `exec`, `has_flag`, `operand_under`,
+`piped_to`, `then_exec`, `interpreter_eval`. Four bundled regexes carry a
+`match` block next to the regex (pipe to shell, staged fetch then run,
+interpreter network I/O, interpreter shell execution); over the verify set and
+FP corpus the block never fires where the regex does not, 32 of 42 touched
+pairs agree, and the 10 regex-only pairs are a shell pipe quoted inside a
+Python string, the normalizer's fetched-file execution correlation, and bare
+`exec(`/`eval(`/`system(` calls, each listed in `tests/predicate_agreement.rs`.
+The subprocess argv rule, the fetch-and-exec co-occurrence rule and the
+credential-read rule stay regex-only because `contains` is a disjunction of
+substrings and they need a conjunction or an argv-shape needle; widening the
+vocabulary for them is the next step, after one release with both forms.
+Build cost on the 4-core CI-class box: clean `cargo build --release` 117 s
+before, 115 s after (the C grammar compiles in parallel with the Rust
+dependencies); release binary 5,122,456 bytes before, 6,703,232 bytes after
+(1.58 MB more, the tree-sitter runtime plus the bash parser tables).
+
 Release mapping:
 - **0.6.0**: M1, M2, M3 (opt-in), M5. Defaults unchanged.
 - **0.7.0**: M4, flip `install` to `--sandbox` by default on Claude Code

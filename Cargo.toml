@@ -46,6 +46,13 @@ unicode-normalization = "0.1"
 html-escape = "0.2"
 getrandom = "0.3"
 sha2 = "0.10"
+# Exact pins: the parse runs in C behind FFI on attacker-controlled input, so a
+# grammar or runtime bump is a reviewed change, not a dependabot patch. The
+# transitive `tree-sitter-language` is held at 0.1.7 in Cargo.lock (0.1.8+
+# declares rust-version 1.90, above the crate's MSRV); the CI msrv job runs
+# `--locked`, so a bump of that crate fails there instead of slipping through.
+tree-sitter = "=0.25.10"
+tree-sitter-bash = "=0.25.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
@@ -116,12 +117,142 @@ pub struct DenyPathRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyCommandRule {
     /// Optional stable identifier for `sentinel why`, audit lines, and future
-    /// per-rule overrides. Absent → derived from the section and pattern.
+    /// per-rule overrides. Absent → derived from the section and pattern (or
+    /// the match block, for a rule without a pattern).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Regex over the command text. Empty when the rule is `match`-only.
+    #[serde(default)]
     pub pattern: String,
+    /// Structured predicates over the parsed command (`common::ast`), evaluated
+    /// next to the regex: the rule fires when either matches. See
+    /// `policy::predicate` for the vocabulary and the Unmodeled rules.
+    #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<MatchSpec>,
     pub action: String,
     pub reason: String,
+}
+
+impl DenyCommandRule {
+    /// What identifies this rule when it has no explicit id: the pattern, or
+    /// the canonical rendering of the match block for a match-only rule.
+    pub fn identity(&self) -> String {
+        if !self.pattern.is_empty() {
+            return self.pattern.clone();
+        }
+        self.matcher
+            .as_ref()
+            .map(MatchSpec::canonical)
+            .unwrap_or_default()
+    }
+
+    /// The rule text shown in `matched_rule` labels and `sentinel why`.
+    pub fn display(&self) -> String {
+        if !self.pattern.is_empty() {
+            return self.pattern.clone();
+        }
+        self.matcher
+            .as_ref()
+            .map(|m| format!("match = {}", m.render()))
+            .unwrap_or_default()
+    }
+}
+
+/// The `match = { ... }` block of a `[[deny.commands]]` rule. Every listed
+/// predicate must hold for one command segment (and, for `piped_to` and
+/// `then_exec`, a later segment in the same scope). Unknown keys are kept so
+/// `policy-lint` can report them; the engine ignores them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MatchSpec {
+    /// Command basenames in command position, after the modeled wrappers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<Vec<String>>,
+    /// Flags present on the command (`-o`, `-o<value>`, `--output`, `--output=<value>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_flag: Option<Vec<String>>,
+    /// A literal operand (or redirect target) under this directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operand_under: Option<String>,
+    /// A later element of the same pipeline whose exec is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub piped_to: Option<Vec<String>>,
+    /// A later segment of the same scope (after the pipeline) whose exec is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub then_exec: Option<Vec<String>>,
+    /// An interpreter's inline-code argument containing a needle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpreter_eval: Option<InterpreterEval>,
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct InterpreterEval {
+    #[serde(default)]
+    pub interpreters: Vec<String>,
+    #[serde(default)]
+    pub contains: Vec<String>,
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: BTreeMap<String, toml::Value>,
+}
+
+impl MatchSpec {
+    /// Whether any known predicate is set.
+    pub fn is_empty(&self) -> bool {
+        self.exec.is_none()
+            && self.has_flag.is_none()
+            && self.operand_under.is_none()
+            && self.piped_to.is_none()
+            && self.then_exec.is_none()
+            && self.interpreter_eval.is_none()
+    }
+
+    /// A stable one-line form (JSON, fields in declaration order) used to
+    /// derive a rule id when the rule has no pattern.
+    pub fn canonical(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// The block as it would be written in the policy, on one line.
+    pub fn render(&self) -> String {
+        let mut parts = Vec::new();
+        let list = |values: &[String]| -> String {
+            format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(|v| format!("{v:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        if let Some(v) = &self.exec {
+            parts.push(format!("exec = {}", list(v)));
+        }
+        if let Some(v) = &self.has_flag {
+            parts.push(format!("has_flag = {}", list(v)));
+        }
+        if let Some(v) = &self.operand_under {
+            parts.push(format!("operand_under = {v:?}"));
+        }
+        if let Some(v) = &self.piped_to {
+            parts.push(format!("piped_to = {}", list(v)));
+        }
+        if let Some(v) = &self.then_exec {
+            parts.push(format!("then_exec = {}", list(v)));
+        }
+        if let Some(ie) = &self.interpreter_eval {
+            parts.push(format!(
+                "interpreter_eval = {{ interpreters = {}, contains = {} }}",
+                list(&ie.interpreters),
+                list(&ie.contains)
+            ));
+        }
+        for key in self.unknown.keys() {
+            parts.push(format!("{key} = ?"));
+        }
+        format!("{{ {} }}", parts.join(", "))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,5 +426,68 @@ reason = "AWS credential access"
     fn reject_invalid_toml() {
         let result = parse_policy("this is not toml {{{}}}");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn match_block_parses_next_to_or_instead_of_a_pattern() {
+        let toml = r#"
+[policy]
+mode = "enforce"
+
+[[deny.commands]]
+id = "fetch-exec/curl-pipe-sh"
+pattern = 'curl.*\|\s*sh'
+match = { exec = ["curl", "wget"], piped_to = ["sh", "bash"] }
+action = "block"
+reason = "pipe to shell"
+
+[[deny.commands]]
+match = { interpreter_eval = { interpreters = ["python3"], contains = ["os.system("] }, mystery = 1 }
+action = "block"
+reason = "inline exec"
+"#;
+        let config = parse_policy(toml).unwrap();
+        let both = &config.deny_commands[0];
+        assert_eq!(both.pattern, r"curl.*\|\s*sh");
+        let spec = both.matcher.as_ref().unwrap();
+        assert_eq!(
+            spec.exec.as_deref(),
+            Some(&["curl".to_string(), "wget".into()][..])
+        );
+        assert_eq!(
+            spec.piped_to.as_deref(),
+            Some(&["sh".to_string(), "bash".into()][..])
+        );
+        assert!(spec.unknown.is_empty());
+        assert_eq!(both.identity(), both.pattern);
+        assert_eq!(both.display(), both.pattern);
+
+        let only = &config.deny_commands[1];
+        assert!(only.pattern.is_empty());
+        let spec = only.matcher.as_ref().unwrap();
+        let eval = spec.interpreter_eval.as_ref().unwrap();
+        assert_eq!(eval.interpreters, ["python3"]);
+        assert_eq!(eval.contains, ["os.system("]);
+        assert_eq!(spec.unknown.keys().collect::<Vec<_>>(), ["mystery"]);
+        // identity is the canonical block, so the derived id is stable and
+        // unique per block; display is the block as written
+        assert_eq!(
+            only.identity(),
+            r#"{"interpreter_eval":{"interpreters":["python3"],"contains":["os.system("]},"mystery":1}"#
+        );
+        assert_eq!(
+            only.display(),
+            r#"match = { interpreter_eval = { interpreters = ["python3"], contains = ["os.system("] }, mystery = ? }"#
+        );
+        let id = rule_id(None, "deny.commands", &only.identity());
+        assert!(id.starts_with("deny.commands:"));
+        assert_ne!(id, rule_id(None, "deny.commands", ""));
+        // a rule with neither is parseable (lint rejects it) and inert
+        let bare = parse_policy(
+            "[policy]\nmode=\"enforce\"\n[[deny.commands]]\naction=\"block\"\nreason=\"r\"\n",
+        )
+        .unwrap();
+        assert!(bare.deny_commands[0].pattern.is_empty());
+        assert!(bare.deny_commands[0].matcher.is_none());
     }
 }

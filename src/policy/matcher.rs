@@ -58,7 +58,16 @@ pub(crate) fn matches_recursive_traversal(pattern: &str, path: &str) -> bool {
 /// dynamic operands, and file-list/filter modes do not acquire ancestor matches;
 /// ordinary path and command policy checks still apply to the original input.
 pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
-    let Some(tokens) = shell_tokens(command) else {
+    recursive_traversal_sources_with(command, true)
+}
+
+/// `recursive_traversal_sources` with the word splitter chosen by the caller:
+/// the tree-sitter parse (falling back to the tokenizer when the grammar
+/// rejects the input) or the tokenizer alone. The differential test in
+/// `tests/ast_candidates.rs` runs both and asserts identical sources.
+#[doc(hidden)]
+pub fn recursive_traversal_sources_with(command: &str, use_ast: bool) -> Vec<String> {
+    let Some(tokens) = classifier_tokens(command, use_ast) else {
         return Vec::new();
     };
     let mut sources = Vec::new();
@@ -137,6 +146,22 @@ pub(crate) fn recursive_traversal_sources(command: &str) -> Vec<String> {
         start = end + 1;
     }
     sources
+}
+
+/// The token stream the argv classifier walks: the parse's spans lexed one by
+/// one, or the whole command lexed at once. A span the lexer rejects
+/// (unbalanced quoting) rejects the command, as it did before.
+fn classifier_tokens(command: &str, use_ast: bool) -> Option<Vec<String>> {
+    if use_ast {
+        if let Ok(program) = crate::common::ast::parse(command) {
+            let mut tokens = Vec::new();
+            for atom in program.atoms() {
+                tokens.extend(shell_tokens(atom)?);
+            }
+            return Some(tokens);
+        }
+    }
+    shell_tokens(command)
 }
 
 fn traversal_source_path(path: &str, cwd: Option<&str>) -> Option<String> {
@@ -1107,7 +1132,7 @@ fn canonicalize_existing_path_prefix(path: &str) -> Option<String> {
     }
 }
 
-fn token_basename(token: &str) -> &str {
+pub(crate) fn token_basename(token: &str) -> &str {
     token.rsplit('/').next().unwrap_or(token)
 }
 
@@ -1305,45 +1330,10 @@ fn normalize_wrapper_operands(tokens: &[String]) -> Vec<String> {
             continue;
         }
         if command_position {
-            let wrapper = token_basename(token);
-            if is_modeled_wrapper(token) {
-                let mut next = i + 1;
-                while next < tokens.len() && tokens[next].starts_with('-') {
-                    if tokens[next] == "--" {
-                        next += 1;
-                        break;
-                    }
-                    let takes_operand = match wrapper_option_takes_operand(wrapper, &tokens[next]) {
-                        Some(takes_operand) => takes_operand,
-                        None => {
-                            next = i;
-                            break;
-                        }
-                    };
-                    next += 1;
-                    if takes_operand {
-                        if next >= tokens.len() || is_command_separator(&tokens[next]) {
-                            next = i;
-                            break;
-                        }
-                        next += 1;
-                    }
-                }
-                if next != i {
-                    if wrapper == "env" {
-                        while next < tokens.len() && is_assignment(&tokens[next]) {
-                            next += 1;
-                        }
-                    } else if wrapper == "timeout" {
-                        // timeout requires DURATION before COMMAND.
-                        next += 1;
-                    }
-                    if next < tokens.len() && !is_command_separator(&tokens[next]) {
-                        out.push(token.clone());
-                        i = next;
-                        continue;
-                    }
-                }
+            if let Some(next) = wrapped_command_start(tokens, i) {
+                out.push(token.clone());
+                i = next;
+                continue;
             }
         }
         out.push(token.clone());
@@ -1351,6 +1341,61 @@ fn normalize_wrapper_operands(tokens: &[String]) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// When `tokens[i]` is a modeled wrapper (`env`, `nice`, `sudo`, `timeout`,
+/// `xargs`, ...), the index of the command it launches, after the wrapper's
+/// own options, their operands, `env`'s assignments and `timeout`'s duration.
+/// `None` when the token is not a wrapper, an option is not modeled (then
+/// nothing is guessed about where the command begins), or no command follows.
+pub(crate) fn wrapped_command_start(tokens: &[String], i: usize) -> Option<usize> {
+    let token = &tokens[i];
+    if !is_modeled_wrapper(token) {
+        return None;
+    }
+    let wrapper = token_basename(token);
+    let mut next = i + 1;
+    while next < tokens.len() && tokens[next].starts_with('-') {
+        if tokens[next] == "--" {
+            next += 1;
+            break;
+        }
+        let takes_operand = wrapper_option_takes_operand(wrapper, &tokens[next])?;
+        next += 1;
+        if takes_operand {
+            if next >= tokens.len() || is_command_separator(&tokens[next]) {
+                return None;
+            }
+            next += 1;
+        }
+    }
+    if wrapper == "env" {
+        while next < tokens.len() && is_assignment(&tokens[next]) {
+            next += 1;
+        }
+    } else if wrapper == "timeout" {
+        // timeout requires DURATION before COMMAND.
+        next += 1;
+    }
+    (next < tokens.len() && !is_command_separator(&tokens[next])).then_some(next)
+}
+
+/// The index of the command word of one segment's words, after the modeled
+/// wrappers and command prefixes (`NAME=value`, `!`, `{`, a leading
+/// redirect). `None` when nothing is left in command position.
+pub(crate) fn command_word_index(words: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while i < words.len() {
+        if is_command_prefix(&words[i]) {
+            i += 1;
+            continue;
+        }
+        match wrapped_command_start(words, i) {
+            Some(next) => i = next,
+            None => return Some(i),
+        }
+    }
+    None
 }
 
 /// A downloaded path may already be executable, so no post-fetch chmod or
@@ -1501,7 +1546,9 @@ fn remote_url_basename(url: &str) -> Option<&str> {
 
 /// Correlate declared Python network/subprocess aliases with their later calls
 /// before restoring canonical primitives. This avoids bare-word matching.
-fn normalize_python_network_aliases(command: &str) -> String {
+/// Also applied by `policy::predicate` to an interpreter's inline-code
+/// argument before its needles are searched.
+pub(crate) fn normalize_python_network_aliases(command: &str) -> String {
     let mut out = command.to_string();
     let import_alias =
         Regex::new(r"\bimport\s+socket\s+as\s+([A-Za-z_]\w*)").expect("static regex");
@@ -1910,6 +1957,15 @@ fn glob_body(pattern: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every traversal case below runs through both word splitters, which
+    /// must agree; the parse-backed result is returned.
+    fn recursive_traversal_sources(command: &str) -> Vec<String> {
+        let parsed = recursive_traversal_sources_with(command, true);
+        let tokenized = recursive_traversal_sources_with(command, false);
+        assert_eq!(parsed, tokenized, "splitters disagree on {command:?}");
+        parsed
+    }
 
     #[test]
     fn recursive_sources_exclude_destinations_patterns_and_option_values() {
