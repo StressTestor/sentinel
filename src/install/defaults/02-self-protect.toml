@@ -1,0 +1,57 @@
+# --- shai-hulud / Miasma agent-side hardening: self-protect + credential coverage ---
+# Everything below fires only on the AGENT's own tool calls. The supply-chain worms
+# in this family run their real payload inside npm/pip lifecycle-script CHILD
+# processes, which never traverse the PreToolUse hook - Sentinel cannot see that.
+# These rules cover the prompt-injection-drives-the-agent variant of the same TTPs,
+# not the worm self-propagating. See README "what this does and doesn't catch".
+
+# self-protect: a prompt-injected agent must not be able to weaken Sentinel's own
+# policy. Reading/copying-FROM policy.toml is legitimate (backup, inspection), so
+# the PATH rule is warn-tier - a pure read (`cat`, `cp policy.toml backup`) is
+# surfaced, not blocked. Every WRITE/mutation is blocked elsewhere: the policy.toml
+# Bash-mutation command cluster below (sed -i / redirect / tee / cp-as-dest / ...)
+# and the selfprotect module (a Write/Edit/MultiEdit targeting policy.toml is
+# blocked UNCONDITIONALLY - there is no legitimate agent write to it). Your own
+# `vim ~/.sentinel/policy.toml` and `sentinel install` (writes via std::fs, not a
+# tool call) are unaffected. Reconfigure outside the guarded session. A path built
+# from a shell variable or written by a subprocess can still get through.
+[[deny.paths]]
+pattern = "~/.sentinel/policy.toml"
+action = "warn"
+reason = "Sentinel's own enforcement policy - reads warn (backup/inspect ok); writes blocked by the policy.toml command cluster + selfprotect so an injected agent can't disable the guard mid-session (reconfigure outside the agent)"
+
+# The accepted MCP baseline is another Sentinel trust root. Reads stay visible
+# but allowed; typed writes are blocked by selfprotect and shell mutations by
+# the command cluster below. A human can still run `sentinel audit-mcp --update`
+# directly outside an agent hook.
+[[deny.paths]]
+pattern = "~/.sentinel/mcp-baseline.json"
+action = "warn"
+reason = "Sentinel's trusted MCP baseline - reads warn; agent writes and audit-mcp --update are blocked so an injected agent cannot accept its own MCP server"
+
+# self-protect the Sentinel BINARY: deleting/overwriting it disarms the guard
+# (doctor documents a missing binary fails open). Block agent writes and
+# literal-path rm/mv/redirect at the common install locations. A tamper command
+# that names the binary indirectly (`rm "$(command -v sentinel)"`) carries no
+# literal path token - that case is covered by the deny.commands tamper rules
+# below, which are evadable; these literal-path rules are the stronger half.
+[[deny.paths]]
+pattern = "~/.cargo/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (cargo install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+
+[[deny.paths]]
+pattern = "~/.local/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (user-local install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+
+[[deny.paths]]
+pattern = "/usr/local/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (system install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+
+[[deny.paths]]
+pattern = "/opt/homebrew/bin/sentinel"
+action = "block"
+reason = "Sentinel binary (Homebrew install location) - agent writes/deletes blocked so an injected agent can't disarm the guard"
+

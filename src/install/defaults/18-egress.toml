@@ -1,0 +1,68 @@
+# --- egress channels the curl/wget rules don't cover ---
+# DNS tunnelling: a resolver query whose NAME is fed by a command substitution
+# is data exfil (block); a TXT/ANY lookup is the high-bandwidth response channel
+# (warn). A plain A-record lookup is too common to flag (documented residual).
+[[deny.commands]]
+pattern = '\b(dig|nslookup|host|drill|kdig)\b.*\$\('
+action = "block"
+reason = "DNS query name fed by a command substitution (DNS exfiltration)"
+
+[[deny.commands]]
+pattern = '\b(dig|nslookup|host|drill|kdig)\b.*\b(TXT|ANY|NULL|CNAME)\b'
+action = "warn"
+reason = "DNS TXT/ANY lookup - possible DNS exfiltration channel, review"
+
+# git as an exfil transport: a remote URL that embeds a credential is block; a
+# push / remote-add to a literal https URL (rather than a named remote) is warn.
+# `git push origin main` (named remote) carries no URL and stays allowed.
+[[deny.commands]]
+pattern = '\bgit\s+(push|remote\s+add|clone|fetch)\b.*https?://[^/\s]*:[^/\s@]*@'
+action = "block"
+reason = "git transport to a URL with an embedded credential (exfiltration)"
+
+[[deny.commands]]
+pattern = '\bgit\s+(push|remote\s+add)\b.*https?://'
+action = "warn"
+reason = "git push / remote-add to a literal https URL (not a named remote) - review for exfil"
+
+# file-transfer / cloud-upload binaries. A cred-named source already blocks via
+# path-mining; these warn on the egress itself so a secret in an un-modeled path
+# is surfaced. WARN (these are common in legit deploy/backup scripts).
+[[deny.commands]]
+pattern = '\b(scp|rsync)\b.*(\s[\w.-]+@[\w.-]+:|[\w.-]+::|rsync://)'
+action = "warn"
+reason = "scp/rsync to a remote host (ssh, daemon ::, or rsync:// URL) - review for data exfiltration"
+
+# alternative HTTP clients carry the same @file upload / data-post syntax as
+# curl, so naming only curl/wget/fetch leaves a one-binary substitution open.
+# httpie's binary is `http`/`https` with a leading METHOD; `xh`/`curlie` by name.
+[[deny.commands]]
+pattern = '\b(xh|httpie|curlie)\b\s+\S'
+action = "warn"
+reason = "alternative HTTP client (xh/httpie/curlie) - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '(^|[;&|]\s*)https?\s+(GET|POST|PUT|PATCH|DELETE|HEAD)\b'
+action = "warn"
+reason = "httpie request (http METHOD url) - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '\brclone\s+(copy|sync|move|copyto)\b'
+action = "warn"
+reason = "rclone transfer to a remote - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '\b(croc|magic-wormhole|portal)\b\s+\S'
+action = "warn"
+reason = "croc/magic-wormhole peer transfer - review for data exfiltration"
+
+[[deny.commands]]
+pattern = '\b(aws\s+s3|gsutil|gcloud\s+storage|az\s+storage)\b.*\b(cp|sync|mv|copy|upload)\b'
+action = "warn"
+reason = "cloud object-store upload - review for data exfiltration"
+
+[[deny.commands]]
+pattern = 'chmod\s+777\s+.*'
+action = "warn"
+reason = "world-writable permissions"
+

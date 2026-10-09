@@ -16,6 +16,16 @@ versioning.
   it stays at the policy's warn tier. Observed live as a block-tier false
   positive on 2026-10-08.
 
+### Changed
+- The bundled policy rules moved out of one `format!` string in
+  `src/install/defaults.rs` into per-family TOML files under
+  `src/install/defaults/` (`01-credential-paths.toml` through
+  `20-secrets.toml`), loaded with `include_str!` and concatenated in a fixed
+  order. The generated `policy.toml` is unchanged: no rule, comment, or
+  whitespace differs, and `tests/fixtures/policy/default-{enforce,audit}.toml`
+  now pin the bundled policy byte for byte. A deliberate rule change must
+  update those fixtures in the same commit.
+
 ### Security
 - **`disableAllHooks` is treated as a hook removal.** A Claude settings write
   from any scope whose resulting document sets `disableAllHooks: true` is
