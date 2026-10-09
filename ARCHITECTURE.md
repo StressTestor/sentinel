@@ -61,8 +61,9 @@ sentinel/
 │   │   ├── runner.rs       timeout, output caps, evidence correlation
 │   │   └── report.rs       terminal + JSON report generator
 │   ├── policy/
-│   │   ├── mod.rs          policy engine (Tier 1: deny-first evaluation)
+│   │   ├── mod.rs          policy engine (Tier 1: deny-first evaluation; overlay binding + downgrades)
 │   │   ├── schema.rs       TOML policy schema + parsing
+│   │   ├── overlay.rs      project overlays: `.sentinel.toml` grammar, salted-digest acceptance store, `sentinel policy accept`
 │   │   └── matcher.rs      glob path matching, regex command/secret matching
 │   ├── evaluate/
 │   │   ├── mod.rs          hook I/O and native response rendering
@@ -83,7 +84,7 @@ sentinel/
 │   ├── policy_diff/
 │   │   └── mod.rs          sentinel policy-diff: default rules missing from a policy (read-only)
 │   ├── lint/
-│   │   └── mod.rs          sentinel policy-lint: duplicate-rule / bad-regex / broad-allow checks
+│   │   └── mod.rs          sentinel policy-lint: duplicate-rule / bad-regex / broad-allow checks; overlay lint (self-protect and secret downgrades rejected)
 │   ├── post_evaluate/
 │   │   └── mod.rs          sentinel post-evaluate: PostToolUse result-secret detection + nudge (opt-in, detection only)
 │   ├── audit_mcp/
@@ -107,6 +108,7 @@ sentinel/
 │   ├── differential_shell.rs  bash word resolution vs sentinel resolution (ignored; nightly job)
 │   ├── hook_contract.rs    PreToolUse/PostToolUse wire contract + version-stamped Claude Code fixtures
 │   ├── home_config.rs      isolated HOME validation and relocated Claude lifecycle
+│   ├── overlays.rs         project overlays end to end: accept, digest mismatch, agent-driven accept denied
 │   ├── sandbox_install.rs  sandbox bridge install/reinstall/uninstall, doctor drift, self-protect through the real binary
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
@@ -569,6 +571,47 @@ missing, and removed entries; `--strict` exits nonzero on drift. legacy raw
 baselines, corrupt files, and unsupported versions are refused rather than
 silently overwritten. writes are atomic and mode 0600 on Unix.
 
+### project overlays
+
+`<project>/.sentinel.toml` is the one per-project file the hook reads. its
+grammar is `[[downgrade]]` (`rule = "<id>"`, `to = "warn"`, `reason`),
+`[[allow.paths]]` entries under the project root, and `[[deny.paths]]`,
+`[[deny.commands]]`, `[[deny.secrets]]`, `[[deny.tools]]` additions in the
+main policy's schema. unknown tables and keys are parse errors.
+
+trust mirrors the MCP baseline. `sentinel policy accept` lints the overlay
+against the installed policy and stores a salted SHA-256 digest of its content
+in `~/.sentinel/overlays.json` (version 1: `version`, `salt`, and a map from
+canonical absolute project path to digest; other versions are refused, never
+rewritten; writes are atomic and mode 0600 on Unix). `evaluate` and `check`
+load only `<cwd>/.sentinel.toml` for the payload `cwd`, with no
+parent-directory walk, and look the canonical cwd up in the store. a missing,
+changed, or unaccepted overlay is ignored, with one stderr line; an accepted
+overlay is linted again against the current policy before it is applied, so a
+policy edit cannot make an old acceptance mean something new.
+
+engine integration: `PolicyEngine::with_overlay` prepends the overlay's deny
+rules to the main policy's sections, extends an existing allow list (an
+overlay never creates one), and binds the downgrade map. a downgraded rule is
+evaluated as warn tier: it is held like any warn, so a later block still wins,
+and the decision keeps the original `rule_id` and `matched_rule`, appends the
+overlay's reason, and sets `downgraded_by` (the overlay path), which the audit
+line records with the same compat discipline as `witness`. the autorun
+injection check uses `evaluate_strict`, which ignores downgrades.
+
+what an overlay cannot touch: self-protect runs after the engine, so its
+decisions are outside any overlay; the lint rejects a downgrade of any
+self-protect family rule (a pattern naming sentinel, `.sentinel/`, the binary
+paths, `sentinel uninstall`, `audit-mcp --update`, or `.claude/settings`), of
+a block-tier `deny.secrets` rule, of a fixed layer id, of an unknown or
+invalid id, any `to` but `warn`, an overlay deny rule with an `allow` action
+(it would run before the main rules), and an allow pattern outside the
+project root. self-protect blocks the agent invoking `sentinel policy accept`
+(any wrapper or path prefix, raw and shell-de-obfuscated), a Write/Edit to
+`overlays.json`, and the shell-write cluster on it (in-place editors,
+redirects, tee/sponge, cp/install/ln/dd/truncate/rm/mv), all labelled
+`selfprotect: overlay-accept`. editing `.sentinel.toml` itself stays allowed.
+
 ### policy migration
 
 the bundled default carries revision `2026-08-07.1`. `policy-migrate --check` is
@@ -631,7 +674,11 @@ never silently flips them to enforce.
 | `sentinel policy-migrate --apply` | merge current defaults and validate before atomic replacement |
 | `sentinel policy-diff [--policy <file>]` | print bundled-default rules missing from an installed policy, for manual paste (read-only; reaches users who installed before a hardening update) |
 | `sentinel policy-lint [--policy <file>]` | static-check a policy: invalid regexes, exact duplicate patterns, over-broad allow entries; duplicate warnings do not imply unreachability; non-zero exit on an error-level finding |
-| `sentinel status --agent <name>` | show configuration, hook ownership, activation, and policy summary |
+| `sentinel policy-lint --overlay <file>` | lint a project overlay against the policy: rejects self-protect and block-tier secret downgrades, unknown or invalid ids, non-warn targets, allow patterns outside the project |
+| `sentinel policy accept [path]` | lint and accept a project overlay, storing its salted digest in `~/.sentinel/overlays.json` (a human action; the agent running it is blocked) |
+| `sentinel policy accept --list` | print the accepted projects |
+| `sentinel policy accept --revoke <path>` | forget one project's acceptance |
+| `sentinel status --agent <name>` | show configuration, hook ownership, activation, policy summary, accepted overlay count, and the overlay in cwd |
 | `SENTINEL=./target/release/sentinel ./docs/run-attacks.sh` | replay 20+ injections from docs/target.html through the hook layer |
 
 CI runs format, AD-5, locked all-target/all-feature tests and clippy, the fresh-home

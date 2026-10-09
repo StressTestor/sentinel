@@ -57,6 +57,35 @@ pub enum Command {
     /// discover MCP server configuration and compare it with an explicit trust baseline
     #[command(name = "audit-mcp")]
     AuditMcp(AuditMcpArgs),
+
+    /// manage accepted project overlays (`<project>/.sentinel.toml`)
+    Policy(PolicyArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub action: PolicyAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PolicyAction {
+    /// lint a project overlay against the installed policy and accept it (a human action: the agent running this is blocked)
+    Accept(PolicyAcceptArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PolicyAcceptArgs {
+    /// the overlay file or its project directory (default: ./.sentinel.toml)
+    pub path: Option<PathBuf>,
+
+    /// print the accepted projects instead of accepting anything
+    #[arg(long, default_value_t = false, conflicts_with_all = ["path", "revoke"])]
+    pub list: bool,
+
+    /// forget the acceptance for this overlay file or project directory
+    #[arg(long, value_name = "PATH", conflicts_with = "path")]
+    pub revoke: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -95,6 +124,11 @@ pub struct LintArgs {
     /// lint a specific policy file instead of the installed ~/.sentinel/policy.toml
     #[arg(long)]
     pub policy: Option<PathBuf>,
+
+    /// lint a project overlay (`.sentinel.toml`, or its directory) against the policy
+    /// instead of linting the policy itself
+    #[arg(long, value_name = "FILE")]
+    pub overlay: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

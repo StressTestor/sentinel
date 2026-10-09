@@ -1,4 +1,5 @@
 pub mod matcher;
+pub mod overlay;
 pub mod schema;
 
 use crate::common::normalize::normalize_for_secret_match;
@@ -6,7 +7,9 @@ use matcher::{
     matches_allow_path_literal, matches_path_checked, matches_path_literal_checked,
     matches_secret_normalized, matches_tool, PathMatch,
 };
+use overlay::Overlay;
 use schema::{rule_id, PolicyConfig};
+use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
 
@@ -35,6 +38,10 @@ pub struct PolicyDecision {
     /// tool name for a tool rule. Never set for a secret rule, because the
     /// witness would be the secret.
     pub witness: Option<String>,
+    /// The accepted project overlay (its path) whose `[[downgrade]]` turned
+    /// this rule's block into a warn. `matched_rule` and `rule_id` keep naming
+    /// the original rule; only the action and reason change.
+    pub downgraded_by: Option<String>,
 }
 
 /// Upper bound on a logged command witness, in bytes (cut on a char boundary).
@@ -95,9 +102,17 @@ pub struct RuleView<'a> {
     pub explicit_id: bool,
 }
 
+/// The accepted overlay bound to an engine: where it came from and which rule
+/// ids it downgrades to warn (with the overlay's stated reason).
+struct OverlayBinding {
+    source: String,
+    downgrades: BTreeMap<String, String>,
+}
+
 /// load and evaluate tool calls against a policy file
 pub struct PolicyEngine {
     config: PolicyConfig,
+    overlay: Option<OverlayBinding>,
 }
 
 impl PolicyEngine {
@@ -114,12 +129,75 @@ impl PolicyEngine {
             toml::from_str(content).map_err(|e| PolicyError::ParseError(format!("{e}")))?;
         Ok(Self {
             config: config.finalize(),
+            overlay: None,
         })
     }
 
     #[cfg(test)]
     pub fn from_config(config: PolicyConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            overlay: None,
+        }
+    }
+
+    /// An engine with an accepted project overlay applied: the overlay's deny
+    /// additions run before the main policy's rules of the same section, its
+    /// allow entries extend an existing allow list (never create one), and its
+    /// downgrades turn the named rules' blocks into warns. `source` is the
+    /// overlay path, recorded on every downgraded decision.
+    pub fn with_overlay(&self, overlay: &Overlay, source: &str) -> PolicyEngine {
+        let mut config = self.config.clone();
+        config.deny_paths = overlay
+            .deny_paths
+            .iter()
+            .cloned()
+            .chain(config.deny_paths)
+            .collect();
+        config.deny_commands = overlay
+            .deny_commands
+            .iter()
+            .cloned()
+            .chain(config.deny_commands)
+            .collect();
+        config.deny_secrets = overlay
+            .deny_secrets
+            .iter()
+            .cloned()
+            .chain(config.deny_secrets)
+            .collect();
+        config.deny_tools = overlay
+            .deny_tools
+            .iter()
+            .cloned()
+            .chain(config.deny_tools)
+            .collect();
+        // an allow list that exists only in the overlay would apply the policy
+        // default to every path outside the project: not an overlay's job
+        if !config.allow_paths.is_empty() {
+            config
+                .allow_paths
+                .extend(overlay.allow_paths.iter().cloned());
+        }
+        let downgrades = overlay
+            .downgrades
+            .iter()
+            .filter(|d| d.to.eq_ignore_ascii_case("warn"))
+            .map(|d| (d.rule.clone(), d.reason.clone()))
+            .collect();
+        PolicyEngine {
+            config,
+            overlay: Some(OverlayBinding {
+                source: source.to_string(),
+                downgrades,
+            }),
+        }
+    }
+
+    /// Whether the main policy carries an allow list (an overlay can only
+    /// extend one that exists).
+    pub fn has_allow_list(&self) -> bool {
+        !self.config.allow_paths.is_empty()
     }
 
     pub fn mode(&self) -> &str {
@@ -208,6 +286,60 @@ impl PolicyEngine {
     /// if no deny matches and an allow list exists, paths outside
     /// the allow list get the default action.
     pub fn evaluate(&self, tool_call: &ToolCall) -> PolicyDecision {
+        self.evaluate_inner(tool_call, true)
+    }
+
+    /// `evaluate` with overlay downgrades ignored (deny additions still apply).
+    /// Used where the pipeline re-evaluates text on sentinel's own behalf, such
+    /// as the autorun-injection check on a config write: a project overlay must
+    /// not soften that.
+    pub fn evaluate_strict(&self, tool_call: &ToolCall) -> PolicyDecision {
+        self.evaluate_inner(tool_call, false)
+    }
+
+    /// Build the decision for one matched rule, applying an overlay downgrade
+    /// when `downgrades` is set and the overlay names this rule's id. A
+    /// downgraded rule then behaves exactly like a warn-tier rule: it is held
+    /// and any later block still wins.
+    #[allow(clippy::too_many_arguments)]
+    fn rule_decision(
+        &self,
+        section: &str,
+        explicit_id: Option<&str>,
+        pattern: &str,
+        action: &str,
+        reason: &str,
+        witness: Option<String>,
+        downgrades: bool,
+    ) -> PolicyDecision {
+        let id = rule_id(explicit_id, section, pattern);
+        let mut action = parse_action(action);
+        let mut reason = reason.to_string();
+        let mut downgraded_by = None;
+        if downgrades && action == Action::Block {
+            if let Some(binding) = &self.overlay {
+                if let Some(why) = binding.downgrades.get(&id) {
+                    action = Action::Warn;
+                    reason = if why.is_empty() {
+                        format!("{reason} (downgraded to warn by overlay)")
+                    } else {
+                        format!("{reason} (downgraded to warn by overlay: {why})")
+                    };
+                    downgraded_by = Some(binding.source.clone());
+                }
+            }
+        }
+        PolicyDecision {
+            action,
+            reason: Some(reason),
+            matched_rule: Some(format!("{section}: {pattern}")),
+            rule_id: Some(id),
+            witness,
+            downgraded_by,
+        }
+    }
+
+    fn evaluate_inner(&self, tool_call: &ToolCall, downgrades: bool) -> PolicyDecision {
         // A deny.paths WARN no longer short-circuits: hold it and keep looking, so
         // higher-severity deny.commands / deny.secrets BLOCK rules can override a
         // warn-tier path match
@@ -230,15 +362,16 @@ impl PolicyEngine {
         // deny.commands BLOCK can still override it.
         for rule in &self.config.deny_tools {
             if matches_tool(&rule.pattern, &tool_call.tool_name) {
-                let action = parse_action(&rule.action);
-                let decision = PolicyDecision {
-                    action: action.clone(),
-                    reason: Some(rule.reason.clone()),
-                    matched_rule: Some(format!("deny.tools: {}", rule.pattern)),
-                    rule_id: Some(rule_id(rule.id.as_deref(), "deny.tools", &rule.pattern)),
-                    witness: Some(bound_witness(&tool_call.tool_name)),
-                };
-                if action == Action::Warn {
+                let decision = self.rule_decision(
+                    "deny.tools",
+                    rule.id.as_deref(),
+                    &rule.pattern,
+                    &rule.action,
+                    &rule.reason,
+                    Some(bound_witness(&tool_call.tool_name)),
+                    downgrades,
+                );
+                if decision.action == Action::Warn {
                     held.get_or_insert(decision);
                 } else {
                     return decision;
@@ -287,15 +420,16 @@ impl PolicyEngine {
                         open_path_failure.get_or_insert(decision);
                     }
                     PathMatch::Match => {
-                        let action = parse_action(&rule.action);
-                        let decision = PolicyDecision {
-                            action: action.clone(),
-                            reason: Some(rule.reason.clone()),
-                            matched_rule: Some(format!("deny.paths: {}", rule.pattern)),
-                            rule_id: Some(rule_id(rule.id.as_deref(), "deny.paths", &rule.pattern)),
-                            witness: Some(bound_witness(path)),
-                        };
-                        if action == Action::Warn {
+                        let decision = self.rule_decision(
+                            "deny.paths",
+                            rule.id.as_deref(),
+                            &rule.pattern,
+                            &rule.action,
+                            &rule.reason,
+                            Some(bound_witness(path)),
+                            downgrades,
+                        );
+                        if decision.action == Action::Warn {
                             held.get_or_insert(decision);
                         } else {
                             return decision; // Block or explicit Allow short-circuits
@@ -309,15 +443,16 @@ impl PolicyEngine {
         if let Some(cmd) = &tool_call.command {
             for rule in &self.config.deny_commands {
                 if let Some(witness) = matcher::command_match_witness(&rule.pattern, cmd) {
-                    let action = parse_action(&rule.action);
-                    let decision = PolicyDecision {
-                        action: action.clone(),
-                        reason: Some(rule.reason.clone()),
-                        matched_rule: Some(format!("deny.commands: {}", rule.pattern)),
-                        rule_id: Some(rule_id(rule.id.as_deref(), "deny.commands", &rule.pattern)),
-                        witness: Some(bound_witness(&witness)),
-                    };
-                    match action {
+                    let decision = self.rule_decision(
+                        "deny.commands",
+                        rule.id.as_deref(),
+                        &rule.pattern,
+                        &rule.action,
+                        &rule.reason,
+                        Some(bound_witness(&witness)),
+                        downgrades,
+                    );
+                    match decision.action {
                         // a command BLOCK wins over a held warn-tier path match
                         Action::Block => return decision,
                         Action::Warn => {
@@ -339,17 +474,18 @@ impl PolicyEngine {
             let normalized = normalize_for_secret_match(&tool_call.raw_params);
             for rule in &self.config.deny_secrets {
                 if matches_secret_normalized(&rule.pattern, &tool_call.raw_params, &normalized) {
-                    let action = parse_action(&rule.action);
                     // no witness: the match IS the secret. the rule id is enough
                     // to explain the decision.
-                    let decision = PolicyDecision {
-                        action: action.clone(),
-                        reason: Some(rule.reason.clone()),
-                        matched_rule: Some(format!("deny.secrets: {}", rule.pattern)),
-                        rule_id: Some(rule_id(rule.id.as_deref(), "deny.secrets", &rule.pattern)),
-                        witness: None,
-                    };
-                    match action {
+                    let decision = self.rule_decision(
+                        "deny.secrets",
+                        rule.id.as_deref(),
+                        &rule.pattern,
+                        &rule.action,
+                        &rule.reason,
+                        None,
+                        downgrades,
+                    );
+                    match decision.action {
                         Action::Block => return decision,
                         Action::Warn => {
                             held.get_or_insert(decision);
@@ -403,6 +539,7 @@ impl PolicyEngine {
                             matched_rule: Some("allow.paths (miss)".into()),
                             rule_id: Some("allow.paths:miss".into()),
                             witness: Some(bound_witness(expanded_path)),
+                            downgraded_by: None,
                         };
                     }
                 }
@@ -420,6 +557,7 @@ impl PolicyEngine {
             matched_rule: None,
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         }
     }
 
@@ -437,6 +575,7 @@ impl PolicyEngine {
                 matched_rule: Some("on_failure: open".into()),
                 rule_id: Some("on_failure:open".into()),
                 witness: Some(bound_witness(path)),
+                downgraded_by: None,
             }
         } else {
             PolicyDecision {
@@ -447,6 +586,7 @@ impl PolicyEngine {
                 matched_rule: Some("on_failure: closed".into()),
                 rule_id: Some("on_failure:closed".into()),
                 witness: Some(bound_witness(path)),
+                downgraded_by: None,
             }
         }
     }

@@ -155,6 +155,33 @@ deny rules evaluate first. glob patterns for paths, regex for commands and secre
 
 every rule can carry an optional `id` (`id = "cred-paths/ssh"`). a rule without one is addressed as `<section>:<8 hex of sha256(pattern)>`, so an audit line names the same rule after a reorder. every block or warn in `~/.sentinel/audit.jsonl` records that id plus a bounded witness: the canonicalized path, the matched command fragment, or the tool name. secret rules record the id only, never the match. `sentinel why` joins the most recent block or warn (or every line for a `tool_use_id`) back to the rule text and its line in `policy.toml`. nothing in the trail is a payload.
 
+## project overlays
+
+a block that keeps firing on one project's legitimate work is how enforce mode gets switched off. an overlay lets that project soften the one rule, with a reason, without touching `~/.sentinel/policy.toml` and without the agent being able to do it.
+
+the file is `<project>/.sentinel.toml`:
+
+```toml
+[[downgrade]]
+rule = "fetch-exec/curl-pipe-sh"
+to = "warn"
+reason = "the bootstrap script is reviewed in CI"
+
+[[deny.commands]]
+id = "project/no-force-push"
+pattern = 'git\s+push\s+.*--force'
+action = "block"
+reason = "force push is disabled in this project"
+```
+
+what it can do: downgrade a rule id to `warn` (never to allow), add `[[deny.paths]]`, `[[deny.commands]]`, `[[deny.secrets]]`, and `[[deny.tools]]` rules in the main policy's schema (they run before the main policy's rules of the same section, so a project can only tighten with them), and add `[[allow.paths]]` entries that extend an existing lockdown allow list, restricted to absolute paths under the project root.
+
+what it cannot do: weaken self-protect or secret blocks. `sentinel policy-lint --overlay .sentinel.toml` rejects, and `sentinel policy accept` refuses, any downgrade of a self-protect family rule (anything naming `.sentinel/`, the sentinel binary, or `.claude/settings`), of a block-tier `deny.secrets` rule, of a fixed enforcement layer, of an unknown or invalid rule id, any `to` other than `warn`, an overlay deny rule with an `allow` action, and any allow pattern outside the project. self-protect itself runs after the engine, outside an overlay's reach.
+
+acceptance is a human action. an overlay is inert until you run `sentinel policy accept` in the project, which lints it and stores a salted SHA-256 digest of its content in `~/.sentinel/overlays.json`, keyed by the canonical project path. edit the file and it goes inert again until you accept it again. the hook loads only `<cwd>/.sentinel.toml` for the payload's `cwd` (no parent-directory walk) and prints exactly one stderr line, `sentinel: overlay at <path> is not accepted; run sentinel policy accept`, for an overlay it did not apply; `sentinel status` lists it. the agent invoking `sentinel policy accept`, or writing `overlays.json` through a Write/Edit tool or a shell command, is blocked by self-protect (`selfprotect: overlay-accept`). editing `.sentinel.toml` itself is allowed, since an unaccepted edit changes nothing.
+
+a downgraded decision keeps the original rule id and `matched_rule`; the action becomes warn, the reason carries the overlay's reason, and `check`, the audit line (`downgraded_by`), and `sentinel why` all show which overlay did it. `why` also prints the `[[downgrade]]` entry that would soften a block, when the rule is one an overlay may downgrade.
+
 ## one deterministic tier, on purpose
 
 sentinel is a single deterministic policy engine. no heuristics, no ML, no behavioral scoring in the decision path.
@@ -211,7 +238,11 @@ sentinel policy-migrate --check  report whether the policy needs migration
 sentinel policy-migrate --apply  merge and validate current bundled defaults
 sentinel policy-diff      show which bundled-default rules your policy is missing (read-only)
 sentinel policy-lint      static-check a policy for dead rules, bad regexes, broad allows
-sentinel status --agent <name>  show config, activation, hooks, and policy summary
+sentinel policy-lint --overlay <file>  lint a project overlay against the installed policy
+sentinel policy accept [path]  lint and accept a project overlay (a human action; blocked for the agent)
+sentinel policy accept --list  print the accepted projects
+sentinel policy accept --revoke <path>  forget one project's acceptance
+sentinel status --agent <name>  show config, activation, hooks, policy summary, and the overlay in cwd
 ```
 
 `sentinel verify` is also wired into CI as a regression gate. the current pinned set is 64/64 attack and benign cases. a fixed bypass that silently reopens, or a new rule that starts false-blocking benign dev work, turns the build red.

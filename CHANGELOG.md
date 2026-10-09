@@ -71,6 +71,20 @@ versioning.
   Read-only; it never replays or logs anything.
 - `sentinel policy-lint` rejects an explicit rule id outside
   `[A-Za-z0-9._/:-]{1,128}` and any id used by two rules.
+- **Accepted project overlays.** `<project>/.sentinel.toml` can downgrade a
+  rule id to warn with a reason, add deny rules (evaluated before the main
+  policy's rules of the same section), and extend a lockdown allow list within
+  the project root. An overlay is inert until `sentinel policy accept` lints
+  it and stores a salted SHA-256 digest in `~/.sentinel/overlays.json`
+  (versioned; keyed by canonical project path; other versions refused). A
+  changed or unaccepted overlay is ignored with one stderr line and listed by
+  `sentinel status`. `evaluate` loads the overlay for the payload `cwd` only.
+  A downgraded decision keeps its `rule_id` and `matched_rule`, appends the
+  overlay's reason, and carries `downgraded_by` in `check --json`, the audit
+  line (optional field, old lines unchanged), and `sentinel why`, which also
+  prints the `[[downgrade]]` entry that would soften a block.
+  `sentinel policy-lint --overlay <file>` lints an overlay on its own.
+- `sentinel policy accept --list` and `--revoke <path>`.
 
 ### Fixed
 - **Self-protect no longer blocks a project-scoped settings file that never
@@ -111,6 +125,14 @@ versioning.
   blocked whenever a live sentinel hook exists, because that key turns off
   every hook at once. Previously only the user-level file's own hook entry
   was inspected.
+- An overlay can never weaken self-protect or secret blocks: the lint rejects
+  a downgrade of any self-protect family rule, of a block-tier `deny.secrets`
+  rule, of a fixed enforcement layer, of an unknown or invalid id, any target
+  but `warn`, an overlay deny rule with an `allow` action, and an allow
+  pattern outside the project. Self-protect blocks the agent invoking
+  `sentinel policy accept` and any typed or shell write to `overlays.json`
+  (`selfprotect: overlay-accept`); the autorun-injection check ignores
+  downgrades.
 - **Close the cd-relative path bypass (audit F-1).** A relative operand after a
   literal `cd` (`cd ~ && cat .ssh/id_rsa`) never reached a `~/.ssh/*` rule
   because candidates were only mined, never resolved against the directory the

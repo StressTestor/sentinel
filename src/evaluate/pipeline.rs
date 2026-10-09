@@ -5,13 +5,16 @@
 
 use super::hook_schema::{tool_call_for_command, HookInput};
 use super::normalize::NormalizedToolCall;
+use crate::policy::overlay::{self, OverlayStatus, OverlayStore};
 use crate::policy::{Action, PolicyDecision, PolicyEngine};
 
 #[derive(Debug)]
 pub enum PipelineResult {
     Evaluated {
-        call: NormalizedToolCall,
+        call: Box<NormalizedToolCall>,
         decision: PolicyDecision,
+        /// what happened to `<cwd>/.sentinel.toml` for this call
+        overlay: OverlayStatus,
     },
     Degraded {
         reason: String,
@@ -28,7 +31,7 @@ impl PipelineResult {
 
     pub fn call(&self) -> Option<&NormalizedToolCall> {
         match self {
-            Self::Evaluated { call, .. } => Some(call),
+            Self::Evaluated { call, .. } => Some(call.as_ref()),
             Self::Degraded { .. } => None,
         }
     }
@@ -39,12 +42,33 @@ impl PipelineResult {
             Self::Degraded { reason, .. } => Some(reason),
         }
     }
+
+    /// The overlay status for this call (`Absent` when the input never got as
+    /// far as a `cwd`).
+    pub fn overlay(&self) -> &OverlayStatus {
+        match self {
+            Self::Evaluated { overlay, .. } => overlay,
+            Self::Degraded { .. } => &OverlayStatus::Absent,
+        }
+    }
 }
 
 /// Parse and evaluate raw hook JSON. Invalid or uninspectable input is returned
 /// as an explicit degraded result using the policy's failure posture; callers
-/// must not reinterpret it independently.
+/// must not reinterpret it independently. An accepted overlay for the payload
+/// `cwd` (from `~/.sentinel/overlays.json`) is applied.
 pub fn evaluate_raw(engine: &PolicyEngine, raw: &str) -> PipelineResult {
+    evaluate_raw_with(engine, raw, overlay::load_default_store)
+}
+
+/// `evaluate_raw` with an explicit overlay store loader (tests inject one; the
+/// live hook reads `~/.sentinel/overlays.json`). The loader runs only when the
+/// payload names a `cwd` holding a `.sentinel.toml`.
+pub fn evaluate_raw_with(
+    engine: &PolicyEngine,
+    raw: &str,
+    load_store: impl FnOnce() -> Result<Option<OverlayStore>, String>,
+) -> PipelineResult {
     if raw.trim().is_empty() {
         return degraded(engine, "empty input");
     }
@@ -63,8 +87,14 @@ pub fn evaluate_raw(engine: &PolicyEngine, raw: &str) -> PipelineResult {
             return degraded(engine, format!("could not normalize hook input: {error}"));
         }
     };
+    let resolution = overlay::resolve(engine, call.cwd.as_deref(), load_store);
+    let engine = resolution.engine.as_ref().unwrap_or(engine);
     let decision = decide(engine, &call);
-    PipelineResult::Evaluated { call, decision }
+    PipelineResult::Evaluated {
+        call: Box::new(call),
+        decision,
+        overlay: resolution.status,
+    }
 }
 
 /// Apply every enforcement layer in its canonical order.
@@ -92,6 +122,7 @@ fn escalate_autorun_injection(
                 matched_rule: Some("selfprotect: autorun inspection failed".into()),
                 rule_id: Some("selfprotect:autorun-inspection-failed".into()),
                 witness: None,
+                downgraded_by: None,
             };
         }
     };
@@ -105,7 +136,12 @@ fn escalate_autorun_injection(
         if crate::selfprotect::is_effective_pre_hook(&command) {
             continue;
         }
-        if engine.evaluate(&tool_call_for_command(&command)).action == Action::Block {
+        // strict: a project overlay's downgrades never soften this check
+        if engine
+            .evaluate_strict(&tool_call_for_command(&command))
+            .action
+            == Action::Block
+        {
             return PolicyDecision {
                 action: Action::Block,
                 reason: Some(
@@ -116,6 +152,7 @@ fn escalate_autorun_injection(
                 matched_rule: Some("selfprotect: autorun-injection".into()),
                 rule_id: Some("selfprotect:autorun-injection".into()),
                 witness: None,
+                downgraded_by: None,
             };
         }
     }
@@ -131,6 +168,7 @@ pub(crate) fn degraded(engine: &PolicyEngine, reason: impl Into<String>) -> Pipe
             matched_rule: Some("on_failure: open".into()),
             rule_id: Some("on_failure:open".into()),
             witness: None,
+            downgraded_by: None,
         }
     } else {
         PolicyDecision {
@@ -139,6 +177,7 @@ pub(crate) fn degraded(engine: &PolicyEngine, reason: impl Into<String>) -> Pipe
             matched_rule: Some("on_failure: closed".into()),
             rule_id: Some("on_failure:closed".into()),
             witness: None,
+            downgraded_by: None,
         }
     };
     PipelineResult::Degraded { reason, decision }
