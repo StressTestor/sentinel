@@ -1,0 +1,1 @@
+sed -i '' s/enforce/audit/ ~/.sentinel/policy.toml

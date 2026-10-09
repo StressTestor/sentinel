@@ -25,6 +25,7 @@ acknowledge uncontained host execution with `--unsafe-host`.
 | serialization and config edits | serde, serde_json, toml, toml_edit | 1.x / 0.22 |
 | async runtime | tokio | 1.x |
 | regex | regex | 1.x |
+| shell parse (C grammar behind FFI, exact pins) | tree-sitter, tree-sitter-bash | 0.25.10 / 0.25.1 |
 | text normalization | unicode-normalization, html-escape | 0.1 / 0.2 |
 | terminal output | colored | 3.x |
 | error handling | thiserror | 2.x |
@@ -49,6 +50,7 @@ sentinel/
 │   │   └── mod.rs          `sentinel why`: join an audit line's rule id to the installed policy
 │   ├── common/
 │   │   ├── mod.rs
+│   │   ├── ast.rs          tree-sitter-bash parse -> segments, words (Literal or Unmodeled with the reason), redirects, scopes; token spans for the path miners
 │   │   ├── normalize.rs    encoded-text normalization (HTML-entity decode, Unicode format-char strip, NFKC) — secret path only
 │   │   ├── shell.rs        shell de-obfuscation (ANSI-C $'\xHH' escapes, ${IFS} desugar, brace expansion) — path/command path
 │   │   └── types.rs        shared types (AttackSequence, AuditReport, etc.)
@@ -64,7 +66,8 @@ sentinel/
 │   │   ├── mod.rs          policy engine (Tier 1: deny-first evaluation; overlay binding + downgrades)
 │   │   ├── schema.rs       TOML policy schema + parsing
 │   │   ├── overlay.rs      project overlays: `.sentinel.toml` grammar, salted-digest acceptance store, `sentinel policy accept`
-│   │   └── matcher.rs      glob path matching, regex command/secret matching
+│   │   ├── predicate.rs    `match = { ... }` blocks: exec / has_flag / operand_under / piped_to / then_exec / interpreter_eval over the parse
+│   │   └── matcher.rs      glob path matching, regex command/secret matching, wrapper and argv classifiers
 │   ├── evaluate/
 │   │   ├── mod.rs          hook I/O and native response rendering
 │   │   ├── hook_schema.rs  Claude Code PreToolUse hook JSON schema; command extraction incl. exec-named MCP tools; explicit `cwd` field
@@ -103,9 +106,12 @@ sentinel/
 │   └── audit_trail/
 │       └── mod.rs          JSONL event logger (0600/0700, symlink-refusing,
 │                           locked appends; tamper-covered by selfprotect)
-├── fuzz/                   cargo-fuzz crate (own workspace, not packaged): five libFuzzer targets + seed corpus
+├── fuzz/                   cargo-fuzz crate (own workspace, not packaged): six libFuzzer targets + seed corpus
 ├── tests/
+│   ├── common/mod.rs       shared by the differential tests: the seeded fragment generator and the FP corpus reader
 │   ├── differential_shell.rs  bash word resolution vs sentinel resolution (ignored; nightly job)
+│   ├── ast_candidates.rs   parse-backed path mining vs the tokenizer path over every pinned command (identical candidates; parse coverage)
+│   ├── predicate_agreement.rs  regex vs match block for every bundled rule that carries both (never block-only; regex-only gaps listed)
 │   ├── hook_contract.rs    PreToolUse/PostToolUse wire contract + version-stamped Claude Code fixtures
 │   ├── home_config.rs      isolated HOME validation and relocated Claude lifecycle
 │   ├── overlays.rs         project overlays end to end: accept, digest mismatch, agent-driven accept denied
@@ -168,7 +174,11 @@ Host hook payload arrives
      └── Shared policy pipeline  [the only decision path]
          tool input -> ToolCall (command + canonicalized paths, extracted for
          every tool type, not just "Bash"; paths are ALSO mined from the
-         shell-de-obfuscated command). deny-first evaluation:
+         shell-de-obfuscated command). the word and separator spans come
+         from the tree-sitter parse when it accepts the command and from the
+         hand tokenizer when it does not; the lexers spell each span, so the
+         candidates are identical either way (tests/ast_candidates.rs).
+         deny-first evaluation:
            - deny tools: glob over the tool NAME (e.g. `mcp__evil__*`), so an MCP
              server/tool can be blocked/warned by name. opt-in (no default rule).
            - deny paths: glob, with ~ / $HOME / symlink / case canonicalization,
@@ -203,7 +213,14 @@ Host hook payload arrives
                 status. Unsupported option grammars retain ordinary path checks.
             - deny commands: regex over the raw + an rm-flag-canonicalized form +
              a shell-de-obfuscated form (ANSI-C $'\xHH' escapes, ${IFS} desugar),
-             covering pipe-to-shell / fetch-exec / exfil variants
+             covering pipe-to-shell / fetch-exec / exfil variants; then the
+             rule's `match` block (if any) over the tree-sitter parse of the
+             raw and the decoded command (`common/ast` -> `policy/predicate`).
+             a rule fires on either. an unmodeled command position (a
+             substitution or expansion where a command name would be, or a
+             parse rejected at statement level) leaves a pattern-bearing rule
+             to its regex and sends a match-only rule to on_failure; an
+             unmodeled operand leaves the rule unmatched.
            - deny secrets: regex over the raw request payload AND a normalized
              form (HTML-entity decode, Unicode format-char strip — the full Cf
              set incl. bidi isolates/ALM plus the whole TAG block — NFKC fold),
@@ -233,12 +250,14 @@ Host hook payload arrives
 
 The parsers that stand between hook input and a verdict are tested two ways
 beyond unit tests. `fuzz/` is a cargo-fuzz crate (its own workspace, not
-packaged) with five libFuzzer targets over the library: `shell_tokens` (no
+packaged) with six libFuzzer targets over the library: `shell_tokens` (no
 panic, token bytes bounded by the input), `decode_obfuscation` (no panic, and
 idempotent: a second decode changes nothing), `brace_expand_checked` (no panic,
 never more than the 64-way cap or an explicit error), `parse_apply_patch` (no
-panic), and `evaluate_raw` (the whole pipeline on the bundled enforce policy, no
-panic). Seeds under `fuzz/corpus/` come from the verify cases and the demo
+panic), `evaluate_raw` (the whole pipeline on the bundled enforce policy, no
+panic), and `parse_ast` (the tree-sitter walk: no panic, bounded time, the
+size cap refuses oversized input, literal words and token spans never exceed
+the input). Seeds under `fuzz/corpus/` come from the verify cases and the demo
 replay. `tests/differential_shell.rs` generates argument fragments from a small
 grammar (quotes, backslash escapes, `$'..'`, `${IFS}`/`$IFS`, brace lists,
 sequences, nested groups, `~/` paths), runs each through
@@ -247,6 +266,20 @@ word Bash resolved is among the candidates `HookInput::normalize` plus
 `brace_expand_checked` produce for the same command. Only `printf` executes.
 The nightly workflow runs ten minutes per fuzz target and the harness on 20000
 fragments; the harness is `#[ignore]` in ordinary CI.
+
+Two more differential tests run in ordinary CI. `tests/ast_candidates.rs`
+runs the parse-backed path miner and the tokenizer path over every pinned Bash
+command (the verify set, the 2026-08 FP corpus read from
+`policy_fp_regression.rs`, 400 seeded fragments from the same grammar, and 55
+shell shapes the miners special-case) and asserts identical path candidates,
+brace-provenance candidates and traversal sources; it also reports parse
+coverage (tree-sitter-bash accepts every verify and FP command; 9 of the 400
+fragments, an ANSI-C body ending in an escaped backslash before a later quote,
+fall back to the tokenizer). `tests/predicate_agreement.rs` runs the regex and
+the `match` block of each bundled rule that carries both over the same pinned
+commands: a block that fires where its regex does not fails the test, and
+every regex-only gap must be one of the listed constructs the vocabulary does
+not express.
 
 What this covers: the tokenizers, the ANSI-C and IFS decoder, brace expansion,
 the apply_patch parser, and the composition of those in the pipeline, against
@@ -614,10 +647,15 @@ redirects, tee/sponge, cp/install/ln/dd/truncate/rm/mv), all labelled
 
 ### policy migration
 
-the bundled default carries revision `2026-08-07.1`. `policy-migrate --check` is
+the bundled default carries revision `2026-10-09.1`. `policy-migrate --check` is
 read-only and exits nonzero when migration is required. unversioned policies are
-matched only to known published generations; unknown revisions, ambiguous
-generations, and same-field conflicts stop without writing.
+matched only to known published generations (0.4.0, 0.4.1), and versioned ones
+to the draft 2026-07-28, 2026-07-28.1 and 2026-08-07.1 ladder; unknown
+revisions, ambiguous generations, and same-field conflicts stop without
+writing. the `match` block of a `deny.commands` rule is a managed field
+compared by its value, so the 2026-08-07.1 to 2026-10-09.1 step adds the four
+bundled blocks as the dotted keys the bundled file uses, keeps a user's
+identical block, and reports a differing one as a conflict.
 
 `policy-migrate --apply` performs a comment-preserving three-way merge from the
 recognized base through the user's edits to the current default. user-only
