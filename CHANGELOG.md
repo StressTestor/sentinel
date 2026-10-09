@@ -116,6 +116,25 @@ versioning.
   positive on 2026-10-08.
 
 ### Changed
+- **Command and secret regexes compile once per engine, and a command is
+  normalized once per call (follow-up #10).** `PolicyEngine` compiled every
+  `deny.commands` and `deny.secrets` pattern with `Regex::new` on each
+  `evaluate`, and the command matcher recomputed the canonicalized, lexical,
+  and de-obfuscated forms of the command for every rule, rebuilding the
+  Python alias normalizer's fixed regexes each time. The rule patterns are
+  now compiled when the engine is built (`from_toml_str`, `from_config`,
+  `with_overlay`) into parallel `Vec<Option<Regex>>` tables; an invalid
+  pattern compiles to `None`, still never matches, and is warned about once
+  at load instead of on every call (`policy-lint` keeps reporting it). The
+  candidate forms are computed once per evaluate (`matcher::CommandForms`,
+  same forms, same order, same conditions) and every rule runs over them,
+  and the normalizer's fixed regexes are `OnceLock` statics. The matcher
+  gains `command_match_witness_compiled`, `command_match_witness_forms`,
+  and `matches_secret_normalized_compiled`; the string-taking functions
+  remain and delegate to them. No decision changes: the verify set, the
+  false-positive regression corpus, and the differential harness are
+  unchanged. An ignored `timing_over_verify_cases` test records the
+  before/after figures, which are in the pull request.
 - The bundled policy rules moved out of one `format!` string in
   `src/install/defaults.rs` into per-family TOML files under
   `src/install/defaults/` (`01-credential-paths.toml` through
