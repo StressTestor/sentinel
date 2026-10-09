@@ -144,6 +144,7 @@ pub fn inspect(manifest: &Value) -> Option<PolicyDecision> {
                         matched_rule: Some(format!("preflight: {key} remote-exec")),
                         rule_id: Some(format!("preflight:{key}-remote-exec")),
                         witness: None,
+                        downgraded_by: None,
                     });
                 }
             }
@@ -170,6 +171,7 @@ pub fn inspect(manifest: &Value) -> Option<PolicyDecision> {
                                 matched_rule: Some("preflight: non-registry dep source".into()),
                                 rule_id: Some("preflight:non-registry-dep-source".into()),
                                 witness: None,
+                                downgraded_by: None,
                             });
                         }
                     }
@@ -890,6 +892,7 @@ mod tests {
             matched_rule: None,
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         }
     }
 
@@ -1134,6 +1137,7 @@ mod tests {
             matched_rule: Some("deny.commands: x".into()),
             rule_id: None,
             witness: None,
+            downgraded_by: None,
         };
         // even with a clean manifest and an install command, a Block stays Block
         let dir = tempfile::tempdir().unwrap();

@@ -31,6 +31,8 @@ pub struct CheckOutcome {
     /// what matched (path, bounded command fragment, tool name); never a secret
     pub witness: Option<String>,
     pub reason: Option<String>,
+    /// the accepted project overlay that downgraded this rule's block to warn
+    pub downgraded_by: Option<String>,
     /// the paths the engine extracted from the call (what deny.paths sees)
     pub extracted_paths: Vec<String>,
     /// the command the engine extracted, if any (what deny.commands sees)
@@ -45,6 +47,11 @@ pub struct CheckOutcome {
 /// no audit logging. This is the testable core of `check`.
 pub fn evaluate_check(engine: &PolicyEngine, raw: &str) -> CheckOutcome {
     let result = pipeline::evaluate_raw(engine, raw);
+    // the same single line the live hook prints, so a dry run explains why an
+    // overlay in cwd did not apply
+    if let Some(warning) = result.overlay().warning() {
+        eprintln!("{warning}");
+    }
     let decision = result.decision().clone();
     let (tool_name, paths, command) = match result.call() {
         Some(call) => {
@@ -86,6 +93,7 @@ pub fn evaluate_check(engine: &PolicyEngine, raw: &str) -> CheckOutcome {
         rule_id: decision.rule_id,
         witness: decision.witness,
         reason: decision.reason,
+        downgraded_by: decision.downgraded_by,
         extracted_paths: display_paths,
         command,
         blocks,
@@ -154,6 +162,9 @@ fn print_human(o: &CheckOutcome) {
             }
             if let Some(reason) = &o.reason {
                 println!("reason:    {reason}");
+            }
+            if let Some(overlay) = &o.downgraded_by {
+                println!("downgraded: block -> warn by accepted overlay {overlay}");
             }
         }
         None => println!("rule:      (no rule matched) -> {}", o.rule_action),
