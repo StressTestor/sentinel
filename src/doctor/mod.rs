@@ -371,18 +371,19 @@ fn interpret_canary(is_audit: bool, raw: CanaryRaw) -> (Level, String) {
 /// prior enforce session.
 fn count_blocks_within_days(
     events: &[AuditEvent],
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
     days: i64,
     mode: Option<&str>,
 ) -> usize {
-    let cutoff = now - chrono::Duration::days(days);
+    let cutoff = now - jiff::SignedDuration::from_hours(days * 24);
     events
         .iter()
         .filter(|e| e.action == "block")
         .filter(|e| mode.is_none_or(|m| e.mode.eq_ignore_ascii_case(m)))
         .filter(|e| {
-            chrono::DateTime::parse_from_rfc3339(&e.timestamp)
-                .map(|ts| ts.with_timezone(&chrono::Utc) >= cutoff)
+            e.timestamp
+                .parse::<jiff::Timestamp>()
+                .map(|ts| ts >= cutoff)
                 .unwrap_or(false)
         })
         .count()
@@ -772,7 +773,7 @@ pub fn run(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => Err(e.to_string()),
     };
 
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     // restrict the count to the current mode so the trust ramp is accurate
     let mode_filter = engine.as_ref().ok().map(|e| e.mode().to_string());
     let block_count_7d =
@@ -1053,9 +1054,16 @@ mod tests {
 
     #[test]
     fn count_blocks_filters_action_and_window() {
-        let now = chrono::Utc::now();
-        let recent = (now - chrono::Duration::days(1)).to_rfc3339();
-        let old = (now - chrono::Duration::days(30)).to_rfc3339();
+        let now = jiff::Timestamp::now();
+        let recent = (now - jiff::SignedDuration::from_hours(24))
+            .display_with_offset(jiff::tz::Offset::UTC)
+            .to_string();
+        let recent_offset = (now - jiff::SignedDuration::from_hours(24))
+            .display_with_offset(jiff::tz::offset(1))
+            .to_string();
+        let old = (now - jiff::SignedDuration::from_hours(30 * 24))
+            .display_with_offset(jiff::tz::Offset::UTC)
+            .to_string();
         let ev = |action: &str, ts: &str| AuditEvent {
             timestamp: ts.into(),
             tool_name: "Read".into(),
@@ -1072,15 +1080,18 @@ mod tests {
         };
         let events = vec![
             ev("block", &recent),
-            ev("block", &old),    // outside 7d window
-            ev("warn", &recent),  // not a block
-            ev("allow", &recent), // not a block
+            ev("block", &recent_offset), // same instant with a non-UTC offset
+            ev("block", &old),           // outside 7d window
+            ev("block", "invalid timestamp"), // malformed lines do not count
+            ev("warn", &recent),         // not a block
+            ev("allow", &recent),        // not a block
         ];
-        assert_eq!(count_blocks_within_days(&events, now, 7, None), 1);
+        assert!(recent.ends_with("+00:00"));
+        assert_eq!(count_blocks_within_days(&events, now, 7, None), 2);
         // mode filter: the events are all enforce-mode, so audit count is 0
         assert_eq!(
             count_blocks_within_days(&events, now, 7, Some("enforce")),
-            1
+            2
         );
         assert_eq!(count_blocks_within_days(&events, now, 7, Some("audit")), 0);
     }

@@ -4,7 +4,8 @@
 //! candidates, cd-resolved relative operands) and `PolicyEngine::evaluate`
 //! mines recursive-traversal sources. Both now ask `common::ast` for the word
 //! and separator spans first and fall back to the hand tokenizer when the
-//! grammar rejects the input. This test runs BOTH splitters over every Bash
+//! grammar rejects the input or the spans tokenize differently. This test
+//! runs BOTH splitters over every Bash
 //! command the project pins (the verify set, the 2026-08 false-positive corpus
 //! in `policy_fp_regression.rs`, the differential harness's seed grammar, and
 //! a list of shell shapes the miners special-case) and asserts the candidate
@@ -55,6 +56,7 @@ const EXTRA_SHAPES: &[&str] = &[
     "cat /tmp/file{1..100}",
     "cat \"/tmp/file{1..100}\"",
     "cat /tmp/file\\{1..100\\}",
+    r#"printf \"%s\0\" ~/id_rsa$'\\'{3..1} ~/'t z'b\' ~/{a..c}$'\x7d'"t z""#,
     "x=`cat ~/.ssh/id_rsa`; echo $x",
     "cat <(curl x) ~/.aws/credentials",
     "chmod -x $(command -v sentinel)",

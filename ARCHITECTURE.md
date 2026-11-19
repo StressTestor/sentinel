@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-09-04
+last updated: 2026-11-19
 
 ## overview
 
@@ -24,6 +24,7 @@ acknowledge uncontained host execution with `--unsafe-host`.
 | CLI | clap | 4.x |
 | serialization and config edits | serde, serde_json, toml, toml_edit | 1.x / 0.22 |
 | async runtime | tokio | 1.x |
+| UTC timestamps and audit-window parsing | jiff | 1.x |
 | regex | regex | 1.x |
 | shell parse (C grammar behind FFI, exact pins) | tree-sitter, tree-sitter-bash | 0.25.10 / 0.25.1 |
 | text normalization | unicode-normalization, html-escape | 0.1 / 0.2 |
@@ -50,7 +51,7 @@ sentinel/
 │   │   └── mod.rs          `sentinel why`: join an audit line's rule id to the installed policy
 │   ├── common/
 │   │   ├── mod.rs
-│   │   ├── ast.rs          tree-sitter-bash parse -> segments, words (Literal or Unmodeled with the reason), redirects, scopes; token spans for the path miners
+│   │   ├── ast.rs          bounded tree-sitter-bash parse -> segments, words (Literal or Unmodeled with the reason), redirects, scopes; token spans for the path miners
 │   │   ├── normalize.rs    encoded-text normalization (HTML-entity decode, Unicode format-char strip, NFKC) — secret path only
 │   │   ├── shell.rs        shell de-obfuscation (ANSI-C $'\xHH' escapes, ${IFS} desugar, brace expansion) — path/command path
 │   │   └── types.rs        shared types (AttackSequence, AuditReport, etc.)
@@ -121,6 +122,7 @@ sentinel/
 │   ├── sandbox_install.rs  sandbox bridge install/reinstall/uninstall, doctor drift, self-protect through the real binary
 │   ├── policy_fp_regression.rs  bundled-policy attack and false-positive corpus
 │   └── fixtures/
+│       ├── ast/            saved parser timeout input used by the regression test
 │       ├── corpus/         test attack sequences (3 TOML files)
 │       ├── hooks/          Codex payloads + claude-code-<version>-*.json, VERIFIED_CLAUDE_CODE_VERSION
 │       └── policy/         pinned default-enforce/default-audit policy.toml (byte-identity regression anchor)
@@ -141,7 +143,7 @@ sentinel/
     ├── dependabot.yml      weekly cargo + github-actions update PRs
     └── workflows/
         ├── ci.yml          quality, MSRV, package, Linux, and macOS gates
-        ├── nightly.yml     ten minutes of libFuzzer per target + the bash differential harness, daily
+        ├── nightly.yml     ten minutes of libFuzzer per target (parse_ast under ASan) + the bash differential harness, daily
         ├── claude-code-version-watch.yml  weekly: opens an issue when npm's claude-code moves past the verified version
         ├── release.yml     identity, verification, four targets, SBOM, attest/publish
         ├── codeql.yml      CodeQL static analysis (rust + actions), push/PR + weekly
@@ -178,9 +180,10 @@ Host hook payload arrives
          tool input -> ToolCall (command + canonicalized paths, extracted for
          every tool type, not just "Bash"; paths are ALSO mined from the
          shell-de-obfuscated command). the word and separator spans come
-         from the tree-sitter parse when it accepts the command and from the
-         hand tokenizer when it does not; the lexers spell each span, so the
-         candidates are identical either way (tests/ast_candidates.rs).
+         from the tree-sitter parse when it accepts the command and its spans
+         agree with the whole-command lexer. Rejected parses and span
+         disagreements use the hand tokenizer. The lexers spell each span;
+         tests/ast_candidates.rs checks candidate agreement.
          deny-first evaluation:
            - deny tools: glob over the tool NAME (e.g. `mcp__evil__*`), so an MCP
              server/tool can be blocked/warned by name. opt-in (no default rule).
@@ -269,6 +272,31 @@ word Bash resolved is among the candidates `HookInput::normalize` plus
 `brace_expand_checked` produce for the same command. Only `printf` executes.
 The nightly workflow runs ten minutes per fuzz target and the harness on 20000
 fragments; the harness is `#[ignore]` in ordinary CI.
+
+The AST parser skips inputs with more than 24 pipeline/redirect characters and
+uses a best-effort 250 ms progress callback for other inputs. Tree-sitter can
+spend a long period in error recovery without calling back, so the syntax cap
+protects the observed pathological shape. A skipped parse uses tokenizer path
+mining; structured match rules follow the configured `on_failure` posture.
+The shape behind the cap: a command that opens with a bracketed pipe
+(`[s|h]`), runs a pipeline, and ends in a bare `$` doubles tree-sitter's
+stack-merge work per pipe (20 pipes parse in about 20 ms, 32 take over 8 s),
+inside one `stack_node_add_link` call the progress callback cannot interrupt.
+At the cap that shape costs about 0.2 s per evaluation. The count is
+quote-blind, so a policy with match-only rules and `on_failure = "closed"`
+blocks any command with more than 24 `|`, `&`, `<` or `>` bytes; the bundled
+rules all carry a regex and are not affected.
+
+The AST parser also refuses a `{` that is followed, after optional ASCII
+digits or `<digits>..<digits>`, by a character past U+00FF
+(`ParseError::ScannerHazard`). tree-sitter-bash 0.25.1 probes every `{` for a
+`{1..3}` sequence and passes that character to the narrow `isdigit`
+(`scanner.c:1158`, `:1172`), which glibc implements as a table lookup: a wide
+code point reads outside the table and a far one faults. The check mirrors
+the probe and ignores quoting. A refusal of either kind inside a nested
+`sh -c` payload refuses the whole command, because the payload may be valid
+shell. The nightly `parse_ast` job runs under AddressSanitizer with the C
+sources instrumented; the other five targets run without a sanitizer.
 
 Two more differential tests run in ordinary CI. `tests/ast_candidates.rs`
 runs the parse-backed path miner and the tokenizer path over every pinned Bash
@@ -766,13 +794,6 @@ separate gates.
 
 ---
 
-last updated: 2026-09-04 (cleanup and hardening self-review: command-scoped traversal,
-explicit HOME errors, relocated Claude self-protection, verified audit handles and
-locked appends, deterministic temporary-file collision coverage). Prior update:
-2026-08-14 by StressTestor (security-audit fixes and verify corpus 45 -> 64).
-Documents the shared typed
-evaluation pipeline, native Claude Code/Codex lifecycle reconciliation,
-trust-aware health checks, uncontained stateful audit, explicit MCP baselines,
-validated policy migration, completeness-aware shell matching, package preflight
-parsing, event-aware hook self-protection, policy false-positive regressions,
-and release/package evidence gates.
+last updated: 2026-11-19 (dependency advisories, bounded AST parsing,
+whole-command token fallback for path mining, the scanner-hazard refusal, and
+AddressSanitizer on the nightly parse_ast job).

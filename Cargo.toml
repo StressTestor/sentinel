@@ -37,7 +37,7 @@ toml_edit = "0.22"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
 colored = "3"
 glob = "0.3"
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

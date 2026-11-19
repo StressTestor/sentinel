@@ -149,19 +149,28 @@ pub fn recursive_traversal_sources_with(command: &str, use_ast: bool) -> Vec<Str
 }
 
 /// The token stream the argv classifier walks: the parse's spans lexed one by
-/// one, or the whole command lexed at once. A span the lexer rejects
-/// (unbalanced quoting) rejects the command, as it did before.
+/// one, or the whole command lexed at once. A rejected span or a disagreement
+/// with the whole-command lexer falls back to the latter.
 fn classifier_tokens(command: &str, use_ast: bool) -> Option<Vec<String>> {
+    let fallback = shell_tokens(command)?;
     if use_ast {
         if let Ok(program) = crate::common::ast::parse(command) {
             let mut tokens = Vec::new();
             for atom in program.atoms() {
-                tokens.extend(shell_tokens(atom)?);
+                let Some(words) = shell_tokens(atom) else {
+                    return Some(fallback);
+                };
+                tokens.extend(words);
             }
-            return Some(tokens);
+            // Parsed atoms can break a quoted word at the wrong boundary.
+            // Traversal classification must see the same argv as lexing the
+            // complete command, including when an atom has unmatched quotes.
+            if tokens == fallback {
+                return Some(tokens);
+            }
         }
     }
-    shell_tokens(command)
+    Some(fallback)
 }
 
 fn traversal_source_path(path: &str, cwd: Option<&str>) -> Option<String> {

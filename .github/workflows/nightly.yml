@@ -45,11 +45,22 @@ jobs:
       - name: fuzz for ten minutes
         env:
           TARGET: ${{ matrix.target }}
-        # No sanitizer: the targets exercise safe Rust and hunt panics and
-        # property violations; AddressSanitizer made evaluate_raw run at well
-        # under one execution per second, which wasted the budget.
+        # parse_ast drives tree-sitter's C parser and the bash scanner on
+        # arbitrary text, so it runs under AddressSanitizer with the C side
+        # instrumented too: a fault there is reported with a symbolized stack
+        # (the scanner's wide-character isdigit read showed up as a bare
+        # "deadly signal" for six weeks without it). The other targets hunt
+        # panics and property violations without a sanitizer; AddressSanitizer
+        # made evaluate_raw run at well under one execution per second, which
+        # wasted the budget.
         run: |
-          cargo fuzz run --sanitizer none "$TARGET" -- \
+          sanitizer=none
+          if [ "$TARGET" = parse_ast ]; then
+            sanitizer=address
+            export CC=clang
+            export CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g"
+          fi
+          cargo fuzz run --sanitizer "$sanitizer" "$TARGET" -- \
             -max_total_time=600 \
             -timeout=30 \
             -rss_limit_mb=2048 \
