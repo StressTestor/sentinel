@@ -28,16 +28,28 @@
 //! (`tests/ast_candidates.rs` asserts that).
 //!
 //! The parse runs in C behind tree-sitter's FFI on attacker-controlled text,
-//! so the input is bounded ([`MAX_COMMAND_BYTES`]) and the nested payload walk
-//! is depth-bounded ([`MAX_NESTED_DEPTH`]). Nothing here executes anything.
+//! so the input is bounded ([`MAX_COMMAND_BYTES`]), dense pipeline/redirect
+//! syntax is sent to the tokenizer fallback ([`MAX_PARSE_OPERATORS`]), and the
+//! nested payload walk is depth-bounded ([`MAX_NESTED_DEPTH`]). Nothing here
+//! executes anything.
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 /// Commands longer than this are not parsed (the tokenizer path handles them).
 pub const MAX_COMMAND_BYTES: usize = 64 * 1024;
 
+/// Avoid tree-sitter's pathological error-recovery path for commands with a
+/// dense mix of pipelines and redirects. The caller uses its tokenizer fallback.
+pub const MAX_PARSE_OPERATORS: usize = 24;
+
 /// How many `sh -c '...'` / `eval '...'` payload levels are parsed recursively.
 pub const MAX_NESTED_DEPTH: usize = 3;
+
+/// Best-effort callback deadline for one command, including nested payloads.
+/// Some tree-sitter recovery paths do not call back promptly, so the operator
+/// preflight above is also required for the observed pathological input.
+const MAX_PARSE_TIME: Duration = Duration::from_millis(250);
 
 /// The operator that joins a segment to the one before it in the same scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +197,8 @@ impl Program {
 pub enum ParseError {
     /// The command exceeds [`MAX_COMMAND_BYTES`].
     TooLarge { bytes: usize },
+    /// The command has too many pipeline/redirect operators for bounded parsing.
+    TooComplex { operators: usize },
     /// tree-sitter reported an `ERROR` or `MISSING` node. `in_command_position`
     /// is true when the damage sits where a command name would be (or at
     /// statement level), false when it is inside an argument or redirect.
@@ -192,6 +206,8 @@ pub enum ParseError {
         in_command_position: bool,
         byte: usize,
     },
+    /// Tree-sitter or the nested payload walk exceeded the shared time budget.
+    Timeout,
     /// The parser produced no tree.
     Unavailable,
 }
@@ -202,6 +218,10 @@ impl fmt::Display for ParseError {
             Self::TooLarge { bytes } => {
                 write!(f, "command of {bytes} bytes exceeds {MAX_COMMAND_BYTES}")
             }
+            Self::TooComplex { operators } => write!(
+                f,
+                "command has {operators} pipeline/redirect operators (limit {MAX_PARSE_OPERATORS})"
+            ),
             Self::Syntax {
                 in_command_position: true,
                 byte,
@@ -210,6 +230,7 @@ impl fmt::Display for ParseError {
                 in_command_position: false,
                 byte,
             } => write!(f, "syntax error inside an operand at byte {byte}"),
+            Self::Timeout => write!(f, "shell parse time budget exhausted"),
             Self::Unavailable => write!(f, "parser unavailable"),
         }
     }
@@ -222,6 +243,8 @@ pub fn parse(command: &str) -> Result<Program, ParseError> {
     let mut walker = Walker {
         segments: Vec::new(),
         next_scope: 0,
+        deadline: Instant::now() + MAX_PARSE_TIME,
+        budget_exceeded: false,
     };
     let atoms = walker.parse_into(command, 0)?;
     Ok(Program {
@@ -301,6 +324,8 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
 struct Walker {
     segments: Vec<Segment>,
     next_scope: usize,
+    deadline: Instant,
+    budget_exceeded: bool,
 }
 
 /// Per-tree state: the walker is shared across nested payload parses, the
@@ -317,8 +342,30 @@ impl Walker {
                 bytes: command.len(),
             });
         }
+        let operators = command
+            .bytes()
+            .filter(|byte| matches!(byte, b'|' | b'&' | b'>' | b'<'))
+            .count();
+        if operators > MAX_PARSE_OPERATORS {
+            return Err(ParseError::TooComplex { operators });
+        }
+        if Instant::now() >= self.deadline {
+            return Err(ParseError::Timeout);
+        }
         let mut parser = parser().ok_or(ParseError::Unavailable)?;
-        let tree = parser.parse(command, None).ok_or(ParseError::Unavailable)?;
+        let bytes = command.as_bytes();
+        let deadline = self.deadline;
+        let mut cancel_on_timeout = |_: &tree_sitter::ParseState| Instant::now() >= deadline;
+        let tree = parser
+            .parse_with_options(
+                &mut |offset, _| bytes.get(offset..).unwrap_or_default(),
+                None,
+                Some(tree_sitter::ParseOptions::new().progress_callback(&mut cancel_on_timeout)),
+            )
+            .ok_or(ParseError::Timeout)?;
+        if Instant::now() >= self.deadline {
+            return Err(ParseError::Timeout);
+        }
         let root = tree.root_node();
         if let Some(error) = first_error(root) {
             return Err(error);
@@ -331,7 +378,11 @@ impl Walker {
             depth,
         };
         self.walk_statements(&tree, root, scope, None);
-        Ok(atoms)
+        if self.budget_exceeded || Instant::now() >= self.deadline {
+            Err(ParseError::Timeout)
+        } else {
+            Ok(atoms)
+        }
     }
 
     fn fresh_scope(&mut self) -> usize {
@@ -657,11 +708,17 @@ impl Walker {
                 let mut nested = Walker {
                     segments: Vec::new(),
                     next_scope: self.next_scope,
+                    deadline: self.deadline,
+                    budget_exceeded: false,
                 };
                 // a payload that does not parse is an operand failure: the
                 // outer command stays modeled, the payload stays opaque
-                if nested.parse_into(&payload, tree.depth + 1).is_ok() {
-                    self.segments.extend(nested.segments);
+                match nested.parse_into(&payload, tree.depth + 1) {
+                    Ok(_) => self.segments.extend(nested.segments),
+                    Err(ParseError::Timeout | ParseError::TooComplex { .. }) => {
+                        self.budget_exceeded = true
+                    }
+                    Err(_) => {}
                 }
                 self.next_scope = nested.next_scope;
             }
@@ -1029,6 +1086,35 @@ fn collect_atoms(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn parser_returns_promptly_for_fuzz_timeout_input() {
+        // Found by the nightly parse_ast fuzz job on 2026-11-19. The 1,817-byte
+        // input previously held tree-sitter in parse for over 30 seconds.
+        let input = std::str::from_utf8(include_bytes!(
+            "../../tests/fixtures/ast/parse_ast_timeout_2026-11-19.bin"
+        ))
+        .unwrap();
+        let started = Instant::now();
+        assert!(matches!(parse(input), Err(ParseError::TooComplex { .. })));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "parser took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn ordinary_pipeline_still_uses_the_parser() {
+        let command = format!("echo x{}", " | cat".repeat(MAX_PARSE_OPERATORS));
+        assert!(parse(&command).is_ok());
+        let too_complex = format!("{command} | cat");
+        assert!(matches!(
+            parse(&too_complex),
+            Err(ParseError::TooComplex { operators }) if operators == MAX_PARSE_OPERATORS + 1
+        ));
+    }
 
     fn words(segment: &Segment) -> Vec<&str> {
         segment.words.iter().map(|w| w.text.as_str()).collect()

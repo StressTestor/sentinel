@@ -832,6 +832,7 @@ impl ParsedViews {
         use crate::common::ast::ParseError;
         use predicate::Outcome;
         let mut verdict: Option<PredicateOutcome> = None;
+        let mut uninspectable: Option<String> = None;
         for view in [self.decoded.as_ref(), Some(&self.raw)]
             .into_iter()
             .flatten()
@@ -851,10 +852,18 @@ impl ParsedViews {
                     "parse failed: {}",
                     view.as_ref().unwrap_err()
                 ))),
+                Err(e @ (ParseError::Timeout | ParseError::TooComplex { .. })) => {
+                    uninspectable.get_or_insert_with(|| e.to_string());
+                    continue;
+                }
                 Err(_) => verdict.get_or_insert(PredicateOutcome::NoMatch),
             };
         }
-        verdict.unwrap_or(PredicateOutcome::NoMatch)
+        if let Some(detail) = uninspectable {
+            PredicateOutcome::Unmodeled(detail)
+        } else {
+            verdict.unwrap_or(PredicateOutcome::NoMatch)
+        }
     }
 }
 
@@ -1216,6 +1225,23 @@ reason = "ssh read"
             assert_eq!(d.action, Action::Allow, "{command}");
             assert_eq!(d.rule_id, None, "{command}");
         }
+    }
+
+    #[test]
+    fn parse_complexity_uses_the_configured_failure_posture() {
+        let input = std::str::from_utf8(include_bytes!(
+            "../../tests/fixtures/ast/parse_ast_timeout_2026-11-19.bin"
+        ))
+        .unwrap();
+        let closed = match_engine(MATCH_POLICY);
+        let d = closed.evaluate(&bash(input));
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.rule_id.as_deref(), Some("on_failure:closed"));
+
+        let open = match_engine(&MATCH_POLICY.replace("closed", "open"));
+        let d = open.evaluate(&bash(input));
+        assert_eq!(d.action, Action::Allow);
+        assert_eq!(d.rule_id.as_deref(), Some("on_failure:open"));
     }
 
     #[test]
