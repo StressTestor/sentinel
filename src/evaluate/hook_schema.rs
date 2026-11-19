@@ -327,19 +327,28 @@ fn extract_paths_from_command(cmd: &str, use_ast: bool) -> Vec<CommandPath> {
 
 /// The word stream the path miner walks. With `use_ast`, the tree-sitter
 /// parse decides where words, separators and redirects are and the lexer
-/// below spells each span; a parse the grammar rejects falls back to lexing
-/// the whole command, which is the only path there used to be.
+/// below spells each span. A rejected parse or a disagreement with the
+/// whole-command lexer falls back to that lexer.
 fn mining_tokens(cmd: &str, use_ast: bool) -> Vec<ShellToken> {
+    let fallback = shell_tokens(cmd);
     if use_ast {
         if let Ok(program) = crate::common::ast::parse(cmd) {
-            return program
+            let parsed: Vec<ShellToken> = program
                 .atoms()
                 .iter()
                 .flat_map(|atom| shell_tokens(atom))
                 .collect();
+            // tree-sitter can accept a command yet split one Bash word across
+            // atoms (for example after an ANSI-C string containing a backslash).
+            // Lexing those fragments separately loses the quote context and
+            // invents path candidates. Use the whole-command lexer if the
+            // resulting word stream differs.
+            if parsed == fallback {
+                return parsed;
+            }
         }
     }
-    shell_tokens(cmd)
+    fallback
 }
 
 /// Mine path candidates from a command, resolving relative operands against
@@ -565,6 +574,7 @@ fn joined_cwd_form(candidate: &str, cwd: Option<&str>) -> Option<String> {
 /// by quotes or backslashes, otherwise deny.path rules containing spaces can be
 /// bypassed through Bash. Command separators become their own tokens so the
 /// miner knows which words sit in command position.
+#[derive(PartialEq, Eq)]
 struct ShellToken {
     value: String,
     separator: bool,

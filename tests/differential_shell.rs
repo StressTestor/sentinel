@@ -387,3 +387,21 @@ fn quoted_text_inside_brace_group_is_detected() {
     assert!(!brace_group_has_quoted_text("./p{a,b}'c d'"));
     assert!(!brace_group_has_quoted_text("'{a,b}'"));
 }
+
+#[test]
+fn ansi_c_quote_does_not_split_a_later_quoted_path() {
+    if !bash_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let fragment = r#"~/id_rsa$'\\'{3..1} ~/'t z'b\' ~/{a..c}$'\x7d'"t z""#;
+    let bash = run_bash(fragment, home.path());
+    assert!(bash.ok);
+    let sentinel = sentinel_view(fragment);
+    assert!(
+        compare(&bash, &sentinel).is_empty(),
+        "bash: {:?}, sentinel: {:?}",
+        bash.words,
+        sentinel.resolved
+    );
+}
