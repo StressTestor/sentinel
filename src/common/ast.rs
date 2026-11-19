@@ -208,6 +208,12 @@ pub enum ParseError {
     },
     /// Tree-sitter or the nested payload walk exceeded the shared time budget.
     Timeout,
+    /// A `{` at `byte` is followed by a character past U+00FF where the
+    /// tree-sitter-bash scanner would read it with the narrow `isdigit`. The
+    /// text is not handed to the C parser (see [`scanner_hazard`]). `byte`
+    /// indexes the text that was about to be parsed: the command, or the
+    /// `sh -c` payload when only the payload spells the shape.
+    ScannerHazard { byte: usize },
     /// The parser produced no tree.
     Unavailable,
 }
@@ -231,6 +237,10 @@ impl fmt::Display for ParseError {
                 byte,
             } => write!(f, "syntax error inside an operand at byte {byte}"),
             Self::Timeout => write!(f, "shell parse time budget exhausted"),
+            Self::ScannerHazard { byte } => write!(
+                f,
+                "brace at byte {byte} of the command or its nested payload is followed by a character the shell parser cannot read safely"
+            ),
             Self::Unavailable => write!(f, "parser unavailable"),
         }
     }
@@ -238,19 +248,69 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+impl ParseError {
+    /// No tree came back: the text was never handed to tree-sitter, or the
+    /// parse was abandoned. Nothing can be said about the command's
+    /// structure. A syntax error is different: tree-sitter read the text and
+    /// reported where it broke.
+    pub fn is_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::TooComplex { .. } | Self::Timeout | Self::ScannerHazard { .. }
+        )
+    }
+}
+
 /// Parse one command. `Err` means the caller must use the tokenizer path.
 pub fn parse(command: &str) -> Result<Program, ParseError> {
     let mut walker = Walker {
         segments: Vec::new(),
         next_scope: 0,
         deadline: Instant::now() + MAX_PARSE_TIME,
-        budget_exceeded: false,
+        refused: None,
     };
     let atoms = walker.parse_into(command, 0)?;
     Ok(Program {
         segments: walker.segments,
         atoms,
     })
+}
+
+/// The byte offset of the first `{` that would make tree-sitter-bash read a
+/// character past U+00FF with the narrow `isdigit`.
+///
+/// The external scanner probes every `{` for a `{1..3}` sequence (0.25.1,
+/// `scanner.c:1158` and `:1172`): it skips ASCII digits, tests the next
+/// character, and after a `..` skips digits and tests again. `isdigit` is
+/// defined only for `unsigned char` values and `EOF`. glibc implements it as
+/// a table lookup, so a wider code point reads outside the table and a far
+/// one faults. This mirrors the probe and ignores quoting, because the cost
+/// of missing one is a hook that dies on attacker-chosen text.
+fn scanner_hazard(command: &str) -> Option<usize> {
+    let bytes = command.as_bytes();
+    let wide = |at: usize| {
+        // `at` follows ASCII bytes only, so it is a character boundary
+        command
+            .get(at..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c > '\u{ff}')
+    };
+    let digits = |mut at: usize| {
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        at
+    };
+    for (open, _) in bytes.iter().enumerate().filter(|(_, b)| **b == b'{') {
+        let after = digits(open + 1);
+        if wide(after) {
+            return Some(open);
+        }
+        if bytes.get(after..after + 2) == Some(b"..") && wide(digits(after + 2)) {
+            return Some(open);
+        }
+    }
+    None
 }
 
 fn parser() -> Option<tree_sitter::Parser> {
@@ -325,7 +385,9 @@ struct Walker {
     segments: Vec<Segment>,
     next_scope: usize,
     deadline: Instant,
-    budget_exceeded: bool,
+    /// The first nested payload the parser refused. It makes the whole
+    /// command a refusal: an opaque payload would hide what it runs.
+    refused: Option<ParseError>,
 }
 
 /// Per-tree state: the walker is shared across nested payload parses, the
@@ -348,6 +410,9 @@ impl Walker {
             .count();
         if operators > MAX_PARSE_OPERATORS {
             return Err(ParseError::TooComplex { operators });
+        }
+        if let Some(byte) = scanner_hazard(command) {
+            return Err(ParseError::ScannerHazard { byte });
         }
         if Instant::now() >= self.deadline {
             return Err(ParseError::Timeout);
@@ -378,7 +443,9 @@ impl Walker {
             depth,
         };
         self.walk_statements(&tree, root, scope, None);
-        if self.budget_exceeded || Instant::now() >= self.deadline {
+        if let Some(refusal) = self.refused.take() {
+            Err(refusal)
+        } else if Instant::now() >= self.deadline {
             Err(ParseError::Timeout)
         } else {
             Ok(atoms)
@@ -709,14 +776,16 @@ impl Walker {
                     segments: Vec::new(),
                     next_scope: self.next_scope,
                     deadline: self.deadline,
-                    budget_exceeded: false,
+                    refused: None,
                 };
-                // a payload that does not parse is an operand failure: the
-                // outer command stays modeled, the payload stays opaque
+                // a payload with a syntax error is an operand failure: the
+                // outer command stays modeled, the payload stays opaque. a
+                // payload the parser refused to read is not: it may be valid
+                // shell, so the refusal carries to the whole command
                 match nested.parse_into(&payload, tree.depth + 1) {
                     Ok(_) => self.segments.extend(nested.segments),
-                    Err(ParseError::Timeout | ParseError::TooComplex { .. }) => {
-                        self.budget_exceeded = true
+                    Err(refusal) if refusal.is_refusal() => {
+                        self.refused.get_or_insert(refusal);
                     }
                     Err(_) => {}
                 }
@@ -1103,6 +1172,100 @@ mod tests {
             "parser took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn brace_followed_by_a_wide_character_is_refused_before_tree_sitter() {
+        // tree-sitter-bash 0.25.1 probes for a `{1..3}` sequence by passing
+        // the character after `{`, after `{<digits>`, and after
+        // `{<digits>..<digits>` to the narrow isdigit (scanner.c:1158, 1172).
+        // Past U+00FF that reads outside glibc's ctype table.
+        for command in [
+            "ls //{2a,{\u{a0360}}",
+            "echo {\u{65e5}}",
+            "echo {12\u{65e5}",
+            "echo {1..3\u{9a6cd}}",
+            "echo {..\u{100}",
+            "sh -c 'echo {\u{65e5}}'",
+        ] {
+            assert!(
+                matches!(parse(command), Err(ParseError::ScannerHazard { .. })),
+                "{command:?} reached tree-sitter"
+            );
+        }
+        assert!(matches!(
+            parse("echo ok {\u{65e5}}"),
+            Err(ParseError::ScannerHazard { byte: 8 })
+        ));
+    }
+
+    #[test]
+    fn a_hazard_only_the_nested_payload_spells_refuses_the_whole_command() {
+        // the raw text has `{'"` after the brace; quote removal builds the
+        // payload `echo {日}`, which is valid shell and must not stay opaque
+        let command = "sh -c 'echo {'\"\u{65e5}\"'}'";
+        assert!(scanner_hazard(command).is_none());
+        assert!(matches!(
+            parse(command),
+            Err(ParseError::ScannerHazard { byte: 5 })
+        ));
+    }
+
+    #[test]
+    fn brace_shapes_the_scanner_probe_reads_safely_are_not_refused() {
+        for command in [
+            "echo {1..3}",
+            "echo {a,b}",
+            // U+00E9 is inside the ctype table
+            "echo {\u{e9}}",
+            // the probe stops at `a` and at a single dot
+            "echo {a\u{65e5}}",
+            "echo {1.\u{65e5}}",
+            "echo \u{65e5}{a,b}",
+        ] {
+            assert!(
+                !matches!(parse(command), Err(ParseError::ScannerHazard { .. })),
+                "{command:?} was refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hazard_check_ignores_quoting_on_purpose() {
+        // bash never expands these braces and tree-sitter may never probe
+        // them, but the check does not model quoting: agreeing with the C
+        // scanner on every quoting rule is the thing it exists to not depend
+        // on. Making this quote-aware reopens the fault if the two disagree.
+        for command in [
+            "echo \"{\u{65e5}}\"",
+            "echo '{\u{65e5}}'",
+            "echo \\{\u{65e5}",
+            "cat <<'EOF'\n{\u{65e5}}\nEOF",
+        ] {
+            assert!(
+                matches!(parse(command), Err(ParseError::ScannerHazard { .. })),
+                "{command:?} reached tree-sitter"
+            );
+        }
+    }
+
+    #[test]
+    fn nightly_fuzz_crash_inputs_never_reach_tree_sitter() {
+        // Saved by the nightly parse_ast job. Three of the four fault at
+        // scanner.c:1158 on Linux x86_64 every time; the fourth depends on
+        // what is mapped past the table.
+        for input in [
+            &include_bytes!("../../tests/fixtures/ast/parse_ast_crash_2026-10-09.bin")[..],
+            &include_bytes!("../../tests/fixtures/ast/parse_ast_crash_2026-11-17.bin")[..],
+            &include_bytes!("../../tests/fixtures/ast/parse_ast_crash_2026-11-18.bin")[..],
+            &include_bytes!("../../tests/fixtures/ast/parse_ast_crash_2026-11-19.bin")[..],
+        ] {
+            let command = std::str::from_utf8(input).unwrap();
+            assert!(
+                matches!(parse(command), Err(ParseError::ScannerHazard { .. })),
+                "{command:?} reached tree-sitter"
+            );
+        }
     }
 
     #[test]

@@ -852,7 +852,7 @@ impl ParsedViews {
                     "parse failed: {}",
                     view.as_ref().unwrap_err()
                 ))),
-                Err(e @ (ParseError::Timeout | ParseError::TooComplex { .. })) => {
+                Err(e) if e.is_refusal() => {
                     uninspectable.get_or_insert_with(|| e.to_string());
                     continue;
                 }
@@ -1240,6 +1240,22 @@ reason = "ssh read"
 
         let open = match_engine(&MATCH_POLICY.replace("closed", "open"));
         let d = open.evaluate(&bash(input));
+        assert_eq!(d.action, Action::Allow);
+        assert_eq!(d.rule_id.as_deref(), Some("on_failure:open"));
+    }
+
+    #[test]
+    fn a_command_the_parser_refuses_uses_the_configured_failure_posture() {
+        // a `{` + wide character shape is never handed to tree-sitter, so a
+        // match-only rule cannot be evaluated on it
+        let command = "echo {\u{65e5}\u{672c}}";
+        let closed = match_engine(MATCH_POLICY);
+        let d = closed.evaluate(&bash(command));
+        assert_eq!(d.action, Action::Block);
+        assert_eq!(d.rule_id.as_deref(), Some("on_failure:closed"));
+
+        let open = match_engine(&MATCH_POLICY.replace("closed", "open"));
+        let d = open.evaluate(&bash(command));
         assert_eq!(d.action, Action::Allow);
         assert_eq!(d.rule_id.as_deref(), Some("on_failure:open"));
     }
