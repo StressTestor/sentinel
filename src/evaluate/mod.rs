@@ -154,7 +154,9 @@ pub fn run(canary: bool, agent: &str) -> Result<(), Box<dyn std::error::Error>> 
     };
     // log to audit trail
     if let Err(error) = audit_trail::log_event(&audit_trail::AuditEvent {
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now()
+            .display_with_offset(jiff::tz::Offset::UTC)
+            .to_string(),
         tool_name: call.tool_name.clone(),
         action: decision.action.to_string(),
         reason: decision.reason.clone(),

@@ -87,7 +87,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log the detection (action = "detect" — distinct from block/warn/allow).
     if let Err(error) = crate::audit_trail::log_event(&crate::audit_trail::AuditEvent {
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now()
+            .display_with_offset(jiff::tz::Offset::UTC)
+            .to_string(),
         tool_name: "PostToolUse".into(),
         action: "detect".into(),
         reason: Some(format!("secret shape in tool result: {kinds}")),

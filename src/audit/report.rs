@@ -13,7 +13,9 @@ pub fn build_report(agent: &str, corpus_size: usize, results: Vec<AttackResult>)
         results,
         risk_score,
         dimensions,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now()
+            .display_with_offset(jiff::tz::Offset::UTC)
+            .to_string(),
         sentinel_version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }

@@ -1,6 +1,6 @@
 # architecture
 
-last updated: 2026-09-04
+last updated: 2026-11-19
 
 ## overview
 
@@ -24,6 +24,7 @@ acknowledge uncontained host execution with `--unsafe-host`.
 | CLI | clap | 4.x |
 | serialization and config edits | serde, serde_json, toml, toml_edit | 1.x / 0.22 |
 | async runtime | tokio | 1.x |
+| UTC timestamps and audit-window parsing | jiff | 1.x |
 | regex | regex | 1.x |
 | shell parse (C grammar behind FFI, exact pins) | tree-sitter, tree-sitter-bash | 0.25.10 / 0.25.1 |
 | text normalization | unicode-normalization, html-escape | 0.1 / 0.2 |
