@@ -143,7 +143,7 @@ sentinel/
     ├── dependabot.yml      weekly cargo + github-actions update PRs
     └── workflows/
         ├── ci.yml          quality, MSRV, package, Linux, and macOS gates
-        ├── nightly.yml     ten minutes of libFuzzer per target + the bash differential harness, daily
+        ├── nightly.yml     ten minutes of libFuzzer per target (parse_ast under ASan) + the bash differential harness, daily
         ├── claude-code-version-watch.yml  weekly: opens an issue when npm's claude-code moves past the verified version
         ├── release.yml     identity, verification, four targets, SBOM, attest/publish
         ├── codeql.yml      CodeQL static analysis (rust + actions), push/PR + weekly
@@ -278,6 +278,25 @@ uses a best-effort 250 ms progress callback for other inputs. Tree-sitter can
 spend a long period in error recovery without calling back, so the syntax cap
 protects the observed pathological shape. A skipped parse uses tokenizer path
 mining; structured match rules follow the configured `on_failure` posture.
+The shape behind the cap: a command that opens with a bracketed pipe
+(`[s|h]`), runs a pipeline, and ends in a bare `$` doubles tree-sitter's
+stack-merge work per pipe (20 pipes parse in about 20 ms, 32 take over 8 s),
+inside one `stack_node_add_link` call the progress callback cannot interrupt.
+At the cap that shape costs about 0.2 s per evaluation. The count is
+quote-blind, so a policy with match-only rules and `on_failure = "closed"`
+blocks any command with more than 24 `|`, `&`, `<` or `>` bytes; the bundled
+rules all carry a regex and are not affected.
+
+The AST parser also refuses a `{` that is followed, after optional ASCII
+digits or `<digits>..<digits>`, by a character past U+00FF
+(`ParseError::ScannerHazard`). tree-sitter-bash 0.25.1 probes every `{` for a
+`{1..3}` sequence and passes that character to the narrow `isdigit`
+(`scanner.c:1158`, `:1172`), which glibc implements as a table lookup: a wide
+code point reads outside the table and a far one faults. The check mirrors
+the probe and ignores quoting. A refusal of either kind inside a nested
+`sh -c` payload refuses the whole command, because the payload may be valid
+shell. The nightly `parse_ast` job runs under AddressSanitizer with the C
+sources instrumented; the other five targets run without a sanitizer.
 
 Two more differential tests run in ordinary CI. `tests/ast_candidates.rs`
 runs the parse-backed path miner and the tokenizer path over every pinned Bash
@@ -775,5 +794,6 @@ separate gates.
 
 ---
 
-last updated: 2026-11-19 (dependency advisories, bounded AST parsing, and
-whole-command token fallback for path mining).
+last updated: 2026-11-19 (dependency advisories, bounded AST parsing,
+whole-command token fallback for path mining, the scanner-hazard refusal, and
+AddressSanitizer on the nightly parse_ast job).

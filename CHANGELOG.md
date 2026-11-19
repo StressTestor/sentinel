@@ -187,6 +187,19 @@ versioning.
   update those fixtures in the same commit.
 
 ### Security
+- **Refuse brace shapes that make the bash scanner read out of bounds (found
+  by the nightly `parse_ast` fuzzer).** tree-sitter-bash 0.25.1 probes every
+  `{` for a `{1..3}` sequence and passes the next character to the narrow
+  `isdigit` (`scanner.c:1158`, `:1172`). glibc looks the argument up in a
+  table, so a character past U+00FF read outside it and a far code point
+  killed the process with SIGSEGV on a glibc build. macOS range-checks the
+  argument and did not fault. `ast::parse` now returns `ScannerHazard` for a
+  `{` followed, after optional ASCII digits or `<digits>..<digits>`, by a
+  character past U+00FF, before the C parser sees the text, including when
+  only a nested `sh -c` payload spells the shape. Path mining and regex rules
+  run as before on such a command; match-only rules follow `on_failure`. The
+  nightly inputs that reproduce the fault are pinned under
+  `tests/fixtures/ast/`.
 - **Keep ANSI-C decoded text one shell word (found by the bash differential
   harness).** `decode_obfuscation` spliced a decoded `$'..'` body into the
   command bare, so a decoded space or newline split the path at re-tokenization:
